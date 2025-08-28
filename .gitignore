@@ -1,0 +1,61 @@
+# ===============================================================
+# .gitignore for the DGPO-Foundation Project
+# ===============================================================
+
+# --- Python ---
+# Virtual environment folder
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# --- IDEs and Editors ---
+# VSCode
+.vscode/
+# PyCharm
+.idea/
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# --- Datasets and Large Files ---
+# Any raw or processed datasets should not be in the repo.
+# We are using cloud-based datasets, but this is a safeguard.
+*.npz
+*.hdf5
+*.pkl
+*.csv
+*.json
+
+# --- Models ---
+# Pre-trained models are downloaded, not stored in git.
+*.pth
+*.pt
+*.safetensors
+*.ckpt
+
+# --- Logs and Outputs ---
+# Experimental logs from TensorBoard, W&B, etc.
+logs/
+runs/
+wandb/
+
+# --- OS-specific files ---
+# macOS
+.DS_Store
+# Windows
+Thumbs.db
+
+# --- MuJoCo / Robotics Specific ---
+# Exclude the entire menagerie of robot assets, as it's a separate repo.
+# We assume it is cloned as a submodule or manually.
+mujoco_menagerie/
+
+# Exclude the downloaded OCTO model repository
+octo/
+
+# --- Colab Specific ---
+# The default sample data folder in Google Colab
+sample_data/

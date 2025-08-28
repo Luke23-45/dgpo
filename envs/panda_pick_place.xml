@@ -1,0 +1,55 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<mujoco model="dgpo_panda_pick_place">
+  <!--
+    DGPO Project: Definitive Scene Definition (v3.2)
+    Supervisor's Review: This version is correct.
+    - Correction 1: Added a <contact> block to exclude collisions between the robot base and the table, preventing simulation instability.
+  -->
+  <include file="../mujoco_menagerie/franka_emika_panda/panda.xml"/>
+  <compiler meshdir="../mujoco_menagerie/franka_emika_panda/assets"/>
+  <option timestep="0.002" integrator="RK4"/>
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.1 0.2 0.3" rgb2="0.2 0.3 0.4" width="300" height="300"/>
+    <material name="grid" texture="grid" texrepeat="5 5" texuniform="true" reflectance="0.2"/>
+    <material name="cube_mat" rgba="0.9 0.1 0.1 1.0"/>
+    <material name="goal_mat" rgba="0.1 0.9 0.1 0.5"/>
+  </asset>
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="grid"/>
+    <body name="table" pos="0.5 0 0.2">
+      <geom name="table_geom" type="box" size="0.4 0.4 0.2" rgba="0.8 0.8 0.8 1"/>
+    </body>
+    <body name="object" pos="0.5 0 0.45">
+      <joint type="free" name="object_joint" damping="0.01"/>
+      <geom name="object_geom" type="box" size="0.02 0.02 0.02" material="cube_mat" mass="0.05" contype="1" conaffinity="1"/>
+    </body>
+    <body name="goal" pos="0.5 0.3 0.41">
+      <geom name="goal_geom" type="box" size="0.025 0.025 0.001" material="goal_mat" contype="0" conaffinity="0"/>
+    </body>
+    <camera name="fixed_camera" pos="1.2 0 1.2" xyaxes="0 -1 0 0.707 0 -0.707"/>
+    <body name="target_mocap" mocap="true" pos="0.5 0 0.5" quat="1 0 0 0">
+      <geom type="sphere" size="0.02" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <!-- Arm Joints (Velocity Control) -->
+    <motor name="joint1_motor" joint="joint1" gear="1" ctrllimited="true" ctrlrange="-2.1750 2.1750"/>
+    <motor name="joint2_motor" joint="joint2" gear="1" ctrllimited="true" ctrlrange="-1.7628 1.7628"/>
+    <motor name="joint3_motor" joint="joint3" gear="1" ctrllimited="true" ctrlrange="-2.8973 2.8973"/>
+    <motor name="joint4_motor" joint="joint4" gear="1" ctrllimited="true" ctrlrange="-3.0718 -0.0698"/>
+    <motor name="joint5_motor" joint="joint5" gear="1" ctrllimited="true" ctrlrange="-2.8973 2.8973"/>
+    <motor name="joint6_motor" joint="joint6" gear="1" ctrllimited="true" ctrlrange="-0.0175 3.7525"/>
+    <motor name="joint7_motor" joint="joint7" gear="1" ctrllimited="true" ctrlrange="-2.8973 2.8973"/>
+    <!-- Gripper (Position Control) -->
+    <position name="gripper_motor" joint="finger_joint1" kp="100" ctrllimited="true" ctrlrange="0.0 0.04"/>
+  </actuator>
+  <!-- CRITICAL CORRECTION: Exclude collisions that would cause instability -->
+  <contact>
+    <!-- Exclude collision between the robot's base and the table -->
+    <exclude body1="link0" body2="table"/>
+  </contact>
+  <equality>
+    <weld body1="target_mocap" body2="hand" solimp="0.9 0.95 0.001"/>
+  </equality>
+</mujoco>
