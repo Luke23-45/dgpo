@@ -6,8 +6,7 @@ import gymnasium as gym
 from gymnasium import spaces
 from gymnasium.utils import seeding
 from typing import Tuple, Dict
-
-# Assumes this utility exists and is correct.
+from scipy.spatial.transform import Rotation as R
 from utils.mujoco_utils import set_joint_qpos_by_name
 
 class PandaEnv(gym.Env):
@@ -61,6 +60,11 @@ class PandaEnv(gym.Env):
         # --- Random Number Generator ---
         self.np_random, _ = seeding.np_random(None)
 
+        self.ee_site_name = "attachment_site"
+        self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.ee_site_name)
+        if self.ee_site_id == -1:
+            raise ValueError(f"Site '{self.ee_site_name}' not found in the MuJoCo model.")
+
     def _define_spaces(self):
         """Defines the observation and action spaces for the environment."""
         self.observation_space = spaces.Dict({
@@ -68,18 +72,16 @@ class PandaEnv(gym.Env):
               "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
               "image_wrist": spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
               # CORRECT: task_completed is a Box space for a vector of shape (4,).
-              "task_completed": spaces.Box(low=0, high=1, shape=(4,), dtype=np.int64),
+              "task_completed": spaces.Box(low=0, high=1, shape=(4,), dtype=np.int32),
               # CORRECT: timestep is a Box for a vector of shape (1,).
               "timestep": spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(1,), dtype=np.int32),
               # CORRECT: All Discrete spaces for scalar pad masks are correct.
-              "timestep_pad_mask": spaces.Discrete(2),
-              "pad_mask_dict": spaces.Dict({
-                  "image_primary": spaces.Discrete(2),
-                  "image_wrist": spaces.Discrete(2),
-                  "timestep": spaces.Discrete(2),
-              }),
+              "timestep_pad_mask": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
+              "pad_mask_vec": spaces.Box(low=0, high=1, shape=(3,), dtype=np.int32),
               # CORRECT: Internal proprioception space is correct.
-              "internal_full_proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32)
+              "internal_full_proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
+              "proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
+
           })
         num_actuators = int(getattr(self.model, "nu", 0))
         if num_actuators <= 0:
@@ -117,29 +119,19 @@ class PandaEnv(gym.Env):
     def get_ee_pose(self) -> np.ndarray:
         """
         Calculates and returns the current 7D pose of the end-effector.
-
-        The pose consists of the 3D Cartesian position and the 4D orientation
-        quaternion, formatted as [x, y, z, qx, qy, qz, qw] to align with
-        common robotics standards and the expected IK solver input.
-
-        Returns:
-            A NumPy array of shape (7,) containing the end-effector pose.
+        This version is optimized by using a cached site ID.
         """
-        # Ensure the physics state is up-to-date with the latest joint positions
         mujoco.mj_forward(self.model, self.data)
-
-        # Get the 3D position of the end-effector site
-        ee_pos = self.data.site("attachment_site").xpos.copy()
-
-        # Get the 3x3 orientation matrix of the end-effector site
-        ee_orientation_matrix = self.data.site("attachment_site").xmat.copy().reshape(3, 3)
         
-        # Convert the rotation matrix to a quaternion [x, y, z, w]
-        # This is the standard format for scipy's Rotation library
-        ee_quat_xyzw = R.from_matrix(ee_orientation_matrix).as_quat()
-
-        # Concatenate position and orientation to form the 7D pose
-        return np.concatenate([ee_pos, ee_quat_xyzw]).astype(np.float32)
+        # Use the cached ID for efficient access
+        pos = self.data.site_xpos[self.ee_site_id].copy()
+        
+        # site_xmat is a flat 9-element array (row-major 3x3 matrix)
+        rot_matrix = self.data.site_xmat[self.ee_site_id].copy().reshape(3, 3)
+        
+        quat_xyzw = R.from_matrix(rot_matrix).as_quat()
+        
+        return np.concatenate([pos, quat_xyzw]).astype(np.float32)
 
     def _get_obs(self) -> Dict[str, np.ndarray]:
         """
@@ -165,19 +157,17 @@ class PandaEnv(gym.Env):
 
         # 3. Construct the Final Observation Dictionary
         return {
-            # --- Data for OCTO ---
             "image_primary": image_primary,
             "image_wrist": wrist_image_placeholder,
-            "task_completed": task_completed_placeholder,
+            "task_completed": task_completed_placeholder.astype(np.int32), # Use a consistent int type
             "timestep": np.array([self.timestep], dtype=np.int32),
-            "timestep_pad_mask": 1,
-            "pad_mask_dict": {
-                "image_primary": 1,
-                "image_wrist": 0,
-                "timestep": 1,
-            },
-            # --- Data for Our Use (IKSolver) ---
+            
+            # --- FIX: Provide data as NumPy arrays to match Box spaces ---
+            "timestep_pad_mask": np.array([1], dtype=np.int32),
+            "pad_mask_vec": np.array([1, 0, 1], dtype=np.int32),  # Corresponds to image_primary, image_wrist, timestep
+            
             "internal_full_proprio": full_proprio_internal,
+            "proprio": full_proprio_internal,
         }
 
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:

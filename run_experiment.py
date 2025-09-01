@@ -16,7 +16,7 @@ import time
 import argparse
 import logging
 import random
-from typing import Optional
+from typing import Optional,Any
 import gymnasium
 import numpy as np
 import torch
@@ -54,8 +54,16 @@ def resolve_device(device_arg: str) -> str:
     return device_arg
 
 
-def setup_environment(xml_path: str, seed: int, n_envs: int = 1,    octo_model: Optional[Any] = None,
-    w_plausibility: float = 0.1,):
+def setup_environment(
+    xml_path: str,
+    seed: int,
+    n_envs: int = 1,
+    octo_model: Optional[Any] = None,
+    w_plausibility: float = 0.1,
+    pos_scale: float = 0.05,
+    rot_scale: float = 1.0,
+    div_clip: float = 10.0,
+):
     """
     Create a vectorized environment and wrap it with RLRewardWrapper.
     Returns a VecEnv ready for SB3.
@@ -63,7 +71,14 @@ def setup_environment(xml_path: str, seed: int, n_envs: int = 1,    octo_model: 
     def make_env():
         env = PandaEnv(xml_path=xml_path)
         # Pass the new args to the wrapper
-        env = RLRewardWrapper(env, octo_model=octo_model, w_plausibility=w_plausibility)
+        env = RLRewardWrapper(
+            env,
+            octo_model=octo_model,
+            w_plausibility=w_plausibility,
+            pos_scale=pos_scale,
+            rot_scale=rot_scale,
+            div_clip=div_clip
+        )
         return env
 
     vec_env = make_vec_env(lambda: make_env(), n_envs=n_envs, seed=seed)
@@ -121,6 +136,9 @@ def run_experiment(
     device_arg: str,
     n_envs: int = 1,
     w_plausibility: float = 0.1,
+    pos_scale: float = 0.05,
+    rot_scale: float = 1.0,
+    div_clip: float = 10.0,
 ):
     logger.info("🚀 Starting DGPO-Foundation experiment")
     device_str = resolve_device(device_arg)
@@ -135,19 +153,32 @@ def run_experiment(
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    # --- NEW: Load the OCTO model for the divergence reward ---
     logger.info("Loading OCTO model for divergence reward calculation...")
     try:
-        # Keep OCTO on CPU by default to save VRAM for the PPO agent
-        with torch.device("cpu"):
-            octo_model = OctoModel.load_pretrained("hf://rail-berkeley/octo-small-1.5")
+        # Correctly load the model directly onto the CPU
+        octo_device = torch.device("cpu")
+        octo_model = OctoModel.load_pretrained(
+            "hf://rail-berkeley/octo-small-1.5",
+            device=octo_device
+        )
         octo_model.eval() # Set to evaluation mode
-        logger.info("OCTO model loaded successfully.")
+        logger.info("OCTO model loaded successfully onto CPU.")
     except Exception as e:
         logger.error(f"Could not load OCTO model, divergence reward will be disabled. Error: {e}")
         octo_model = None
     # Make env
     logger.info("Creating vectorized environment...")
-    env = setup_environment(xml_path=xml_path, seed=seed, n_envs=n_envs)
+    env = setup_environment(
+        xml_path=xml_path,
+        seed=seed,
+        n_envs=n_envs,
+        octo_model=octo_model,
+        w_plausibility=w_plausibility,
+        pos_scale=pos_scale,
+        rot_scale=rot_scale,
+        div_clip=div_clip
+    )
     logger.info("Environment created")
     # --- 2. Validate Environment and Auto-Select Policy ---
     # Access the underlying single environment to check its properties
@@ -274,6 +305,12 @@ if __name__ == "__main__":
     parser.add_argument("--n_envs", type=int, default=1)
     parser.add_argument("--w_plausibility", type=float, default=0.1, 
                         help="Weight for the OCTO divergence terminal reward.")
+    parser.add_argument("--pos_scale", type=float, default=0.05,
+                        help="Typical position error scale (in meters) for divergence reward.")
+    parser.add_argument("--rot_scale", type=float, default=1.0,
+                        help="Weight for the rotation component of the divergence reward.")
+    parser.add_argument("--div_clip", type=float, default=10.0,
+                        help="Maximum value to clip the raw divergence score before weighting.")
     args = parser.parse_args()
 
     # normalize bc_model_path: accept 'None' literal
@@ -289,6 +326,8 @@ if __name__ == "__main__":
         seed=args.seed,
         device_arg=args.device,
         n_envs=args.n_envs,
-        octo_model=octo_model,
         w_plausibility=args.w_plausibility,
+        pos_scale=args.pos_scale,
+        rot_scale=args.rot_scale,
+        div_clip=args.div_clip,
     )

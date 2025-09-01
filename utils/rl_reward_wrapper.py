@@ -21,15 +21,13 @@ logic from the environment's physics step.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Tuple
-
+from typing import Any, Dict, Optional, Tuple, List
 import gymnasium as gym
 import mujoco
 import numpy as np
-
-logger = logging.getLogger(__name__)
-from typing import Any, List 
 import torch 
+logger = logging.getLogger(__name__)
+
 
 def _safe_norm(vec: np.ndarray) -> float:
     """
@@ -100,6 +98,10 @@ class RLRewardWrapper(gym.Wrapper):
         octo_model: Optional[Any] = None,
         w_plausibility: float = 0.1,
         quat_format: str = "xyzw", 
+        pos_scale: float = 0.05,
+        rot_scale: float = 1.0,
+        div_clip: float = 10.0,
+        div_frame_stride: int = 1,
     ):
         super().__init__(env)
 
@@ -133,12 +135,15 @@ class RLRewardWrapper(gym.Wrapper):
         self._warned = {"ee": False, "geom": False, "goal": False, "gripper": False}
         self.octo_model = octo_model
         self.w_plausibility = w_plausibility
+        self.div_clip = div_clip
         self.quat_format = quat_format
-        
+        self.pos_weight = 1.0 / (pos_scale**2) if pos_scale > 1e-6 else 1.0
+        self.rot_weight = rot_scale
         if self.octo_model:
             self.octo_task = self.octo_model.create_tasks(texts=["pick up the red block"])
         
         self._episode_trajectory: List[Dict[str, np.ndarray]] = []
+        self.div_frame_stride = max(1, div_frame_stride)
 
 
     def _safe_site_pos(self, name: str) -> Optional[np.ndarray]:
@@ -243,7 +248,16 @@ class RLRewardWrapper(gym.Wrapper):
         self._last_dist_ee_to_cube = dist_ee_to_cube
 
         # -- Gripper state --
-        gripper_value = a_np[self.gripper_action_index] if a_np.size > self.gripper_action_index else a_np[-1]
+        if a_np.size > self.gripper_action_index:
+            gripper_value = a_np[self.gripper_action_index]
+        else:
+            gripper_value = a_np[-1]
+            if not self._warned["gripper"]:
+                logger.warning(
+                    f"[RewardWrapper] gripper_action_index={self.gripper_action_index} "
+                    f"out of bounds for action size {a_np.size}; using last element."
+                )
+                self._warned["gripper"] = True
         is_gripping = float(gripper_value) > self.gripper_threshold
 
         # -- R_grasp: Sparse reward for grasping the cube --
@@ -322,59 +336,88 @@ class RLRewardWrapper(gym.Wrapper):
         )
         if self.octo_model and (terminated or truncated):
             divergence_mse = self._calculate_divergence()
-            R_T = -self.w_plausibility * divergence_mse
+            # Clip the raw divergence score before applying weight
+            clipped_divergence = np.clip(divergence_mse, 0.0, self.div_clip)
+            R_T = -self.w_plausibility * clipped_divergence
+            
             reward_total += R_T
             info['R_T_divergence'] = float(R_T)
-            info['divergence_mse'] = float(divergence_mse)
-            
+            info['divergence_raw'] = float(divergence_mse) # Telemetry
+            info['divergence_clipped'] = float(clipped_divergence) # Telemetry
+            info['divergence_enabled'] = True
+            info['divergence_steps'] = len(self._episode_trajectory)
+                
         reward_total = float(np.nan_to_num(reward_total))
         return obs, reward_total, terminated, truncated, info
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _calculate_divergence(self) -> float:
         """
-        Calculates the divergence between the agent's trajectory and OCTO's predictions.
-        Divergence is the Mean Squared Error of the 7D end-effector poses.
+        Calculates a scaled, robust divergence between the agent's trajectory
+        and OCTO's predictions. This version includes critical robustness checks.
         """
-        if not self._episode_trajectory:
+        if not self._episode_trajectory or self.octo_model is None:
             return 0.0
 
-        # 1. Prepare observations and poses from the trajectory buffer
-        obs_list = [t['obs'] for t in self._episode_trajectory]
-        agent_ee_poses = np.stack([t['ee_pose'] for t in self._episode_trajectory])
+        # 1. Subsample the trajectory to save memory and compute
+        trajectory = self._episode_trajectory[::self.div_frame_stride]
+        if not trajectory:
+            return 0.0
+
+        required_keys = ("image_primary", "internal_full_proprio")
+        if not all(k in trajectory[0]['obs'] for k in required_keys):
+            logger.error(f"Missing one of required keys {required_keys} in observation; skipping divergence.")
+            return 0.0
+
+        obs_list = [t['obs'] for t in trajectory]
+        agent_poses = np.stack([t['ee_pose'] for t in trajectory])
+
+        # 2. Prepare data for OCTO, ensuring correct dtype and format
+        images_batch = np.stack([np.asarray(o["image_primary"]) for o in obs_list])
+        proprios_batch = np.stack([np.asarray(o["internal_full_proprio"]) for o in obs_list])
+
+        # Ensure images are HWC float32 in [0, 1] for OCTO
+        if images_batch.shape[1] in (1, 3):
+            images_batch = np.transpose(images_batch, (0, 2, 3, 1))
+        if images_batch.dtype == np.uint8:
+            images_batch = images_batch.astype(np.float32) / 255.0
         
-        images = np.stack([np.asarray(o["image_primary"]) for o in obs_list])
-        proprios = np.stack([np.asarray(o["proprio"]) for o in obs_list])
-
-        # Ensure images are HWC for OCTO's expected input format
-        if images.shape[1] in (1, 3):  # If channels are first (CHW)
-            images = np.transpose(images, (0, 2, 3, 1)) # Convert to HWC
-
-        # 2. Get OCTO's predicted poses in a single batch
         octo_input = {
-            "image_primary": images[:, np.newaxis, ...],    # Add history dimension
-            "proprio": proprios[:, np.newaxis, ...],      # Add history dimension
+            "image_primary": images_batch[:, np.newaxis, ...],
+            "proprio": proprios_batch[:, np.newaxis, ...],
         }
-        predicted_actions_raw = self.octo_model.sample_actions(octo_input, self.octo_task)
-        octo_predicted_poses = np.asarray(predicted_actions_raw[:, 0, :]) # Use first action from history
 
-        # 3. Ensure quaternion formats match before calculating error
-        # The agent's pose is already xyzw. We need to ensure OCTO's is too.
+        # 3. Get OCTO predictions with error handling
+        try:
+            predicted_actions_raw = self.octo_model.sample_actions(octo_input, self.octo_task)
+            octo_poses = np.asarray(predicted_actions_raw[:, 0, :])
+        except Exception as e:
+            logger.error(f"OCTO inference failed during divergence calculation: {e}")
+            return 0.0 # Return zero divergence on failure
+
+        # 4. Align and normalize poses
+        T = min(len(agent_poses), len(octo_poses))
+        if T == 0: return 0.0
+
+        pos_error = agent_poses[:, :3] - octo_poses[:, :3]
+        pos_mse = float(np.mean(np.sum(pos_error * pos_error, axis=-1)))
+        agent_poses, octo_poses = agent_poses[:T], octo_poses[:T]
+
+        def _normalize(q: np.ndarray) -> np.ndarray:
+            """Normalizes a batch of quaternions to unit length."""
+            norm = np.linalg.norm(q, axis=-1, keepdims=True)
+            return q / np.clip(norm, 1e-8, None)
+
+        q_agent = _normalize(agent_poses[:, 3:])
+        q_octo_raw = octo_poses[:, 3:]
+
         if self.quat_format == "wxyz":
-            # Convert OCTO's wxyz output to xyzw for comparison
-            octo_quats_wxyz = octo_predicted_poses[:, 3:]
-            octo_quats_xyzw = octo_quats_wxyz[:, [1, 2, 3, 0]]
-            octo_predicted_poses[:, 3:] = octo_quats_xyzw
+            q_octo_raw = q_octo_raw[:, [1, 2, 3, 0]]
 
-        # 4. Calculate Mean Squared Error for the divergence
-        # Ensure we only compare up to the shortest trajectory length
-        min_len = min(len(agent_ee_poses), len(octo_predicted_poses))
-        if min_len == 0:
-            return 0.0
-            
-        pos_error = np.mean(np.square(agent_ee_poses[:min_len, :3] - octo_predicted_poses[:min_len, :3]))
-        quat_error = np.mean(np.square(agent_ee_poses[:min_len, 3:] - octo_predicted_poses[:min_len, 3:]))
-        
-        total_divergence = pos_error + quat_error
-        
-        return float(total_divergence)
+        q_octo = _normalize(q_octo_raw)
+
+        dot_product = np.clip(np.abs(np.sum(q_agent * q_octo, axis=-1)), -1.0, 1.0)
+        quat_dist_mean = float(np.mean(1.0 - dot_product**2))
+
+        divergence = self.pos_weight * pos_mse + self.rot_weight * quat_dist_mean
+        return float(divergence)
