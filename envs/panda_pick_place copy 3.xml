@@ -1,0 +1,58 @@
+<mujoco model="dgpo_final_scene">
+  <!-- Include Panda robot -->
+  <include file="../mujoco_menagerie/franka_emika_panda/panda.xml"/>
+
+  <compiler meshdir="../mujoco_menagerie/franka_emika_panda/assets" angle="radian" autolimits="true"/>
+  <option timestep="0.002" integrator="RK4" gravity="0 0 -9.81"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <global azimuth="120" elevation="-20"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+  </visual>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.1 0.2 0.3" rgb2="0.2 0.3 0.4" width="300" height="300"/>
+    <material name="grid" texture="grid" texrepeat="5 5" texuniform="true" reflectance="0.2"/>
+    <material name="cube_mat" rgba="0.9 0.1 0.1 1.0"/>
+    <material name="goal_mat" rgba="0.1 0.9 0.1 0.5"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" type="plane" size="0 0 0.05" material="grid"/>
+
+    <!-- Table -->
+    <body name="table" pos="0.5 0 0.2">
+      <geom name="table_geom" type="box" size="0.4 0.4 0.2" rgba="0.8 0.8 0.8 1"/>
+    </body>
+
+    <!-- Robot base anchor -->
+    <body name="robot_base" pos="0.5 0 0.4"/>
+
+    <!-- Cube (resting on table) -->
+    <body name="object" pos="0.55 0 0.42">
+      <joint type="free" name="object_joint" damping="0.05"/>
+      <geom name="object_geom" type="box" size="0.02 0.02 0.02" material="cube_mat" mass="0.25"/>
+    </body>
+
+    <!-- Goal marker (on table surface) -->
+    <body name="goal" pos="0.55 0.2 0.401">
+      <geom name="goal_geom" type="box" size="0.025 0.025 0.001" material="goal_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Camera -->
+    <camera name="fixed_camera" pos="1.2 0 1.2" xyaxes="0 -1 0 0.707 0 -0.707"/>
+  </worldbody>
+
+  <!-- Weld Panda base to our scene base -->
+  <equality>
+    <weld body1="robot_base" body2="link0"/>
+  </equality>
+
+  <!-- Extra contact exclusions -->
+  <contact>
+    <exclude body1="left_finger" body2="table"/>
+    <exclude body1="right_finger" body2="table"/>
+  </contact>
+</mujoco>
