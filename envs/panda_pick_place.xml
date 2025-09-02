@@ -3,7 +3,7 @@
   <include file="../mujoco_menagerie/franka_emika_panda/panda.xml"/>
 
   <compiler meshdir="../mujoco_menagerie/franka_emika_panda/assets" angle="radian" autolimits="true"/>
-  <option timestep="0.002" integrator="RK4" gravity="0 0 -9.81"/>
+  <option timestep="0.002" integrator="RK4" gravity="0 0 -9.81" cone="elliptic"/>
 
   <visual>
     <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
@@ -17,7 +17,9 @@
     <material name="cube_mat" rgba="0.9 0.1 0.1 1.0"/>
     <material name="goal_mat" rgba="0.1 0.9 0.1 0.5"/>
   </asset>
-
+  <default>
+    <geom solref="0.005 1" solimp="0.95 0.99 0.001" friction="1.0 0.1 0.01"/>
+  </default>
   <worldbody>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
     <geom name="floor" type="plane" size="0 0 0.05" material="grid"/>
@@ -34,6 +36,7 @@
     <body name="object" pos="0.6 0 0.41">
       <joint type="free" name="object_joint" damping="0.05"/>
       <geom name="object_geom" type="box" size="0.02 0.02 0.02" material="cube_mat" mass="0.25"/>
+       <site name="object_site" pos="0 0 0" size="0.005" rgba="1 0 0 0.5"/>
     </body>
 
     <!-- Goal marker (on table surface) -->
@@ -42,7 +45,11 @@
     </body>
 
     <!-- Camera -->
-    <camera name="fixed_camera" pos="1.2 0 1.2" xyaxes="0 -1 0 0.707 0 -0.707"/>
+    <!-- <camera name="fixed_camera" pos="1.2 0 1.2" xyaxes="0 -1 0 0.707 0 -0.707"/> -->
+        <camera name="fixed_camera" pos="1.433 -0.047 1.860" xyaxes="0.025 1.000 0.000 -0.781 0.019 0.625"/>
+
+    <camera name="wrist_camera" mode="targetbody" target="hand" pos="0.000 0.000 0.100" xyaxes="1.0 0.0 0.0 0.0 -1.0 0.0" fovy="75"/>
+
   </worldbody>
 
   <!-- Weld Panda base to our scene base -->

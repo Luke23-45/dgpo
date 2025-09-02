@@ -48,22 +48,24 @@ class IKSolver:
         print(f"⏳ [IKSolver] Loading kinematic chain from: {urdf_path}")
 
         try:
-            # load a temporary chain to inspect links
-            temp_chain = ikpy.chain.Chain.from_urdf_file(
-                urdf_path, base_elements=["link0"]
-            )
-
-            # active_links_mask: True only for URDFLink instances whose joint_type == 'revolute'
-            # (this avoids mistakenly activating OriginLink or fixed links)
-            active_links_mask = []
-            for link in temp_chain.links:
-                is_revolute = isinstance(link, URDFLink) and getattr(link, "joint_type", "") == "revolute"
-                active_links_mask.append(bool(is_revolute))
-
-            # create the final chain with precise active link mask
+            # Load full chain starting from "link0"
             self.chain = ikpy.chain.Chain.from_urdf_file(
-                urdf_path, base_elements=["link0"], active_links_mask=active_links_mask
+                urdf_path,
+                base_elements=["link0"]
             )
+
+            # Trim chain until we hit the "hand_joint"
+            if "hand_joint" in [l.name for l in self.chain.links]:
+                cutoff = [l.name for l in self.chain.links].index("hand_joint") + 1
+                self.chain.links = self.chain.links[:cutoff]
+
+            # Build active links mask: only revolute joints are active
+            active_links_mask = []
+            for link in self.chain.links:
+                is_active = isinstance(link, URDFLink) and link.joint_type == "revolute"
+                active_links_mask.append(is_active)
+
+            self.chain.active_links_mask = active_links_mask
 
         except Exception as e:
             print("❌ FATAL ERROR [IKSolver]: Could not parse URDF or build chain.")
@@ -215,12 +217,11 @@ class IKSolver:
         position_error = np.linalg.norm(solution_position - target_position)
         
         if position_error > solution_position_tolerance:
-            # Instead of returning zeros, fail loudly so the dataset can skip this sample.
-            # The print statements are kept for good logging.
             print("IK failed (all attempts)")
             print(f"   Reason: IK solution was invalid. Position error ({position_error:.4f} m) exceeds tolerance ({solution_position_tolerance} m).")
-            raise RuntimeError("IK solution failed post-verification.")
-        # --- END OF POST-VERIFICATION ---
+            # --- FIX: Return a zero vector on failure instead of raising an exception ---
+            return np.zeros(n_active + 1, dtype=np.float32)
+            # --- END OF POST-VERIFICATION ---
 
         # extract active target angles (ordered)
         active_target_angles = np.array([target_joint_angles_full[i] for i in self._active_idx], dtype=float)

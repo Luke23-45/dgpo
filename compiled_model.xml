@@ -2,7 +2,7 @@
   <!-- Include Panda robot -->
   <compiler angle="radian" meshdir="../mujoco_menagerie/franka_emika_panda/assets/"/>
 
-  <option integrator="RK4"/>
+  <option integrator="RK4" cone="elliptic"/>
 
   <visual>
     <global azimuth="120" elevation="-20"/>
@@ -11,9 +11,11 @@
   </visual>
 
   <default>
+    <geom friction="1 0.1 0.01" solref="0.005" solimp="0.95 0.99"/>
     <default class="panda">
       <material shininess="0.25"/>
       <joint range="-2.8973 2.8973" armature="0.1" damping="1"/>
+      <geom friction="1 0.005 0.0001" solref="0.02" solimp="0.9 0.95"/>
       <general ctrlrange="-2.8973 2.8973" forcerange="-87 87" biastype="affine"/>
       <default class="finger">
         <joint type="slide" range="0 0.04"/>
@@ -124,6 +126,7 @@
   <worldbody>
     <geom name="floor" size="0 0 0.05" type="plane" material="grid"/>
     <camera name="fixed_camera" pos="1.2 0 1.2" quat="0.653281 -0.270598 0.270598 -0.653281"/>
+    <camera name="wrist_camera" target="hand" pos="0 0 0.05" quat="0 1 0 0" mode="targetbody" fovy="60"/>
     <light name="top" pos="0 0 2" dir="0 0 -1" mode="trackcom"/>
     <light pos="0 0 1.5" dir="0 0 -1" type="directional"/>
     <body name="link0" childclass="panda">
@@ -250,13 +253,14 @@
         </body>
       </body>
     </body>
-    <body name="table" pos="0.5 0 0.2">
+    <body name="table" pos="0.6 0 0.2">
       <geom name="table_geom" size="0.4 0.4 0.2" type="box" rgba="0.8 0.8 0.8 1"/>
     </body>
-    <body name="robot_base" pos="0.5 0 0.4"/>
-    <body name="object" pos="0.55 0 0.42">
+    <body name="robot_base"/>
+    <body name="object" pos="0.6 0 0.41">
       <joint name="object_joint" type="free" damping="0.05"/>
       <geom name="object_geom" size="0.02 0.02 0.02" type="box" mass="0.25" material="cube_mat"/>
+      <site name="object_site" pos="0 0 0" rgba="1 0 0 0.5"/>
     </body>
     <body name="goal" pos="0.55 0.2 0.401">
       <geom name="goal_geom" size="0.025 0.025 0.001" type="box" contype="0" conaffinity="0" material="goal_mat"/>
@@ -271,7 +275,7 @@
 
   <equality>
     <joint joint1="finger_joint1" joint2="finger_joint2" polycoef="0 1 0 0 0" solref="0.005" solimp="0.95 0.99"/>
-    <weld body1="robot_base" body2="link0" anchor="0 0 0" relpose="-0.5 0 -0.4 1 0 0 0" torquescale="1"/>
+    <weld body1="robot_base" body2="link0" anchor="0 0 0" relpose="0 0 0 1 0 0 0" torquescale="1"/>
   </equality>
 
   <tendon>

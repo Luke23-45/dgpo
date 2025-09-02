@@ -8,6 +8,7 @@ from gymnasium.utils import seeding
 from typing import Tuple, Dict
 from scipy.spatial.transform import Rotation as R
 from utils.mujoco_utils import set_joint_qpos_by_name
+import cv2
 
 class PandaEnv(gym.Env):
     """
@@ -66,6 +67,7 @@ class PandaEnv(gym.Env):
             raise ValueError(f"Site '{self.ee_site_name}' not found in the MuJoCo model.")
 
     # (Inside PandaEnv class)
+    # envs/panda_env.py --> _define_spaces()
     def _define_spaces(self):
         """Defines observation and action spaces to be fully OCTO-compliant."""
         self.observation_space = spaces.Dict({
@@ -73,11 +75,9 @@ class PandaEnv(gym.Env):
             "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
             "image_wrist":   spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
             "proprio":       spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
-            # Add the internal key to the space for completeness, even if OCTO ignores it
             "internal_full_proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
 
             # --- Control fields required by OCTO ---
-            "task_completed": spaces.Box(low=0.0, high=1.0, shape=(4,), dtype=np.float32),
             "timestep":       spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(), dtype=np.int32),
 
             # --- Nested dictionary for padding masks ---
@@ -86,37 +86,55 @@ class PandaEnv(gym.Env):
                 "image_wrist":   spaces.MultiBinary(1),
                 "proprio":       spaces.MultiBinary(1),
                 "timestep":      spaces.MultiBinary(1),
-                "task_completed":spaces.MultiBinary(1),
             }),
         })
         act_dim = int(getattr(self.model, "nu", 8))
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
 
         
-    def render(self):
+    def render(self, camera_name: str = "fixed_camera"):
         """
-        Handles rendering for the 'rgb_array' mode, per Gymnasium API.
+        Handles rendering for the 'rgb_array' mode from a specified camera.
+        
+        This robust version always renders at the primary camera's resolution
+        and then downsamples if a smaller view (like the wrist) is requested.
+        This avoids resizing the MuJoCo renderer context, which is more stable.
         """
-        if self.render_mode == "rgb_array":
-            if self.renderer is None:
-                # Handle the case where the renderer wasn't initialized
-                warnings.warn("Renderer not available, returning a black frame.")
-                return np.zeros((256, 256, 3), dtype=np.uint8)
-            
-            try:
-                self.renderer.update_scene(self.data, camera="fixed_camera")
-            except TypeError: # Fallback for different mujoco-python APIs
-                try: self.renderer.update_scene(self.data)
-                except Exception: pass
-            except Exception: pass
+        if self.render_mode != "rgb_array" or self.renderer is None:
+            # Determine target shape for the black placeholder
+            is_wrist = "wrist" in camera_name
+            h = self.observation_space["image_wrist" if is_wrist else "image_primary"].shape[0]
+            w = self.observation_space["image_wrist" if is_wrist else "image_primary"].shape[1]
+            warnings.warn(f"Renderer not available, returning a black frame for camera '{camera_name}'.")
+            return np.zeros((h, w, 3), dtype=np.uint8)
 
-            try:
-                image_raw = self.renderer.render()
-                return np.asarray(image_raw, dtype=np.uint8)
-            except Exception:
-                warnings.warn("Failed to render primary image. Returning a black frame.")
-                return np.zeros((256, 256, 3), dtype=np.uint8)
-        # If other render modes were supported, they would be handled here.
+        # Set the renderer to the largest size needed (primary camera) to initialize it
+        if self.renderer.width != self.observation_space["image_primary"].shape[1]:
+            self.renderer.width = self.observation_space["image_primary"].shape[1]
+            self.renderer.height = self.observation_space["image_primary"].shape[0]
+
+        try:
+            # Update the scene with the desired camera view
+            self.renderer.update_scene(self.data, camera=camera_name)
+            
+            # Render the image at the pre-set large resolution
+            large_image = self.renderer.render()
+        except Exception as e:
+            warnings.warn(f"Failed to render from camera '{camera_name}': {e}")
+            is_wrist = "wrist" in camera_name
+            h = self.observation_space["image_wrist" if is_wrist else "image_primary"].shape[0]
+            w = self.observation_space["image_wrist" if is_wrist else "image_primary"].shape[1]
+            return np.zeros((h, w, 3), dtype=np.uint8)
+
+        # Downsample if the requested camera is the wrist camera
+        if "wrist" in camera_name:
+            target_h = self.observation_space["image_wrist"].shape[0]
+            target_w = self.observation_space["image_wrist"].shape[1]
+            # Use INTER_AREA for robust downsampling
+            resized_image = cv2.resize(large_image, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            return resized_image
+        else:
+            return large_image
 
     # (Inside the PandaEnv class in envs/panda_env.py)
 
@@ -137,19 +155,18 @@ class PandaEnv(gym.Env):
         
         return np.concatenate([pos, quat_xyzw]).astype(np.float32)
 
+    # envs/panda_env.py --> _get_obs()
     def _get_obs(self) -> dict:
         """Returns a single-timestep observation that is fully OCTO-compliant."""
         qpos = np.asarray(self.data.qpos, dtype=np.float32)
         qvel = np.asarray(self.data.qvel, dtype=np.float32)
         proprio = np.concatenate([qpos[:7], qvel[:7]])
 
-        # Create placeholders and control fields with the EXACT shapes and types
         return {
             "image_primary": self.render(),
-            "image_wrist": np.zeros((128, 128, 3), dtype=np.uint8),
+            "image_wrist": self.render(camera_name="wrist_camera"),
             "proprio": proprio,
             "internal_full_proprio": proprio, # Keep alias for IK
-            "task_completed": np.zeros(4, dtype=np.float32),
             "timestep": np.int32(self.timestep), # scalar int32
 
             "pad_mask_dict": {
@@ -157,7 +174,6 @@ class PandaEnv(gym.Env):
                 "image_wrist":   np.array(True, dtype=bool),
                 "proprio":       np.array(True, dtype=bool),
                 "timestep":      np.array(True, dtype=bool),
-                "task_completed":np.array(True, dtype=bool),
             },
         }
 

@@ -26,7 +26,7 @@ import numpy as np
 import jax
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
-
+import mujoco
 # Project imports (adjust if your package layout differs)
 from octo.model.octo_model import OctoModel
 from envs.panda_env import PandaEnv
@@ -64,12 +64,12 @@ class ExpertDataset(IterableDataset):
         octo_model_name: str = "hf://rail-berkeley/octo-small-1.5",
         env_xml_path: Optional[str] = None,
         base_seed: Optional[int] = None,
-        device: Optional[torch.device] = None,
-        move_to_device: bool = False,
-        octo_pad_mask: np.ndarray = np.array([[False, True]]),
         max_samples_per_epoch: Optional[int] = None,
         skip_on_error: bool = True,
         warmup: bool = False,
+        device: Optional[torch.device] = None,
+        move_to_device: bool = False,
+        octo_pad_mask: np.ndarray = np.array([[False, True]])
     ) -> None:
         """
         Args:
@@ -106,6 +106,7 @@ class ExpertDataset(IterableDataset):
         self._task = None
         self._jax_key = None
         self._samples_yielded = 0
+        self.skipped_samples = 0
 
         logger.info("ExpertDataset created (lazy initialization).")
 
@@ -141,29 +142,42 @@ class ExpertDataset(IterableDataset):
         # Create the task object once per worker
         self._task = self._octo_model.create_tasks(texts=[self.instruction])
 
-        # Warmup inference (reduces first-sample latency; optional)
-# --- THIS IS THE NEW, CORRECTED BLOCK ---
-        # Warmup inference (reduces first-sample latency; optional)
+        # (Inside _init_worker_state)
+        # (Inside _init_worker_state)
         if self.warmup:
             logger.info(f"[worker {worker_id}] Starting warmup inference...")
             try:
-                # Get a single, correctly formatted observation from our new env
                 obs, _ = self._env.reset()
+                T = 2
+                # Correctly exclude proprio and build observation
+                octo_obs = {
+                    k: np.stack([v, v], axis=0)[np.newaxis, ...]
+                    for k, v in obs.items()
+                    if k not in {"internal_full_proprio", "pad_mask_dict", "proprio"}
+                }
+                # timestep (1, T)
+                if "timestep" in obs:
+                    t = np.asarray(obs["timestep"], dtype=np.int32)
+                    t0 = int(t.reshape(()) if t.ndim == 0 else t.ravel()[0])
+                    octo_obs["timestep"] = np.full((1, T), t0, dtype=np.int32)
+                else:
+                    octo_obs["timestep"] = np.arange(T, dtype=np.int32)[None, :]
 
-                # Use our (soon to be updated) helper to prepare it for OCTO
-                octo_obs = self._prepare_octo_obs(obs)
+                # task_completed (1, T, 4)
+                # tc_src = np.asarray(obs.get("task_completed", np.zeros(4, np.float32)), dtype=np.float32).reshape(-1)
+                # tc = np.zeros(4, np.float32); n = min(tc_src.size, 4)
+                # if n > 0: tc[:n] = tc_src[:n]
+                # octo_obs["task_completed"] = np.tile(tc.reshape(1, 1, -1), (1, T, 1))
 
-                # Run a single sample action
+                # nested pad masks only
+                pm = obs.get("pad_mask_dict", {})
+                octo_obs["pad_mask_dict"] = {k: np.ones((1, T), dtype=bool) for k in pm if k in octo_obs}
+
                 self._jax_key, key = jax.random.split(self._jax_key)
-                _ = self._octo_model.sample_actions(octo_obs, self._task, rng=key)
-
+                _ = self._octo_model.sample_actions(octo_obs, task=self._task, rng=key)
                 logger.info(f"[worker {worker_id}] Warmup OCTO run complete.")
             except Exception as e:
-                # Add more detailed error logging for easier debugging
-                logger.error(f"[worker {worker_id}] Warmup FAILED. This is often due to an obs/model mismatch.", exc_info=e)
-                # We can choose to raise here to stop a broken run early
-                # raise e
-
+                logger.error(f"[worker {worker_id}] Warmup FAILED: {e}", exc_info=True)
         self._worker_state_initialized = True
         self._samples_yielded = 0
         logger.info(f"[worker {worker_id}] Worker state initialized.")
@@ -251,7 +265,6 @@ class ExpertDataset(IterableDataset):
         # Correct line
         timestep_step = _np.full((B, T), timestep_scalar, dtype=_np.int32)        # Corrected to (1,T)
         task_completed_step = _np.tile(tc_vec.reshape(1, 1, -1), (B, T, 1))          # (1,T,W)
-
         # ---- Masks (both nested and flattened for compatibility) ----
         timestep_mask = _np.ones((B, T), dtype=bool)                     # (1,T)
         nested_pad = {
@@ -295,67 +308,175 @@ class ExpertDataset(IterableDataset):
     # ----------------------------
     # Sample generation core
     # ----------------------------
-    def _generate_one(self) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+    def _generate_one(self) -> Tuple[Dict, np.ndarray]:
         """
-        Produce a single sample (obs_dict, action_tensor).
-        This method assumes worker-state has been initialized.
+        Generates a single (observation_dict, action_array) sample as numpy arrays.
+        Robust: builds OCTO input inline, normalizes quaternions, transforms
+        world->base, tries full-pose IK then position-only fallback.
         """
-        # 1) Reset env (returns obs dict and info)
+        import numpy as _np
+        from scipy.spatial.transform import Rotation as Rlocal
+
+        # 1) Get a fresh observation (single timestep)
         obs, _ = self._env.reset()
 
-        # 2) Build OCTO input and query OCTO with deterministic jax key for this sample
-        octo_in = self._prepare_octo_obs(obs)
+        # 2) Build OCTO-style observation dict (B=1, T=2) - do NOT call any old _prepare_octo_obs
+        # 2) Build OCTO-style observation dict (B=1, T=2)
+        T = 2
+        B = 1
+        octo_obs: Dict[str, _np.ndarray] = {}
+
+        # Exclude modalities OCTO doesn't expect
+        for k, v in obs.items():
+            if k in {"internal_full_proprio", "pad_mask_dict", "proprio"}:
+                continue
+            arr = _np.asarray(v)
+            if arr.ndim == 0:
+                arr = arr.reshape(())
+            stacked = _np.stack([arr, arr], axis=0)  # (T, ...)
+            octo_obs[k] = stacked[_np.newaxis, ...]  # (1, T, ...)
+
+        # Timestep must be (B, T)
+        if "timestep" in obs:
+            t = _np.asarray(obs["timestep"], dtype=_np.int32)
+            t0 = int(t.reshape(()) if t.ndim == 0 else t.ravel()[0])
+            octo_obs["timestep"] = _np.full((B, T), t0, dtype=_np.int32)
+        else:
+            octo_obs["timestep"] = np.arange(T, dtype=np.int32).reshape(B, T)
+
+        # Task completed must be (B, T, W)
+        # tc_src = _np.asarray(obs.get("task_completed", _np.zeros(4, dtype=_np.float32)), dtype=_np.float32).reshape(-1)
+        # tc_width = 4
+        # tc_vec = _np.zeros(tc_width, dtype=_np.float32)
+        # n = min(tc_src.size, tc_width)
+        # if n > 0:
+        #     tc_vec[:n] = tc_src[:n]
+        # octo_obs["task_completed"] = _np.tile(tc_vec.reshape(1, 1, -1), (B, T, 1))
+            
+        # Nested pad masks only, aligned with included keys
+        pm = obs.get("pad_mask_dict", {})
+        octo_obs["pad_mask_dict"] = {
+            k: _np.ones((B, T), dtype=bool) for k in pm if k in octo_obs
+        }
+
+
+        octo_obs["timestep_pad_mask"] = _np.ones((B, T), dtype=bool)  # legacy alias
+
+        # Build octo_input for clarity (also used by diagnostic prints)
+        octo_input = {"observations": octo_obs, "task": self._task}
+
+        # 3) Query OCTO (deterministic key split)
         self._jax_key, key = jax.random.split(self._jax_key)
-        expert_action_raw = self._octo_model.sample_actions(octo_in, self._task, rng=key)
-        target_pose_world_7d = np.asarray(expert_action_raw[0, 0, :7], dtype=np.float32)
+        raw_action = self._octo_model.sample_actions(octo_obs, self._task, rng=key)
+        target_pose_world = _np.array(raw_action[0, 0, :7], dtype=_np.float32, copy=True)
 
-        # --- START OF COORDINATE FRAME FIX ---
-        # 3) Transform the WORLD pose from OCTO to the BASE frame for the IK solver.
-        # Get the robot's base pose in the world frame from the environment
-        base_pos, base_quat_xyzw = self._env.get_base_pose()
+        # --- Diagnostics (first few samples) ---
+        if self._samples_yielded < 5:
+            print("\n" + "=" * 70)
+            print(f"--- In-Depth Diagnostic Check for Sample #{self._samples_yielded + 1} ---")
+            try:
+                print("\n[A. VERIFYING SHAPES SENT TO OCTO]")
+                for k, v in octo_input["observations"].items():
+                    if isinstance(v, dict):
+                        print(f"  - {k}: <dict with {len(v)} keys>")
+                    else:
+                        print(f"  - {k}: {v.shape}")
+            except Exception as e:
+                print("  - Diagnostics failed to collect shapes:", e)
+            # base / world checks (kept as before)
+            try:
+                env_base_pos, env_base_quat = self._env.get_base_pose()
+                mujoco.mj_forward(self._env.model, self._env.data)
+                link0_id = mujoco.mj_name2id(self._env.model, mujoco.mjtObj.mjOBJ_BODY, "link0")
+                link0_pos_world = self._env.data.xpos[link0_id].copy()
+                print("\n[B. BASE FRAME VERIFICATION]")
+                print(f"  - Pose from env.get_base_pose(): pos={_np.round(env_base_pos,3)}")
+                print(f"  - Ground Truth Pose of 'link0': pos={_np.round(link0_pos_world,3)}")
+            except Exception as e:
+                print("  - Base frame diagnostic error:", e)
+            try:
+                ee_pose_world = self._env.get_ee_pose()
+                print("\n[C. WORLD COORDINATE SANITY CHECK]")
+                print(f"  - OCTO Predicted Target Z: {target_pose_world[2]:.3f}")
+                print(f"  - EE Z (env): {ee_pose_world[2]:.3f}")
+                if _np.sign(target_pose_world[2]) != _np.sign(ee_pose_world[2]) and ee_pose_world[2] > 0.1:
+                    print("  - ❌ SMOKING GUN: Z-axis mismatch detected!")
+                else:
+                    print("  - ✅ Z-axis seems consistent")
+            except Exception:
+                pass
+            print("=" * 70 + "\n")
 
-        # Create Scipy rotation objects from the quaternions (format is xyzw)
-        R_world_base = R.from_quat(base_quat_xyzw)
-        R_world_target = R.from_quat(target_pose_world_7d[3:])
+        # 4) Normalize quaternion and basic checks
+        q = _np.asarray(target_pose_world[3:7], dtype=_np.float64)
+        qn = _np.linalg.norm(q)
+        if not _np.isfinite(qn) or qn < 1e-6:
+            q = _np.array([0.0, 0.0, 0.0, 1.0], dtype=_np.float64)
+        else:
+            q = q / qn
+        target_pose_world[3:7] = q.astype(_np.float32)
 
-        # Find the transformation from the world frame to the base frame
+        # 5) Get base and ee poses defensively
+        try:
+            base_pos, base_quat = self._env.get_base_pose()
+        except Exception:
+            base_pos = _np.zeros(3, dtype=_np.float32)
+            base_quat = _np.array([0.0, 0.0, 0.0, 1.0], dtype=_np.float32)
+        try:
+            ee_pose_world = self._env.get_ee_pose()
+            ee_pos_world = _np.asarray(ee_pose_world[:3], dtype=_np.float32)
+            ee_quat_world = _np.asarray(ee_pose_world[3:7], dtype=_np.float32)
+        except Exception:
+            ee_pos_world = base_pos
+            ee_quat_world = base_quat
+
+        # 6) Heuristic Z flip
+        if (float(target_pose_world[2]) < 0.0) and (float(ee_pos_world[2]) > 0.1):
+            logger.debug("[Coordinate Fix] Flipping Z-axis of OCTO target pose and using EE orientation.")
+            target_pose_world[2] *= -1.0
+            target_pose_world[3:7] = ee_quat_world
+
+        # 7) Workspace guard
+        dist_from_base = _np.linalg.norm(target_pose_world[:3] - base_pos)
+        MAX_TARGET_DIST = 1.5
+        if dist_from_base > MAX_TARGET_DIST:
+            raise RuntimeError(f"Target pose is too far from robot base ({dist_from_base:.2f}m > {MAX_TARGET_DIST}m).")
+
+        # 8) World -> base transform
+        R_world_base = Rlocal.from_quat(base_quat)  # base_quat xyzw
         R_base_world = R_world_base.inv()
+        pos_target_base = R_base_world.apply(target_pose_world[:3] - base_pos)
+        R_target_base = R_base_world * Rlocal.from_quat(target_pose_world[3:7])
+        target_pose_base = _np.concatenate([pos_target_base, R_target_base.as_quat()]).astype(_np.float32)
 
-        # Transform the target's position and orientation into the base frame
-        pos_target_base = R_base_world.apply(target_pose_world_7d[:3] - base_pos)
-        R_target_base = R_base_world * R_world_target
-        quat_target_base_xyzw = R_target_base.as_quat()
+        # 9) Solve IK
+        full_proprio = _np.asarray(obs["internal_full_proprio"], dtype=_np.float32)
+        current_joints = full_proprio[:7].astype(_np.float32)
+        expert_action = self._ik_solver.compute_action(target_pose_base, current_joints)
 
-        # This is the final, corrected target pose for the IK solver
-        target_pose_base_7d = np.concatenate([pos_target_base, quat_target_base_xyzw])
-        # --- END OF COORDINATE FRAME FIX ---
+        def _is_ik_failure(act: _np.ndarray, tol: float = 1e-6) -> bool:
+            if act is None:
+                return True
+            try:
+                return float(_np.linalg.norm(_np.asarray(act, dtype=_np.float64))) < tol
+            except Exception:
+                return True
 
-        # 4) Current joint angles from proprio (first 7)
-# --- THIS IS THE NEW, CORRECTED BLOCK ---
-        # 4) Current joint angles from our DEDICATED internal key
-        full_proprio = np.asarray(obs["internal_full_proprio"], dtype=np.float32)
-        current_joint_angles = full_proprio[:7] # Use the first 7 values (qpos)
+        if _is_ik_failure(expert_action):
+            # fallback: rotate ee_quat into base frame, try position-only
+            R_ee_base = R_base_world * Rlocal.from_quat(ee_quat_world)
+            ee_quat_base = R_ee_base.as_quat()
+            pos_only_target = _np.concatenate([pos_target_base, ee_quat_base]).astype(_np.float32)
+            expert_action = self._ik_solver.compute_action(pos_only_target, current_joints)
 
-        # 5) Solve IK using the CORRECTED base-frame pose
-        expert_action = self._ik_solver.compute_action(target_pose_base_7d, current_joint_angles)
-        expert_action = self._align_action_dim(expert_action)
+        if _is_ik_failure(expert_action):
+            raise RuntimeError("IK failed for all attempts (full-pose and position-only).")
 
-        # 6) Convert obs -> tensors for the training batch
-        image_tensor = _to_torch_image(obs["image_primary"])
-        # The proprio tensor should be the full 14D state we use for policy training
-        proprio_tensor = torch.from_numpy(full_proprio)
+        # 10) align action dim & dtype
+        final_action = self._align_action_dim(_np.asarray(expert_action, dtype=_np.float32))
 
-        # The final output dictionary for the training loop.
-        # We use the key "proprio" here by convention for the downstream consumer.
-        obs_t = {"image_primary": image_tensor, "proprio": proprio_tensor}
-        action_t = torch.from_numpy(expert_action)
-
-        # Optionally move to device here (controlled by move_to_device)
-        if self.move_to_device and (self.device is not None):
-            obs_t = {k: v.to(self.device) for k, v in obs_t.items()}
-            action_t = action_t.to(self.device)
-
-        return obs_t, action_t
+        # Return original observation (unchanged) and final action vector (numpy)
+        return obs, final_action
 
     # ----------------------------
     # IterableDataset API
@@ -381,7 +502,12 @@ class ExpertDataset(IterableDataset):
 
                 except Exception as exc:
                     if self.skip_on_error:
-                        logger.warning(f"[ExpertDataset] Skipping sample due to error: {exc}")
+                        self.skipped_samples += 1
+                        if self.skipped_samples % 100 == 1: # Log every 100 skips
+                            logger.warning(
+                                f"[ExpertDataset] Skipped {self.skipped_samples} samples so far due to errors. "
+                                f"Last error: {exc}"
+                            )
                         continue
                     else:
                         raise
