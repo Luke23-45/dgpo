@@ -171,57 +171,116 @@ class ExpertDataset(IterableDataset):
     # ----------------------------
     # Internal helpers
     # ----------------------------
-# --- THIS IS THE NEW, CORRECTED METHOD ---
-    def _prepare_octo_obs(self, obs: Dict) -> Dict:
+    def _prepare_octo_obs(
+        self,
+        obs: dict,
+        *,
+        task_completed_width: int = 4,
+        duplicate_T: int = 2,
+    ) -> dict:
         """
-        Builds the observation dictionary for OCTO from a single-timestep
-        observation from our PandaEnv.
+        Prepare a single-step env obs into an OCTO-style batched dict.
 
-        This involves:
-        - Stacking arrays to create a history of length 2 (by duplicating).
-        - Adding a batch dimension of 1 to all values.
-        - Matching the exact key structure the model expects.
+        Guarantees:
+          - image_primary: (B,T,H,W,C), dtype preserved (uint8/float)
+          - image_wrist:   (B,T,h,w,c) present (from obs or safe placeholder)
+          - timestep:      (B,T,1) int32
+          - task_completed:(B,T,task_completed_width) float32
+          - pad masks:     both nested pad_mask_dict[*] and flattened 'pad_mask_dict/*'
+          - consistent horizon T across all modalities
+          - excludes 'proprio' from OCTO input (checkpoint flagged it as extra)
         """
-        # Create a dictionary for OCTO, excluding our internal key.
-        # This is a robust way to avoid accidentally passing internal data.
-        octo_obs = {k: v for k, v in obs.items() if k != "internal_full_proprio"}
+        import numpy as _np
 
-        # Stack all single-timestep arrays to create a history of 2
-        for k, v in octo_obs.items():
-            if k == "pad_mask_dict": # Handle nested dictionary
-                octo_obs[k] = {
-                    sub_k: np.stack([sub_v, sub_v]).flatten()
-                    for sub_k, sub_v in v.items()
-                }
-            # The 'task_completed' key also needs to maintain its dimensions
-            elif k == "task_completed":
-                octo_obs[k] = np.stack([v, v], axis=0) # Shape becomes (2, 4)
-            else:
-                # Stack to create the history dimension
-                stacked_v = np.stack([v, v], axis=0)
-                # Only flatten if it's a true vector (like timestep), not an image
-                if stacked_v.ndim > 2:
-                    octo_obs[k] = stacked_v  # Keep shape for images, e.g., (2, H, W, C)
-                else:
-                    octo_obs[k] = stacked_v.flatten() # Flatten for vectors, e.g., (2, 1) -> (2,)
+        # ---- Validate input ----
+        if not isinstance(obs, dict):
+            raise TypeError(
+                "_prepare_octo_obs expected an observation dict (env.reset()[0] style) "
+                f"but received {type(obs)}."
+            )
+        if "image_primary" not in obs:
+            raise KeyError("_prepare_octo_obs: missing required key 'image_primary' in obs")
 
-        # Add the batch dimension (1, ...) to all arrays
-        for k, v in octo_obs.items():
-            if k == "pad_mask_dict":
-                 octo_obs[k] = {
-                    sub_k: sub_v[np.newaxis, ...]
-                    for sub_k, sub_v in v.items()
-                }
-            else:
-                octo_obs[k] = v[np.newaxis, ...]
-        
-        # The provided octo_pad_mask is for the timestep and is already in the right shape.
-        # Let's ensure our internal one doesn't conflict.
-        octo_obs['timestep_pad_mask'] = self.octo_pad_mask
+        # ---- Images: ensure HWC ----
+        img = _np.asarray(obs["image_primary"])
+        if img.ndim != 3:
+            raise ValueError(f"_prepare_octo_obs: expected image_primary with 3 dims HWC/CHW, got shape={img.shape}")
+        img_hwc = _np.transpose(img, (1, 2, 0)) if img.shape[0] in (1, 3) else img  # CHW->HWC if needed
+
+        # Wrist image is expected by your OCTO checkpoint; provide placeholder if absent
+        if "image_wrist" in obs:
+            wrist = _np.asarray(obs["image_wrist"])
+            if wrist.ndim != 3:
+                raise ValueError(f"_prepare_octo_obs: expected image_wrist with 3 dims HWC/CHW, got shape={wrist.shape}")
+            wrist_hwc = _np.transpose(wrist, (1, 2, 0)) if wrist.shape[0] in (1, 3) else wrist
+            wrist_h, wrist_w, wrist_c = wrist_hwc.shape
+        else:
+            # default placeholder size (matches your env)
+            wrist_h, wrist_w, wrist_c = 128, 128, 3
+            wrist_hwc = _np.zeros((wrist_h, wrist_w, wrist_c), dtype=_np.uint8)
+
+        # ---- Control fields ----
+        # timestep: accept scalar-like and normalize to python int
+        timestep_scalar = int(_np.asarray(obs.get("timestep", _np.int32(0)), dtype=_np.int32).reshape(()))
+
+        # task_completed: ensure desired width (pad/truncate)
+        tc_src = _np.asarray(
+            obs.get("task_completed", _np.zeros((task_completed_width,), dtype=_np.float32)),
+            dtype=_np.float32
+        ).reshape(-1)
+        if task_completed_width > 0:
+            tc_vec = _np.zeros((task_completed_width,), dtype=_np.float32)
+            n = min(tc_src.size, task_completed_width)
+            if n > 0:
+                tc_vec[:n] = tc_src[:n]
+        else:
+            tc_vec = tc_src  # unusual, but supported
+
+        # ---- Build (B,T,...) ----
+        B = 1
+        T = int(max(1, duplicate_T))
+
+        # images
+        img_step = img_hwc[_np.newaxis, _np.newaxis, ...]                 # (1,1,H,W,C)
+        wrist_step = wrist_hwc[_np.newaxis, _np.newaxis, ...]             # (1,1,h,w,c)
+        if T > 1:
+            img_step = _np.repeat(img_step, T, axis=1)                    # (1,T,H,W,C)
+            wrist_step = _np.repeat(wrist_step, T, axis=1)                # (1,T,h,w,c)
+
+        # timestep and task_completed with matching horizon
+        # Correct line
+        timestep_step = _np.full((B, T), timestep_scalar, dtype=_np.int32)        # Corrected to (1,T)
+        task_completed_step = _np.tile(tc_vec.reshape(1, 1, -1), (B, T, 1))          # (1,T,W)
+
+        # ---- Masks (both nested and flattened for compatibility) ----
+        timestep_mask = _np.ones((B, T), dtype=bool)                     # (1,T)
+        nested_pad = {
+            "image_primary":  timestep_mask,
+            "image_wrist":    timestep_mask,
+            "timestep":       timestep_mask,
+            "task_completed": timestep_mask,
+        }
+        flattened_pad = {
+            "pad_mask_dict/image_primary":  timestep_mask,
+            "pad_mask_dict/image_wrist":    timestep_mask,
+            "pad_mask_dict/timestep":       timestep_mask,
+            "pad_mask_dict/task_completed": timestep_mask,
+        }
+
+        # ---- Final dict (omit 'proprio' for this OCTO input) ----
+        octo_obs = {
+            "image_primary":  img_step,
+            "image_wrist":    wrist_step,
+            "timestep":       timestep_step,
+            "task_completed": task_completed_step,
+            "pad_mask_dict":  nested_pad,
+            "timestep_pad_mask": timestep_mask,  # legacy alias some OCTO utils still read
+            **flattened_pad,
+        }
 
         return octo_obs
-  
-  
+
+
     def _align_action_dim(self, action: np.ndarray) -> np.ndarray:
         """Clamp/pad/truncate IK output to match environment action dimension."""
         action = np.asarray(action, dtype=np.float32).ravel()

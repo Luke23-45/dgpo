@@ -65,30 +65,34 @@ class PandaEnv(gym.Env):
         if self.ee_site_id == -1:
             raise ValueError(f"Site '{self.ee_site_name}' not found in the MuJoCo model.")
 
+    # (Inside PandaEnv class)
     def _define_spaces(self):
-        """Defines the observation and action spaces for the environment."""
+        """Defines observation and action spaces to be fully OCTO-compliant."""
         self.observation_space = spaces.Dict({
-              # CORRECT: All image spaces are correct.
-              "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
-              "image_wrist": spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
-              # CORRECT: task_completed is a Box space for a vector of shape (4,).
-              "task_completed": spaces.Box(low=0, high=1, shape=(4,), dtype=np.int32),
-              # CORRECT: timestep is a Box for a vector of shape (1,).
-              "timestep": spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(1,), dtype=np.int32),
-              # CORRECT: All Discrete spaces for scalar pad masks are correct.
-              "timestep_pad_mask": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
-              "pad_mask_vec": spaces.Box(low=0, high=1, shape=(3,), dtype=np.int32),
-              # CORRECT: Internal proprioception space is correct.
-              "internal_full_proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
-              "proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
+            # --- Primary modalities ---
+            "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
+            "image_wrist":   spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
+            "proprio":       spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
+            # Add the internal key to the space for completeness, even if OCTO ignores it
+            "internal_full_proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
 
-          })
-        num_actuators = int(getattr(self.model, "nu", 0))
-        if num_actuators <= 0:
-            raise RuntimeError("Loaded model has no actuators (model.nu <= 0). Check your XML.")
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(num_actuators,), dtype=np.float32)
+            # --- Control fields required by OCTO ---
+            "task_completed": spaces.Box(low=0.0, high=1.0, shape=(4,), dtype=np.float32),
+            "timestep":       spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(), dtype=np.int32),
 
+            # --- Nested dictionary for padding masks ---
+            "pad_mask_dict": spaces.Dict({
+                "image_primary": spaces.MultiBinary(1),
+                "image_wrist":   spaces.MultiBinary(1),
+                "proprio":       spaces.MultiBinary(1),
+                "timestep":      spaces.MultiBinary(1),
+                "task_completed":spaces.MultiBinary(1),
+            }),
+        })
+        act_dim = int(getattr(self.model, "nu", 8))
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
 
+        
     def render(self):
         """
         Handles rendering for the 'rgb_array' mode, per Gymnasium API.
@@ -133,41 +137,28 @@ class PandaEnv(gym.Env):
         
         return np.concatenate([pos, quat_xyzw]).astype(np.float32)
 
-    def _get_obs(self) -> Dict[str, np.ndarray]:
-        """
-        Gathers the current observation, formatted precisely for the OCTO model.
-        Rendering is now delegated to the `render()` method.
-        """
-        # 1. Get Real Data from Simulation
-        image_primary = self.render()
-        
-        # --- Robust Proprioception Reading ---
-        qpos = np.asarray(getattr(self.data, "qpos", np.array([])), dtype=float)
-        qvel = np.asarray(getattr(self.data, "qvel", np.array([])), dtype=float)
-        qpos7 = qpos[:7] if qpos.size >= 7 else np.pad(qpos, (0, max(0, 7 - qpos.size)))
-        qvel7 = qvel[:7] if qvel.size >= 7 else np.pad(qvel, (0, max(0, 7 - qvel.size)))
-        full_proprio_internal = np.concatenate([qpos7, qvel7]).astype(np.float32)
+    def _get_obs(self) -> dict:
+        """Returns a single-timestep observation that is fully OCTO-compliant."""
+        qpos = np.asarray(self.data.qpos, dtype=np.float32)
+        qvel = np.asarray(self.data.qvel, dtype=np.float32)
+        proprio = np.concatenate([qpos[:7], qvel[:7]])
 
-        # 2. Create Placeholder Data required by OCTO spec
-        wrist_image_placeholder = np.zeros((128, 128, 3), dtype=np.uint8)
-        
-        # --- THIS IS THE FIX ---
-        # The OCTO model expects a vector of shape (4,) for this key.
-        task_completed_placeholder = np.zeros(4, dtype=np.int64)
-
-        # 3. Construct the Final Observation Dictionary
+        # Create placeholders and control fields with the EXACT shapes and types
         return {
-            "image_primary": image_primary,
-            "image_wrist": wrist_image_placeholder,
-            "task_completed": task_completed_placeholder.astype(np.int32), # Use a consistent int type
-            "timestep": np.array([self.timestep], dtype=np.int32),
-            
-            # --- FIX: Provide data as NumPy arrays to match Box spaces ---
-            "timestep_pad_mask": np.array([1], dtype=np.int32),
-            "pad_mask_vec": np.array([1, 0, 1], dtype=np.int32),  # Corresponds to image_primary, image_wrist, timestep
-            
-            "internal_full_proprio": full_proprio_internal,
-            "proprio": full_proprio_internal,
+            "image_primary": self.render(),
+            "image_wrist": np.zeros((128, 128, 3), dtype=np.uint8),
+            "proprio": proprio,
+            "internal_full_proprio": proprio, # Keep alias for IK
+            "task_completed": np.zeros(4, dtype=np.float32),
+            "timestep": np.int32(self.timestep), # scalar int32
+
+            "pad_mask_dict": {
+                "image_primary": np.array(True, dtype=bool),
+                "image_wrist":   np.array(True, dtype=bool),
+                "proprio":       np.array(True, dtype=bool),
+                "timestep":      np.array(True, dtype=bool),
+                "task_completed":np.array(True, dtype=bool),
+            },
         }
 
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:

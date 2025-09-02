@@ -26,6 +26,7 @@ import gymnasium as gym
 import mujoco
 import numpy as np
 import torch 
+from utils.obs_adapters import octo_batch_from_env_obs
 logger = logging.getLogger(__name__)
 
 
@@ -353,71 +354,209 @@ class RLRewardWrapper(gym.Wrapper):
     @torch.inference_mode()
     def _calculate_divergence(self) -> float:
         """
-        Calculates a scaled, robust divergence between the agent's trajectory
-        and OCTO's predictions. This version includes critical robustness checks.
+        Calculates a robust divergence between the agent's recorded EE-trajectory
+        and OCTO's predicted poses (position + orientation).
+        Returns a scalar float divergence (lower = more plausible).
+        This function is defensive: on any error or mismatch it logs and returns 0.0.
         """
-        if not self._episode_trajectory or self.octo_model is None:
+        # Quick preconditions
+        if not getattr(self, "_episode_trajectory", None):
+            logger.debug("No episode trajectory recorded; divergence=0.0")
+            return 0.0
+        if getattr(self, "octo_model", None) is None:
+            logger.debug("No OCTO model available; divergence=0.0")
             return 0.0
 
-        # 1. Subsample the trajectory to save memory and compute
-        trajectory = self._episode_trajectory[::self.div_frame_stride]
+        # Subsample trajectory to reduce compute
+        stride = max(1, getattr(self, "div_frame_stride", 1))
+        trajectory = self._episode_trajectory[::stride]
         if not trajectory:
+            logger.debug("Trajectory empty after subsampling; divergence=0.0")
             return 0.0
 
-        required_keys = ("image_primary", "internal_full_proprio")
-        if not all(k in trajectory[0]['obs'] for k in required_keys):
-            logger.error(f"Missing one of required keys {required_keys} in observation; skipping divergence.")
+        # Required observation keys: prefer internal_full_proprio, fallback to proprio
+        required_img_key = "image_primary"
+        proprio_key = "internal_full_proprio" if "internal_full_proprio" in trajectory[0]["obs"] else "proprio"
+        if required_img_key not in trajectory[0]["obs"] or proprio_key not in trajectory[0]["obs"]:
+            logger.error("Missing required keys for divergence: "
+                        f"need '{required_img_key}' and '{proprio_key}'; skipping divergence.")
             return 0.0
 
-        obs_list = [t['obs'] for t in trajectory]
-        agent_poses = np.stack([t['ee_pose'] for t in trajectory])
-
-        # 2. Prepare data for OCTO, ensuring correct dtype and format
-        images_batch = np.stack([np.asarray(o["image_primary"]) for o in obs_list])
-        proprios_batch = np.stack([np.asarray(o["internal_full_proprio"]) for o in obs_list])
-
-        # Ensure images are HWC float32 in [0, 1] for OCTO
-        if images_batch.shape[1] in (1, 3):
-            images_batch = np.transpose(images_batch, (0, 2, 3, 1))
-        if images_batch.dtype == np.uint8:
-            images_batch = images_batch.astype(np.float32) / 255.0
-        
-        octo_input = {
-            "image_primary": images_batch[:, np.newaxis, ...],
-            "proprio": proprios_batch[:, np.newaxis, ...],
-        }
-
-        # 3. Get OCTO predictions with error handling
+        # Stack agent poses (should be [N,7] with pos(3)+quat(4))
         try:
-            predicted_actions_raw = self.octo_model.sample_actions(octo_input, self.octo_task)
-            octo_poses = np.asarray(predicted_actions_raw[:, 0, :])
+            agent_poses = np.stack([t["ee_pose"] for t in trajectory], axis=0).astype(np.float32)
+        except Exception as e:
+            logger.error(f"Failed to stack agent poses for divergence: {e}")
+            return 0.0
+
+        # Prepare batches of images and proprios for OCTO
+        try:
+            obs_list = [t["obs"] for t in trajectory]
+
+            # Images: stack, detect CHW vs HWC and convert to HWC
+            images = np.stack([np.asarray(o[required_img_key]) for o in obs_list], axis=0)
+            # If images look like CHW (B, C, H, W) -> convert to (B, H, W, C)
+            if images.ndim == 4 and images.shape[1] in (1, 3):
+                images = np.transpose(images, (0, 2, 3, 1))
+            if images.ndim != 4 or images.shape[-1] not in (1, 3):
+                # Still allow single-channel as 3-channel by repeating, but prefer to log
+                logger.debug(f"Unexpected image shape for divergence: {images.shape}")
+
+            # Convert uint8->[0,1] floats if needed
+            if images.dtype == np.uint8:
+                images = images.astype(np.float32) / 255.0
+            else:
+                images = images.astype(np.float32)
+                # clip to [0,1] if it looks like image floats
+                if images.max() > 2.0:
+                    images = np.clip(images / 255.0, 0.0, 1.0)
+
+            # Proprios
+            proprios = np.stack([np.asarray(o[proprio_key]) for o in obs_list], axis=0).astype(np.float32)
+
+            # --- BEGIN PATCHED OCTO INPUT PREP ---
+
+            B = len(images)
+            T = 1
+
+            # Keep wrist dtype/range consistent with primary
+            # If primary is float32 [0,1], convert wrist to the same
+            wrist_images = np.zeros((B, T, 128, 128, 3), dtype=np.uint8)
+            if images.dtype != np.uint8:  # primary is likely float32 [0,1]
+                wrist_images = wrist_images.astype(np.float32) / 255.0
+
+            task_completed = np.zeros((B, T, 4), dtype=np.float32)
+            timestep = np.zeros((B, T), dtype=np.int32)  # safer default
+
+            # Decide which proprio field name the model expects
+            ex_obs = getattr(self.octo_model, "example_batch", {}).get("observations", {})
+            proprio_field = (
+                "internal_full_proprio" if "internal_full_proprio" in ex_obs
+                else ("proprio" if "proprio" in ex_obs else None)
+            )
+
+            # Build obs dict
+            octo_obs = {
+                "image_primary": images[:, np.newaxis, ...],   # (B,1,H,W,C)
+                "image_wrist":   wrist_images,                  # (B,1,128,128,3) (dtype matched above)
+                "task_completed": task_completed,               # (B,1,4)
+                "timestep":       timestep,                     # (B,1)
+            }
+            if proprio_field is not None:
+                octo_obs[proprio_field] = proprios[:, np.newaxis, ...]  # (B,1,D) under the right key
+
+            # REQUIRED: nested pad_mask_dict inside observations
+            mask = np.ones((B, T), dtype=bool)
+            octo_obs["pad_mask_dict"] = {
+                "image_primary": mask,
+                "image_wrist":   mask,
+                "timestep":      mask,
+            }
+            # include if present in example batch
+            if "task_completed" in ex_obs:
+                octo_obs["pad_mask_dict"]["task_completed"] = mask
+            if proprio_field and proprio_field in ex_obs:
+                octo_obs["pad_mask_dict"][proprio_field] = mask
+
+            # Legacy alias (inside observations is safest for your checkpoint)
+            octo_obs["timestep_pad_mask"] = mask
+
+            # Wrap for the model
+            octo_input = {"observations": octo_obs}
+
+            # (Optional) keep a top-level alias ONLY if some other utility expects it:
+            # octo_input["timestep_pad_mask"] = mask
+
+            # --- END PATCHED OCTO INPUT PREP ---
+
+        except Exception as e:
+            logger.error(f"Failed to prepare OCTO input for divergence: {e}")
+            return 0.0
+
+        # Run OCTO forward (defensive)
+        try:
+            try:
+                if not getattr(self, "_div_schema_checked", False):
+                    from utils.validation import validate_against_example_batch
+                    validate_against_example_batch(self.octo_model, octo_input)
+                    self._div_schema_checked = True
+            except Exception:
+                pass
+            predicted_raw = self.octo_model.sample_actions(octo_input, self.octo_task)
+            # Convert to numpy (handle torch/numpy-like returns)
+            if hasattr(predicted_raw, "cpu") and hasattr(predicted_raw, "numpy"):
+                predicted_raw = predicted_raw.cpu().numpy()
+            predicted_raw = np.asarray(predicted_raw)
+            # Expect shape (B, T, D) or similar -> take [:,0,:]
+            octo_poses = np.asarray(predicted_raw[:, 0, :])
         except Exception as e:
             logger.error(f"OCTO inference failed during divergence calculation: {e}")
-            return 0.0 # Return zero divergence on failure
+            return 0.0
 
-        # 4. Align and normalize poses
-        T = min(len(agent_poses), len(octo_poses))
-        if T == 0: return 0.0
+        # Align lengths
+        try:
+            T = min(agent_poses.shape[0], octo_poses.shape[0])
+            if T == 0:
+                return 0.0
+            agent_poses = agent_poses[:T]
+            octo_poses = octo_poses[:T]
+        except Exception as e:
+            logger.error(f"Failed to align OCTO & agent pose lengths: {e}")
+            return 0.0
 
-        pos_error = agent_poses[:, :3] - octo_poses[:, :3]
-        pos_mse = float(np.mean(np.sum(pos_error * pos_error, axis=-1)))
-        agent_poses, octo_poses = agent_poses[:T], octo_poses[:T]
+        # Position MSE (safe numerics)
+        try:
+            pos_err = agent_poses[:, :3] - octo_poses[:, :3]
+            # per-frame squared error then mean
+            per_frame_sq = np.sum(pos_err * pos_err, axis=-1)
+            pos_mse = float(np.mean(per_frame_sq))
+            if not np.isfinite(pos_mse):
+                pos_mse = float(np.nan_to_num(pos_mse, nan=0.0, posinf=1e6, neginf=1e6))
+        except Exception as e:
+            logger.error(f"Position MSE computation failed: {e}")
+            pos_mse = 0.0
 
-        def _normalize(q: np.ndarray) -> np.ndarray:
-            """Normalizes a batch of quaternions to unit length."""
+        # Quaternion distance (1 - |dot|^2) average
+        def _safe_normalize_quat(q: np.ndarray) -> np.ndarray:
+            q = np.asarray(q, dtype=np.float32)
+            if q.ndim == 1:
+                q = q[np.newaxis, :]
             norm = np.linalg.norm(q, axis=-1, keepdims=True)
-            return q / np.clip(norm, 1e-8, None)
+            norm = np.clip(norm, 1e-8, None)
+            qn = q / norm
+            qn[~np.isfinite(qn)] = 0.0
+            return qn
 
-        q_agent = _normalize(agent_poses[:, 3:])
-        q_octo_raw = octo_poses[:, 3:]
+        try:
+            q_agent = _safe_normalize_quat(agent_poses[:, 3:])
+            q_octo_raw = octo_poses[:, 3:].astype(np.float32)
 
-        if self.quat_format == "wxyz":
-            q_octo_raw = q_octo_raw[:, [1, 2, 3, 0]]
+            # If octo outputs 'wxyz' but we use 'xyzw', convert (configurable)
+            if getattr(self, "quat_format", "xyzw") == "wxyz":
+                # convert wxyz -> xyzw (move first element to last)
+                if q_octo_raw.shape[-1] == 4:
+                    q_octo_raw = q_octo_raw[:, [1, 2, 3, 0]]
+            q_octo = _safe_normalize_quat(q_octo_raw)
 
-        q_octo = _normalize(q_octo_raw)
+            # dot product per-frame, absolute value (handle antipodal equivalence)
+            dot = np.sum(q_agent * q_octo, axis=-1)
+            dot = np.clip(np.abs(dot), 0.0, 1.0)
+            quat_dist_mean = float(np.mean(1.0 - dot * dot))
+            if not np.isfinite(quat_dist_mean):
+                quat_dist_mean = float(np.nan_to_num(quat_dist_mean, nan=0.0, posinf=1e6, neginf=1e6))
+        except Exception as e:
+            logger.error(f"Quaternion divergence computation failed: {e}")
+            quat_dist_mean = 0.0
 
-        dot_product = np.clip(np.abs(np.sum(q_agent * q_octo, axis=-1)), -1.0, 1.0)
-        quat_dist_mean = float(np.mean(1.0 - dot_product**2))
+        # Combine using class weights (fall back to sane defaults)
+        pos_w = float(getattr(self, "pos_weight", 1.0))
+        rot_w = float(getattr(self, "rot_weight", 1.0))
+        divergence = pos_w * pos_mse + rot_w * quat_dist_mean
 
-        divergence = self.pos_weight * pos_mse + self.rot_weight * quat_dist_mean
-        return float(divergence)
+        # Final numeric safety
+        divergence = float(np.nan_to_num(divergence, nan=0.0, posinf=1e6, neginf=1e6))
+        if not np.isfinite(divergence):
+            divergence = 0.0
+
+        logger.debug(f"divergence computed: pos_mse={pos_mse:.6g}, quat={quat_dist_mean:.6g}, total={divergence:.6g}")
+        return divergence

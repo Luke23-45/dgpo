@@ -178,9 +178,117 @@ It then puts this pre-trained agent into our simulated "operating room" (PandaEn
 The agent then performs the task over and over again for hundreds of thousands of steps. It uses its foundational knowledge from Phase 1 as a starting point, but now it learns from the consequences of its own actions—the rewards and penalties from the environment. This is where it learns to chain its knowledge together to perform a full, successful "surgery" (the pick-and-place task).
 The Outcome: The final_policy.zip. This is our fully trained "master surgeon," who has both the book knowledge and the practical experience.
 
+Of course. Now that your entire codebase is robust and fully implemented, let's outline the clear, sequential steps for running your experiments.
+
+This project is designed as a three-stage pipeline. Following these steps in order is crucial for achieving the best results.
+
+---
+
+### **Overview of the Training Workflow**
+
+The entire process follows this sequence:
+
+1.  **Stage 1: Pre-training.** Run `pretrain.py`. This script uses the powerful OCTO model to generate a high-quality "expert" dataset and then uses that data to pre-train your `BCNet` policy via Behavioral Cloning (BC). This gives you a "smart" starting point.
+2.  **Stage 2: Fine-tuning.** Run `run_experiment.py`. This script loads the pre-trained policy from Stage 1 and then uses Reinforcement Learning (PPO) with your custom DGPO-Foundation reward (including the divergence penalty) to master the task.
+3.  **Stage 3 (Optional): Analysis & Baselines.** Run `run_experiment.py` again with different settings to compare your full DGPO-Foundation agent against simpler methods. This is essential for proving that your approach is effective.
+
+---
+
+### **Step-by-Step Training Commands**
+
+Here are the exact commands you should run in your terminal from the project's root directory (`dgpo_project`).
+
+#### **Stage 1: Generate the Dataset and Pre-train the Policy**
+
+This is the foundational step. You only need to do this once.
+
+**Command:**
+```bash
+(venv) C:\...\dgpo_project> python training/pretrain.py --num_samples 20000 --epochs 20 --pretrained_out trained_models/policy_pretrained_bc.zip
+```
+
+**What this command does:**
+
+*   `python training/pretrain.py`: Executes the pre-training script.
+*   `--num_samples 20000`: Generates a dataset with 20,000 expert demonstrations. This is a reasonably large size for good performance. (You can start with a smaller number like 5000 to test the pipeline quickly).
+*   `--epochs 20`: Trains the `BCNet` policy on this dataset for 20 full passes.
+*   `--pretrained_out trained_models/policy_pretrained_bc.zip`: Saves the final, pre-trained Stable Baselines3 agent (which contains your policy) to a specific file.
+
+**Expected Outcome:**
+*   You will see progress bars for data generation and for each training epoch.
+*   A new directory `synthetic_dataset/` will be created with `.npy` files.
+*   A new file `trained_models/policy_pretrained_bc.zip` will be created. This is the crucial artifact we need for the next stage.
+
+---
+
+#### **Stage 2: Fine-tune with the Full DGPO-Foundation Algorithm**
+
+This is the main experiment where you apply the full power of your implementation.
+
+**Command:**
+```bash
+(venv) C:\...\dgpo_project> python run_experiment.py --bc_model_path trained_models/policy_pretrained_bc.zip --run_name DGPO_Foundation_Full --w_plausibility 0.1 --total_timesteps 500000
+```
+
+**What this command does:**
+*   `python run_experiment.py`: Executes the main RL fine-tuning script.
+*   `--bc_model_path trained_models/policy_pretrained_bc.zip`: **Loads the pre-trained model** from Stage 1 as the starting point.
+*   `--run_name DGPO_Foundation_Full`: Gives this experiment a clear name. The results (models, logs) will be saved in `trained_models/DGPO_Foundation_Full/`.
+*   `--w_plausibility 0.1`: **Enables the divergence reward** with a weight of 0.1. This is the key parameter that makes it the DGPO-Foundation algorithm.
+*   `--total_timesteps 500000`: Runs the RL training for 500,000 steps.
+
+**Expected Outcome:**
+*   The script will log that it is loading the OCTO model and the BC checkpoint.
+*   You will see the Stable Baselines3 training progress, including metrics like `ep_rew_mean` (average episode reward).
+*   In the logs, you should see your custom reward components from the wrapper, including `R_T_divergence` at the end of episodes.
+*   Checkpoints will be saved periodically in the `trained_models/DGPO_Foundation_Full/` directory.
+
+---
+
+### **Stage 3: Running Baselines for Comparison (Crucial for Research)**
+
+To prove that your DGPO-Foundation method is effective, you must compare it against simpler approaches. You should run these as separate experiments.
+
+#### **Baseline A: "BC + RL" (No Divergence Reward)**
+
+This tests how much the divergence reward (`R_T`) actually helps. It's the same as your main experiment but with the plausibility weight set to zero.
+
+**Command:**
+```bash
+(venv) C:\...\dgpo_project> python run_experiment.py --bc_model_path trained_models/policy_pretrained_bc.zip --run_name Baseline_BC_plus_RL --w_plausibility 0.0 --total_timesteps 500000
+```
+*   **Key Change:** `--w_plausibility 0.0` **disables the divergence reward.**
+
+#### **Baseline B: "RL from Scratch" (No Pre-training)**
+
+This tests the value of your BC pre-training. It starts with a randomly initialized policy.
+
+**Command:**
+```bash
+(venv) C:\...\dgpo_project> python run_experiment.py --bc_model_path None --run_name Baseline_RL_from_Scratch --w_plausibility 0.0 --total_timesteps 500000
+```
+*   **Key Changes:**
+    *   `--bc_model_path None`: **Skips loading the pre-trained model.** The agent starts from random weights.
+    *   `--w_plausibility 0.0`: The divergence reward is irrelevant without the BC context, so we turn it off.
+
+#### **Baseline C: "BC Only" (Zero-Shot Performance)**
+
+This isn't a training run, but an evaluation step. You would write a separate, simple script to load the model from Stage 1 (`policy_pretrained_bc.zip`) and see how well it performs *without any RL fine-tuning*. This measures the "zero-shot" capability of your pre-trained policy.
+
+### **Summary of Training Flow**
+
+1.  **Run `pretrain.py` ONCE** to get your `policy_pretrained_bc.zip`.
+2.  **Run your main DGPO experiment** using that checkpoint and a `w_plausibility > 0`.
+3.  **Run Baseline A** using that checkpoint but with `w_plausibility = 0`.
+4.  **Run Baseline B** using `bc_model_path=None` and `w_plausibility = 0`.
+5.  After training, compare the learning curves (e.g., using TensorBoard) from `DGPO_Foundation_Full`, `Baseline_BC_plus_RL`, and `Baseline_RL_from_Scratch` to demonstrate the effectiveness of your full algorithm.
+
 python run_experiment.py --run_name "ppo_from_scratch" --bc_model_path None --total_timesteps 500000
 
 
 python run_experiment.py --run_name "dgpo_with_bc_init" --bc_model_path trained_models/policy_pretrained_bc.pth --total_timesteps 500000
 
+
+
+python run_experiment.py --run_name "dgpo_with_bc_init" --bc_model_path trained_models/policy_pretrained_bc.pth --total_timesteps 100000
 

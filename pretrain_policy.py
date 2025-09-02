@@ -32,6 +32,8 @@ from envs.panda_env import PandaEnv
 from utils.ik_solver import IKSolver
 from stable_baselines3 import PPO
 import gc
+from utils.obs_adapters import octo_batch_from_env_obs
+from utils.validation import validate_against_example_batch # <-- ADD THIS
 
 logger = logging.getLogger("pretrain")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -221,18 +223,25 @@ def generate_synthetic_dataset(
                 seed = deterministic_env_seed + i_written if deterministic_env_seed is not None else None
                 obs, _ = env.reset(seed=seed)
                 
-                image_np = np.asarray(obs["image_primary"])
-                # OCTO expects HWC images in its observation dictionary
-                image_for_octo = np.transpose(image_np, (1, 2, 0)) if image_np.shape[0] in (1, 3) else image_np
-                
-                octo_obs = {
-                    "image_primary": image_for_octo[np.newaxis, np.newaxis, ...],
-                    "proprio": np.asarray(obs["proprio"])[np.newaxis, np.newaxis, ...],
-                    "timestep_pad_mask": np.array([[True, True]])
-                }
+                # We create a batch of B=1 and a history of T=2 (by duplicating the step)
+                octo_obs = octo_batch_from_env_obs(obs, B=1, T=2, task_completed_dim=4)
 
+                # Some OCTO versions expect observations nested under a top-level key
+                octo_input = {"observations": octo_obs}
+                
+                # Add the global pad mask that some OCTO checkpoints require
+                octo_input["timestep_pad_mask"] = np.array([[True, True]])
+                if i_written == 0: # Only validate on the very first sample
+                    is_valid = validate_against_example_batch(octo_model, octo_input)
+                    if not is_valid:
+                        raise RuntimeError("OCTO input validation failed. Check env and adapter. Aborting.")
+                # Now, sample the action using the correctly formatted input
+                assert octo_model is not None, "OCTO model is None, cannot sample actions."
                 rng, key = jax.random.split(rng)
-                action_raw = np.asarray(octo_model.sample_actions(octo_obs, task, rng=key))
+                action_raw = np.asarray(octo_model.sample_actions(octo_input, task, rng=key))
+
+
+
                 target_pose_world_7d = action_raw.reshape(-1, action_raw.shape[-1])[0]
 
                 base_pos, base_quat = env.get_base_pose()
