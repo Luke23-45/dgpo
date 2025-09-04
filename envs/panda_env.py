@@ -65,11 +65,7 @@ class PandaEnv(gym.Env):
         self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.ee_site_name)
         if self.ee_site_id == -1:
             raise ValueError(f"Site '{self.ee_site_name}' not found in the MuJoCo model.")
-        self._for_sb3 = for_sb3
-        if self._for_sb3:
-            self._define_spaces_sb3()
-        else:
-            self._define_spaces()
+
     # (Inside PandaEnv class)
     # envs/panda_env.py --> _define_spaces()
     def _define_spaces(self):
@@ -218,10 +214,8 @@ class PandaEnv(gym.Env):
         Returns a rich observation dictionary tailored specifically for use by
         the ExpertDataset and ScriptedExpert. This method is non-breaking.
         """
-        if self._for_sb3:
-            obs = self._get_obs_sb3()
-        else:
-            obs = self._get_obs()
+
+        obs = self._get_obs()
 
         # Add the ground-truth information needed by the scripted expert
         obs["ee_pose_world"] = self.get_ee_pose() # get_ee_pose is already compliant
@@ -320,38 +314,4 @@ class PandaEnv(gym.Env):
         return pos, quat_xyzw
     
 
-    def _define_spaces_sb3(self):
-        """Defines SB3-COMPATIBLE observation and action spaces (flattened)."""
-        self.observation_space = spaces.Dict({
-            "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
-            "image_wrist":   spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
-            "proprio":       spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
-            "internal_full_proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
-            "timestep":      spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(), dtype=np.int32),
-            # Flattened padding masks for SB3 compatibility
-            "pad_mask_image_primary": spaces.MultiBinary(1),
-            "pad_mask_image_wrist":   spaces.MultiBinary(1),
-            "pad_mask_proprio":       spaces.MultiBinary(1),
-            "pad_mask_timestep":      spaces.MultiBinary(1),
-        })
-        act_dim = int(getattr(self.model, "nu", 8))
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
 
-    def _get_obs_sb3(self) -> dict:
-        """Returns an SB3-COMPATIBLE observation (flattened)."""
-        qpos = np.asarray(self.data.qpos, dtype=np.float32)
-        qvel = np.asarray(self.data.qvel, dtype=np.float32)
-        proprio = np.concatenate([qpos[:7], qvel[:7]])
-
-        return {
-            "image_primary": self.render(),
-            "image_wrist": self.render(camera_name="wrist_camera"),
-            "proprio": proprio,
-            "internal_full_proprio": proprio,
-            "timestep": np.int32(self.timestep),
-            # The observation dict now matches the flattened space
-            "pad_mask_image_primary": np.array([True], dtype=bool),
-            "pad_mask_image_wrist":   np.array([True], dtype=bool),
-            "pad_mask_proprio":       np.array([True], dtype=bool),
-            "pad_mask_timestep":      np.array([True], dtype=bool),
-        }

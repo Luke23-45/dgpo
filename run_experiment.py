@@ -30,14 +30,14 @@ from stable_baselines3.common.utils import set_random_seed
 from octo.model.octo_model import OctoModel
 from gymnasium import spaces 
 from models.custom_sb3_extractor import BCFeaturesExtractor 
-
+from utils.obs_adapters import OctoToSB3Adapter
 
 # weight transfer utility: try to import from the most likely path
 try:
     from utils.transfer_bc_to_ppo import transfer_bc_weights
 except Exception:
     try:
-        from utils.transfer_bc_to_ppo import transfer_bc_weights
+        from utils.transfer_bc_weights import transfer_bc_weights
     except Exception:
         transfer_bc_weights = None  # we'll check before calling
 
@@ -49,6 +49,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger("dgpo.run_experiment")
+
+# In run_experiment.py, add this new wrapper class
+
 
 def _resize_hwc(img_hwc: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
     """
@@ -178,6 +181,10 @@ class DropKeysWrapper(gym.ObservationWrapper):
         return {k: v for k, v in obs.items()
                 if k in self.observation_space.spaces}
 
+# In file: run_experiment.py
+
+# --- Replace the entire setup_environment function with this definitive version ---
+
 def setup_environment(
     xml_path: str,
     seed: int,
@@ -192,35 +199,35 @@ def setup_environment(
     wrist_res: Tuple[int, int] = (96, 96),
 ):
     """
-    Create a vectorized environment and wrap it with RLRewardWrapper.
-    Returns a VecEnv ready for SB3.
+    Create a vectorized environment with the correct wrapper order, using the
+    centralized OctoToSB3Adapter to handle all necessary transformations.
     """
     def make_env():
-        env = PandaEnv(xml_path=xml_path, for_sb3=True)
+        # 1. Create the base environment. It produces nested OCTO-style observations.
+        env = PandaEnv(xml_path=xml_path)
+
+        # 2. Apply the reward wrapper. It receives the correct nested obs and can use the OCTO model.
         env = RLRewardWrapper(env, octo_model=octo_model,
                               w_plausibility=w_plausibility,
                               pos_scale=pos_scale, rot_scale=rot_scale, div_clip=div_clip)
 
-        # --- Correct wrapper order ---
-        # env = FlattenNestedDictObs(env) need to check but commenting now
-        env = DropKeysWrapper(env, drop_prefixes=("pad_mask_dict/",))
-        env = TransposeImageDict(env)
+        # 3. Apply the SB3 adapter LAST. It handles key filtering, image transposition,
+        #    and flattening, preparing the observation perfectly for the PPO agent.
+        env = OctoToSB3Adapter(env)
+
+        # 4. (Optional) Apply downsampling after the main adapter.
         if enable_downsample:
-            res_map = {}
-            if "image_primary" in env.observation_space.spaces:
-                res_map["image_primary"] = primary_res
-            if "image_wrist" in env.observation_space.spaces:
-                res_map["image_wrist"] = wrist_res
-            if res_map:
-                env = DownsampleImageWrapper(env, res_map)
-        env = SanitizeDictObs(env)
+            res_map = {
+                "image_primary": primary_res,
+                "image_wrist": wrist_res,
+            }
+            env = DownsampleImageWrapper(env, res_map)
 
         return env
 
 
     vec_env = make_vec_env(lambda: make_env(), n_envs=n_envs, seed=seed)
     return vec_env
-
 
 def initialize_ppo_agent(env, ppo_config: dict, seed: int, policy: str):
     """

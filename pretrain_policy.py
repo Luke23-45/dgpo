@@ -33,6 +33,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from utils.obs_adapters import OctoToSB3Adapter 
 
 # ---------------------------
 # Project imports (Phase-1)
@@ -428,11 +429,11 @@ def _export_to_sb3_zip(
     if PPO is None or PandaEnv is None or transfer_bc_weights is None:
         raise RuntimeError("SB3 export requested but stable_baselines3/PandaEnv/transfer function are unavailable.")
 
-    # Instantiate env (try both signatures)
-    try:
-        env = PandaEnv(env_xml_path=env_xml_path, for_sb3=True)
-    except TypeError:
-        env = PandaEnv(for_sb3=True)
+    logger.info("Creating base PandaEnv for SB3 export...")
+    env = PandaEnv(xml_path=env_xml_path)
+    
+    logger.info("Applying OctoToSB3Adapter to make the environment SB3-compatible...")
+    env = OctoToSB3Adapter(env)
 
     # Guard: action dim must match
     env_act_dim = int(env.action_space.shape[0])

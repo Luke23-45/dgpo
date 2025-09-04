@@ -26,6 +26,8 @@ import gymnasium as gym
 import mujoco
 import numpy as np
 import torch 
+from utils.obs_adapters import build_octo_batch_from_list
+import jax
 logger = logging.getLogger(__name__)
 
 
@@ -144,6 +146,7 @@ class RLRewardWrapper(gym.Wrapper):
         
         self._episode_trajectory: List[Dict[str, np.ndarray]] = []
         self.div_frame_stride = max(1, div_frame_stride)
+        self._rng = jax.random.PRNGKey(0)
 
 
     def _safe_site_pos(self, name: str) -> Optional[np.ndarray]:
@@ -349,6 +352,42 @@ class RLRewardWrapper(gym.Wrapper):
                 
         reward_total = float(np.nan_to_num(reward_total))
         return obs, reward_total, terminated, truncated, info
+    def _print_dict_structure(self, d, indent=0):
+        """Helper to recursively print the structure of a dictionary for debugging."""
+        for key, value in d.items():
+            if isinstance(value, dict):
+                logger.info(f"{'  ' * indent}{key} (dict):")
+                self._print_dict_structure(value, indent + 1)
+            elif hasattr(value, 'shape') and hasattr(value, 'dtype'):
+                logger.info(f"{'  ' * indent}{key}: shape={value.shape}, dtype={value.dtype}")
+            else:
+                logger.info(f"{'  ' * indent}{key}: {type(value)}")
+
+    def _normalize_bt(self, batch: dict) -> dict:
+        """
+        Ensure all arrays are shaped (B, T, ...) with B=1, not (T, 1, ...).
+        This is a critical fix to align the trajectory batch with the OCTO model's
+        single-task (B=1) expectation.
+        """
+        out = {}
+        for k, v in batch.items():
+            if k == "pad_mask_dict" and isinstance(v, dict):
+                inner = {}
+                for kk, vv in v.items():
+                    arr = np.asarray(vv)
+                    if arr.ndim >= 2 and arr.shape[0] != 1 and arr.shape[1] == 1:
+                        inner[kk] = np.swapaxes(arr, 0, 1)  # (T,1,...) -> (1,T,...)
+                    else:
+                        inner[kk] = arr
+                out[k] = inner
+            else:
+                arr = np.asarray(v)
+                if arr.ndim >= 2 and arr.shape[0] != 1 and arr.shape[1] == 1:
+                    out[k] = np.swapaxes(arr, 0, 1) # (T,1,...) -> (1,T,...)
+                else:
+                    out[k] = arr
+        return out
+
 
     @torch.inference_mode()
     def _calculate_divergence(self) -> float:
@@ -365,14 +404,17 @@ class RLRewardWrapper(gym.Wrapper):
         if getattr(self, "octo_model", None) is None:
             logger.debug("No OCTO model available; divergence=0.0")
             return 0.0
-
-        # Subsample trajectory to reduce compute
+        # logger.info("==========================================================")
+        # logger.info(">>> ENTERING _calculate_divergence <<<")
+        # # Subsample trajectory to reduce compute
         stride = max(1, getattr(self, "div_frame_stride", 1))
         trajectory = self._episode_trajectory[::stride]
         if not trajectory:
             logger.debug("Trajectory empty after subsampling; divergence=0.0")
             return 0.0
-
+        MAX_HORIZON = 8  # or better: octo_model.config.max_horizon if exposed
+        if len(trajectory) > MAX_HORIZON:
+            trajectory = trajectory[-MAX_HORIZON:]
         # Required observation keys: prefer internal_full_proprio, fallback to proprio
         required_img_key = "image_primary"
         proprio_key = "internal_full_proprio" if "internal_full_proprio" in trajectory[0]["obs"] else "proprio"
@@ -388,108 +430,63 @@ class RLRewardWrapper(gym.Wrapper):
             logger.error(f"Failed to stack agent poses for divergence: {e}")
             return 0.0
 
-        # Prepare batches of images and proprios for OCTO
+
+
         try:
+            # Get the list of raw environment observations from the trajectory
             obs_list = [t["obs"] for t in trajectory]
+            
+            # Use the single, correct source of truth to build the entire batch.
+            octo_input_batch = build_octo_batch_from_list(obs_list)
 
-            # Images: stack, detect CHW vs HWC and convert to HWC
-            images = np.stack([np.asarray(o[required_img_key]) for o in obs_list], axis=0)
-            # If images look like CHW (B, C, H, W) -> convert to (B, H, W, C)
-            if images.ndim == 4 and images.shape[1] in (1, 3):
-                images = np.transpose(images, (0, 2, 3, 1))
-            if images.ndim != 4 or images.shape[-1] not in (1, 3):
-                # Still allow single-channel as 3-channel by repeating, but prefer to log
-                logger.debug(f"Unexpected image shape for divergence: {images.shape}")
-
-            # Convert uint8->[0,1] floats if needed
-            if images.dtype == np.uint8:
-                images = images.astype(np.float32) / 255.0
-            else:
-                images = images.astype(np.float32)
-                # clip to [0,1] if it looks like image floats
-                if images.max() > 2.0:
-                    images = np.clip(images / 255.0, 0.0, 1.0)
-
-            # Proprios
-            proprios = np.stack([np.asarray(o[proprio_key]) for o in obs_list], axis=0).astype(np.float32)
-
-            # --- BEGIN PATCHED OCTO INPUT PREP ---
-
-            B = len(images)
-            T = 1
-
-            # Keep wrist dtype/range consistent with primary
-            # If primary is float32 [0,1], convert wrist to the same
-            wrist_images = np.zeros((B, T, 128, 128, 3), dtype=np.uint8)
-            if images.dtype != np.uint8:  # primary is likely float32 [0,1]
-                wrist_images = wrist_images.astype(np.float32) / 255.0
-
-            task_completed = np.zeros((B, T, 4), dtype=np.float32)
-            timestep = np.zeros((B, T), dtype=np.int32)  # safer default
-
-            # Decide which proprio field name the model expects
-            ex_obs = getattr(self.octo_model, "example_batch", {}).get("observations", {})
-            proprio_field = (
-                "internal_full_proprio" if "internal_full_proprio" in ex_obs
-                else ("proprio" if "proprio" in ex_obs else None)
-            )
-
-            # Build obs dict
-            octo_obs = {
-                "image_primary": images[:, np.newaxis, ...],   # (B,1,H,W,C)
-                "image_wrist":   wrist_images,                  # (B,1,128,128,3) (dtype matched above)
-                "task_completed": task_completed,               # (B,1,4)
-                "timestep":       timestep,                     # (B,1)
-            }
-            if proprio_field is not None:
-                octo_obs[proprio_field] = proprios[:, np.newaxis, ...]  # (B,1,D) under the right key
-
-            # REQUIRED: nested pad_mask_dict inside observations
-            mask = np.ones((B, T), dtype=bool)
-            octo_obs["pad_mask_dict"] = {
-                "image_primary": mask,
-                "image_wrist":   mask,
-                "timestep":      mask,
-            }
-            # include if present in example batch
-            if "task_completed" in ex_obs:
-                octo_obs["pad_mask_dict"]["task_completed"] = mask
-            if proprio_field and proprio_field in ex_obs:
-                octo_obs["pad_mask_dict"][proprio_field] = mask
-
-            # Legacy alias (inside observations is safest for your checkpoint)
-          
-
-            # Wrap for the model
-            octo_input = {"observations": octo_obs}
-            octo_obs["timestep_pad_mask"] = mask
-            # (Optional) keep a top-level alias ONLY if some other utility expects it:
-            # octo_input["timestep_pad_mask"] = mask
-
-            # --- END PATCHED OCTO INPUT PREP ---
+            if not octo_input_batch:
+                logger.warning("Observation adapter returned an empty batch for divergence check.")
+                return 0.0
 
         except Exception as e:
-            logger.error(f"Failed to prepare OCTO input for divergence: {e}")
+            logger.error(f"Failed to prepare OCTO input for divergence using adapter: {e}")
             return 0.0
+        
 
+        # logger.info(f"Step 1: Trajectory collected with {len(obs_list)} observations.")
+        # logger.info("Structure of the FIRST raw observation from the environment (obs_list[0]):")
+        # self._print_dict_structure(obs_list[0])
+        # logger.info("Step 2: Batch created by `build_octo_batch_from_list`.")
+        # logger.info("Final structure of `octo_input_batch` being passed to model:")
+        # self._print_dict_structure(octo_input_batch)
         # Run OCTO forward (defensive)
         try:
             try:
                 if not getattr(self, "_div_schema_checked", False):
                     from utils.validation import validate_against_example_batch
-                    validate_against_example_batch(self.octo_model, octo_input)
+                    validate_against_example_batch(self.octo_model, octo_input_batch)
                     self._div_schema_checked = True
             except Exception:
                 pass
-            predicted_raw = self.octo_model.sample_actions(octo_input, self.octo_task)
+            octo_input_batch = self._normalize_bt(octo_input_batch)
+            
+            assert octo_input_batch['image_primary'].shape[0] == 1, \
+                f"Batch normalization failed! Shape is {octo_input_batch['image_primary'].shape}"
+            self._rng, subkey = jax.random.split(self._rng)
+            predicted_raw = self.octo_model.sample_actions(octo_input_batch, self.octo_task,  rng=subkey)
             # Convert to numpy (handle torch/numpy-like returns)
             if hasattr(predicted_raw, "cpu") and hasattr(predicted_raw, "numpy"):
                 predicted_raw = predicted_raw.cpu().numpy()
+            
             predicted_raw = np.asarray(predicted_raw)
-            # Expect shape (B, T, D) or similar -> take [:,0,:]
-            octo_poses = np.asarray(predicted_raw[:, 0, :])
+            if predicted_raw.ndim == 3: 
+                octo_poses = predicted_raw[:, 0, :]
+            elif predicted_raw.ndim == 2: 
+                octo_poses = predicted_raw
+            else:
+                logger.error(f"Unexpected action shape from OCTO model: {predicted_raw.shape}. Skipping divergence.")
+                return 0.0
         except Exception as e:
             logger.error(f"OCTO inference failed during divergence calculation: {e}")
+            logger.error("!!! OCTO INFERENCE FAILED !!!")
+            logger.error(f"    ERROR TYPE: {type(e).__name__}")
+            logger.error(f"    ERROR MESSAGE: {e}")
+            logger.info("==========================================================")
             return 0.0
 
         # Align lengths
