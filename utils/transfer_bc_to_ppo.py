@@ -92,7 +92,7 @@ def transfer_bc_weights(
     # prefix_map: common BC module prefixes -> PPO policy prefixes
     prefix_map = {
         "cnn.": "features_extractor.cnn.",
-        "proprio_mlp.": "features_extractor.mlp.",
+        "proprio_mlp.": "features_extractor.proprio_mlp.",
         # common alternate BC naming can be added here if needed
     }
 

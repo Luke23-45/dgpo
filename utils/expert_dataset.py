@@ -31,6 +31,9 @@ import mujoco
 from octo.model.octo_model import OctoModel
 from envs.panda_env import PandaEnv
 from utils.ik_solver import IKSolver
+from utils.scripted_expert import ScriptedExpert, ExpertConfig
+from utils.controls import gripper_action_to_ctrl
+from utils.obs_adapters import build_octo_observation
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -67,6 +70,8 @@ class ExpertDataset(IterableDataset):
         max_samples_per_epoch: Optional[int] = None,
         skip_on_error: bool = True,
         warmup: bool = False,
+        use_octo: bool = True, # Flag to enable/disable OCTO
+        scripted_cfg: ExpertConfig = ExpertConfig(), # Config for our fallback expert
         device: Optional[torch.device] = None,
         move_to_device: bool = False,
         octo_pad_mask: np.ndarray = np.array([[False, True]])
@@ -100,13 +105,15 @@ class ExpertDataset(IterableDataset):
 
         # Worker-local attributes (initialized in __iter__)
         self._worker_state_initialized = False
-        self._octo_model = None
+        self.use_octo = bool(use_octo)
         self._env = None
         self._ik_solver = None
         self._task = None
         self._jax_key = None
         self._samples_yielded = 0
         self.skipped_samples = 0
+        self.scripted_cfg = scripted_cfg
+        self._scripted_expert: Optional[ScriptedExpert] = None # Add placeholder
 
         logger.info("ExpertDataset created (lazy initialization).")
 
@@ -115,183 +122,27 @@ class ExpertDataset(IterableDataset):
     # ----------------------------
     def _init_worker_state(self) -> None:
         """Initialize heavy objects per worker. Safe to call multiple times (idempotent)."""
-        if self._worker_state_initialized:
-            return
 
-        worker_info = get_worker_info()  # None if single-process DataLoader
+        worker_info = get_worker_info()
         worker_id = 0 if worker_info is None else worker_info.id
-
-        # Deterministic per-worker seeds: base_seed + worker_id
-        seed = (self.base_seed if self.base_seed is not None else int(time.time() * 1e6) & 0x7FFFFFFF)
+        seed = (self.base_seed if self.base_seed is not None else int(time.time() * 1e6))
         worker_seed = (seed + worker_id) & 0x7FFFFFFF
-
-        # Make jax key deterministic per worker
-        self._jax_key = jax.random.PRNGKey(worker_seed)
-
-        # Initialize OCTO, Env, IK solver
-        logger.info(f"[worker {worker_id}] Initializing OctoModel, PandaEnv, IKSolver with seed={worker_seed}...")
-        # OctoModel - may perform network IO; calling load_pretrained inside worker isolates it
-        self._octo_model = OctoModel.load_pretrained(self.octo_model_name)
-        # PandaEnv - allow passing XML path if provided
-        if self.env_xml_path:
-            self._env = PandaEnv(xml_path=self.env_xml_path)
-        else:
-            self._env = PandaEnv()
-        # IKSolver reads the URDF
+        
+        logger.info(f"[worker {worker_id}] Initializing components with seed {worker_seed}...")
+        if self.use_octo:
+            self._octo_model = OctoModel.load_pretrained(self.octo_model_name)
+            self._task = self._octo_model.create_tasks(texts=[self.instruction])
+            self._jax_key = jax.random.PRNGKey(worker_seed)
+        
+        self._env = PandaEnv(xml_path=self.env_xml_path)
+        self._env.reset(seed=worker_seed)
+        
         self._ik_solver = IKSolver(urdf_path=self.urdf_path)
-        # Create the task object once per worker
-        self._task = self._octo_model.create_tasks(texts=[self.instruction])
-
-        # (Inside _init_worker_state)
-        # (Inside _init_worker_state)
-        if self.warmup:
-            logger.info(f"[worker {worker_id}] Starting warmup inference...")
-            try:
-                obs, _ = self._env.reset()
-                T = 2
-                # Correctly exclude proprio and build observation
-                octo_obs = {
-                    k: np.stack([v, v], axis=0)[np.newaxis, ...]
-                    for k, v in obs.items()
-                    if k not in {"internal_full_proprio", "pad_mask_dict", "proprio"}
-                }
-                # timestep (1, T)
-                if "timestep" in obs:
-                    t = np.asarray(obs["timestep"], dtype=np.int32)
-                    t0 = int(t.reshape(()) if t.ndim == 0 else t.ravel()[0])
-                    octo_obs["timestep"] = np.full((1, T), t0, dtype=np.int32)
-                else:
-                    octo_obs["timestep"] = np.arange(T, dtype=np.int32)[None, :]
-
-                # task_completed (1, T, 4)
-                # tc_src = np.asarray(obs.get("task_completed", np.zeros(4, np.float32)), dtype=np.float32).reshape(-1)
-                # tc = np.zeros(4, np.float32); n = min(tc_src.size, 4)
-                # if n > 0: tc[:n] = tc_src[:n]
-                # octo_obs["task_completed"] = np.tile(tc.reshape(1, 1, -1), (1, T, 1))
-
-                # nested pad masks only
-                pm = obs.get("pad_mask_dict", {})
-                octo_obs["pad_mask_dict"] = {k: np.ones((1, T), dtype=bool) for k in pm if k in octo_obs}
-
-                self._jax_key, key = jax.random.split(self._jax_key)
-                _ = self._octo_model.sample_actions(octo_obs, task=self._task, rng=key)
-                logger.info(f"[worker {worker_id}] Warmup OCTO run complete.")
-            except Exception as e:
-                logger.error(f"[worker {worker_id}] Warmup FAILED: {e}", exc_info=True)
+        self._scripted_expert = ScriptedExpert(self.scripted_cfg)
+        
         self._worker_state_initialized = True
         self._samples_yielded = 0
         logger.info(f"[worker {worker_id}] Worker state initialized.")
-
-    # ----------------------------
-    # Internal helpers
-    # ----------------------------
-    def _prepare_octo_obs(
-        self,
-        obs: dict,
-        *,
-        task_completed_width: int = 4,
-        duplicate_T: int = 2,
-    ) -> dict:
-        """
-        Prepare a single-step env obs into an OCTO-style batched dict.
-
-        Guarantees:
-          - image_primary: (B,T,H,W,C), dtype preserved (uint8/float)
-          - image_wrist:   (B,T,h,w,c) present (from obs or safe placeholder)
-          - timestep:      (B,T,1) int32
-          - task_completed:(B,T,task_completed_width) float32
-          - pad masks:     both nested pad_mask_dict[*] and flattened 'pad_mask_dict/*'
-          - consistent horizon T across all modalities
-          - excludes 'proprio' from OCTO input (checkpoint flagged it as extra)
-        """
-        import numpy as _np
-
-        # ---- Validate input ----
-        if not isinstance(obs, dict):
-            raise TypeError(
-                "_prepare_octo_obs expected an observation dict (env.reset()[0] style) "
-                f"but received {type(obs)}."
-            )
-        if "image_primary" not in obs:
-            raise KeyError("_prepare_octo_obs: missing required key 'image_primary' in obs")
-
-        # ---- Images: ensure HWC ----
-        img = _np.asarray(obs["image_primary"])
-        if img.ndim != 3:
-            raise ValueError(f"_prepare_octo_obs: expected image_primary with 3 dims HWC/CHW, got shape={img.shape}")
-        img_hwc = _np.transpose(img, (1, 2, 0)) if img.shape[0] in (1, 3) else img  # CHW->HWC if needed
-
-        # Wrist image is expected by your OCTO checkpoint; provide placeholder if absent
-        if "image_wrist" in obs:
-            wrist = _np.asarray(obs["image_wrist"])
-            if wrist.ndim != 3:
-                raise ValueError(f"_prepare_octo_obs: expected image_wrist with 3 dims HWC/CHW, got shape={wrist.shape}")
-            wrist_hwc = _np.transpose(wrist, (1, 2, 0)) if wrist.shape[0] in (1, 3) else wrist
-            wrist_h, wrist_w, wrist_c = wrist_hwc.shape
-        else:
-            # default placeholder size (matches your env)
-            wrist_h, wrist_w, wrist_c = 128, 128, 3
-            wrist_hwc = _np.zeros((wrist_h, wrist_w, wrist_c), dtype=_np.uint8)
-
-        # ---- Control fields ----
-        # timestep: accept scalar-like and normalize to python int
-        timestep_scalar = int(_np.asarray(obs.get("timestep", _np.int32(0)), dtype=_np.int32).reshape(()))
-
-        # task_completed: ensure desired width (pad/truncate)
-        tc_src = _np.asarray(
-            obs.get("task_completed", _np.zeros((task_completed_width,), dtype=_np.float32)),
-            dtype=_np.float32
-        ).reshape(-1)
-        if task_completed_width > 0:
-            tc_vec = _np.zeros((task_completed_width,), dtype=_np.float32)
-            n = min(tc_src.size, task_completed_width)
-            if n > 0:
-                tc_vec[:n] = tc_src[:n]
-        else:
-            tc_vec = tc_src  # unusual, but supported
-
-        # ---- Build (B,T,...) ----
-        B = 1
-        T = int(max(1, duplicate_T))
-
-        # images
-        img_step = img_hwc[_np.newaxis, _np.newaxis, ...]                 # (1,1,H,W,C)
-        wrist_step = wrist_hwc[_np.newaxis, _np.newaxis, ...]             # (1,1,h,w,c)
-        if T > 1:
-            img_step = _np.repeat(img_step, T, axis=1)                    # (1,T,H,W,C)
-            wrist_step = _np.repeat(wrist_step, T, axis=1)                # (1,T,h,w,c)
-
-        # timestep and task_completed with matching horizon
-        # Correct line
-        timestep_step = _np.full((B, T), timestep_scalar, dtype=_np.int32)        # Corrected to (1,T)
-        task_completed_step = _np.tile(tc_vec.reshape(1, 1, -1), (B, T, 1))          # (1,T,W)
-        # ---- Masks (both nested and flattened for compatibility) ----
-        timestep_mask = _np.ones((B, T), dtype=bool)                     # (1,T)
-        nested_pad = {
-            "image_primary":  timestep_mask,
-            "image_wrist":    timestep_mask,
-            "timestep":       timestep_mask,
-            "task_completed": timestep_mask,
-        }
-        flattened_pad = {
-            "pad_mask_dict/image_primary":  timestep_mask,
-            "pad_mask_dict/image_wrist":    timestep_mask,
-            "pad_mask_dict/timestep":       timestep_mask,
-            "pad_mask_dict/task_completed": timestep_mask,
-        }
-
-        # ---- Final dict (omit 'proprio' for this OCTO input) ----
-        octo_obs = {
-            "image_primary":  img_step,
-            "image_wrist":    wrist_step,
-            "timestep":       timestep_step,
-            "task_completed": task_completed_step,
-            "pad_mask_dict":  nested_pad,
-            "timestep_pad_mask": timestep_mask,  # legacy alias some OCTO utils still read
-            **flattened_pad,
-        }
-
-        return octo_obs
 
 
     def _align_action_dim(self, action: np.ndarray) -> np.ndarray:
@@ -308,176 +159,104 @@ class ExpertDataset(IterableDataset):
     # ----------------------------
     # Sample generation core
     # ----------------------------
+
     def _generate_one(self) -> Tuple[Dict, np.ndarray]:
         """
-        Generates a single (observation_dict, action_array) sample as numpy arrays.
-        Robust: builds OCTO input inline, normalizes quaternions, transforms
-        world->base, tries full-pose IK then position-only fallback.
+        Generates a single (observation, action) sample.
+
+        It first attempts to get a valid action from the OCTO model. If the OCTO
+        prediction is invalid (unreachable, non-finite), it falls back to the
+        deterministic ScriptedExpert to guarantee a high-quality sample.
         """
-        import numpy as _np
-        from scipy.spatial.transform import Rotation as Rlocal
+        # 1. Reset env and get a rich observation with ground-truth data
+        obs = self._env.get_expert_obs()
+        self._scripted_expert.reset() # Reset expert state for each new sample
+        obs["task_completed"] = np.array([0.0], dtype=np.float32)
+        pose_world = None
+        gripper_action = -1.0 # Default to open
+        expert_source = "scripted" # Assume scripted unless OCTO succeeds
 
-        # 1) Get a fresh observation (single timestep)
-        obs, _ = self._env.reset()
-
-        # 2) Build OCTO-style observation dict (B=1, T=2) - do NOT call any old _prepare_octo_obs
-        # 2) Build OCTO-style observation dict (B=1, T=2)
-        T = 2
-        B = 1
-        octo_obs: Dict[str, _np.ndarray] = {}
-
-        # Exclude modalities OCTO doesn't expect
-        for k, v in obs.items():
-            if k in {"internal_full_proprio", "pad_mask_dict", "proprio"}:
-                continue
-            arr = _np.asarray(v)
-            if arr.ndim == 0:
-                arr = arr.reshape(())
-            stacked = _np.stack([arr, arr], axis=0)  # (T, ...)
-            octo_obs[k] = stacked[_np.newaxis, ...]  # (1, T, ...)
-
-        # Timestep must be (B, T)
-        if "timestep" in obs:
-            t = _np.asarray(obs["timestep"], dtype=_np.int32)
-            t0 = int(t.reshape(()) if t.ndim == 0 else t.ravel()[0])
-            octo_obs["timestep"] = _np.full((B, T), t0, dtype=_np.int32)
-        else:
-            octo_obs["timestep"] = np.arange(T, dtype=np.int32).reshape(B, T)
-
-        # Task completed must be (B, T, W)
-        # tc_src = _np.asarray(obs.get("task_completed", _np.zeros(4, dtype=_np.float32)), dtype=_np.float32).reshape(-1)
-        # tc_width = 4
-        # tc_vec = _np.zeros(tc_width, dtype=_np.float32)
-        # n = min(tc_src.size, tc_width)
-        # if n > 0:
-        #     tc_vec[:n] = tc_src[:n]
-        # octo_obs["task_completed"] = _np.tile(tc_vec.reshape(1, 1, -1), (B, T, 1))
-            
-        # Nested pad masks only, aligned with included keys
-        pm = obs.get("pad_mask_dict", {})
-        octo_obs["pad_mask_dict"] = {
-            k: _np.ones((B, T), dtype=bool) for k in pm if k in octo_obs
-        }
-
-
-        octo_obs["timestep_pad_mask"] = _np.ones((B, T), dtype=bool)  # legacy alias
-
-        # Build octo_input for clarity (also used by diagnostic prints)
-        octo_input = {"observations": octo_obs, "task": self._task}
-
-        # 3) Query OCTO (deterministic key split)
-        self._jax_key, key = jax.random.split(self._jax_key)
-        raw_action = self._octo_model.sample_actions(octo_obs, self._task, rng=key)
-        target_pose_world = _np.array(raw_action[0, 0, :7], dtype=_np.float32, copy=True)
-
-        # --- Diagnostics (first few samples) ---
-        if self._samples_yielded < 5:
-            print("\n" + "=" * 70)
-            print(f"--- In-Depth Diagnostic Check for Sample #{self._samples_yielded + 1} ---")
+        # 2. Try to get a pose from OCTO if enabled
+        if self.use_octo:
             try:
-                print("\n[A. VERIFYING SHAPES SENT TO OCTO]")
-                for k, v in octo_input["observations"].items():
-                    if isinstance(v, dict):
-                        print(f"  - {k}: <dict with {len(v)} keys>")
-                    else:
-                        print(f"  - {k}: {v.shape}")
-            except Exception as e:
-                print("  - Diagnostics failed to collect shapes:", e)
-            # base / world checks (kept as before)
-            try:
-                env_base_pos, env_base_quat = self._env.get_base_pose()
-                mujoco.mj_forward(self._env.model, self._env.data)
-                link0_id = mujoco.mj_name2id(self._env.model, mujoco.mjtObj.mjOBJ_BODY, "link0")
-                link0_pos_world = self._env.data.xpos[link0_id].copy()
-                print("\n[B. BASE FRAME VERIFICATION]")
-                print(f"  - Pose from env.get_base_pose(): pos={_np.round(env_base_pos,3)}")
-                print(f"  - Ground Truth Pose of 'link0': pos={_np.round(link0_pos_world,3)}")
-            except Exception as e:
-                print("  - Base frame diagnostic error:", e)
-            try:
-                ee_pose_world = self._env.get_ee_pose()
-                print("\n[C. WORLD COORDINATE SANITY CHECK]")
-                print(f"  - OCTO Predicted Target Z: {target_pose_world[2]:.3f}")
-                print(f"  - EE Z (env): {ee_pose_world[2]:.3f}")
-                if _np.sign(target_pose_world[2]) != _np.sign(ee_pose_world[2]) and ee_pose_world[2] > 0.1:
-                    print("  - ❌ SMOKING GUN: Z-axis mismatch detected!")
+                # Build the compliant observation for OCTO
+                octo_obs = build_octo_observation(obs)
+                
+                # Query the model
+                self._jax_key, key = jax.random.split(self._jax_key)
+                raw_action = self._octo_model.sample_actions(octo_obs, self._task, rng=key)
+                
+                # --- Start Post-Processing and Validation ---
+                # This logic is copied from our debug script
+                candidate_pose = np.array(raw_action[0, 0, :7], dtype=np.float32)
+                
+                # Z-flip
+                if (candidate_pose[2] < 0.0) and (obs["ee_pose_world"][2] > 0.1):
+                    candidate_pose[2] *= -1.0
+                
+                # Normalize quaternion
+                q = candidate_pose[3:7]
+                qn = np.linalg.norm(q)
+                if qn > 1e-6:
+                    candidate_pose[3:7] = q / qn
+
+                # Workspace clamp
+                cfg = self.scripted_cfg # Use same workspace config as scripted expert
+                for i, ax in enumerate(("x", "y", "z")):
+                    lo, hi = cfg.workspace[ax]
+                    candidate_pose[i] = np.clip(candidate_pose[i], lo, hi)
+
+                # Reachability check
+                base_pos, _ = self._env.get_base_pose()
+                dist_from_base = np.linalg.norm(candidate_pose[:3] - base_pos)
+                if np.all(np.isfinite(candidate_pose)) and dist_from_base <= 0.85:
+                    # SUCCESS! The OCTO pose is valid.
+                    pose_world = candidate_pose
+                    expert_source = "octo"
+                    # Simple gripper heuristic for OCTO
+                    near_cube = np.linalg.norm(pose_world[:2] - obs["object_pos_world"][:2]) < 0.04
+                    is_low_enough = pose_world[2] < (obs["object_pos_world"][2] + 0.03)
+                    gripper_action = 1.0 if (near_cube and is_low_enough) else -1.0
                 else:
-                    print("  - ✅ Z-axis seems consistent")
-            except Exception:
-                pass
-            print("=" * 70 + "\n")
+                    logger.debug(f"OCTO pose rejected (dist: {dist_from_base:.2f}m). Falling back.")
 
-        # 4) Normalize quaternion and basic checks
-        q = _np.asarray(target_pose_world[3:7], dtype=_np.float64)
-        qn = _np.linalg.norm(q)
-        if not _np.isfinite(qn) or qn < 1e-6:
-            q = _np.array([0.0, 0.0, 0.0, 1.0], dtype=_np.float64)
-        else:
-            q = q / qn
-        target_pose_world[3:7] = q.astype(_np.float32)
+            except Exception as e:
+                logger.warning(f"OCTO inference failed: {e}. Falling back to ScriptedExpert.")
 
-        # 5) Get base and ee poses defensively
-        try:
-            base_pos, base_quat = self._env.get_base_pose()
-        except Exception:
-            base_pos = _np.zeros(3, dtype=_np.float32)
-            base_quat = _np.array([0.0, 0.0, 0.0, 1.0], dtype=_np.float32)
-        try:
-            ee_pose_world = self._env.get_ee_pose()
-            ee_pos_world = _np.asarray(ee_pose_world[:3], dtype=_np.float32)
-            ee_quat_world = _np.asarray(ee_pose_world[3:7], dtype=_np.float32)
-        except Exception:
-            ee_pos_world = base_pos
-            ee_quat_world = base_quat
-
-        # 6) Heuristic Z flip
-        if (float(target_pose_world[2]) < 0.0) and (float(ee_pos_world[2]) > 0.1):
-            logger.debug("[Coordinate Fix] Flipping Z-axis of OCTO target pose and using EE orientation.")
-            target_pose_world[2] *= -1.0
-            target_pose_world[3:7] = ee_quat_world
-
-        # 7) Workspace guard
-        dist_from_base = _np.linalg.norm(target_pose_world[:3] - base_pos)
-        MAX_TARGET_DIST = 1.5
-        if dist_from_base > MAX_TARGET_DIST:
-            raise RuntimeError(f"Target pose is too far from robot base ({dist_from_base:.2f}m > {MAX_TARGET_DIST}m).")
-
-        # 8) World -> base transform
-        R_world_base = Rlocal.from_quat(base_quat)  # base_quat xyzw
+        # 3. If OCTO failed or was disabled, use the ScriptedExpert
+        if pose_world is None:
+            pose_world, gripper_action = self._scripted_expert.get_target_pose(
+                obs["ee_pose_world"],
+                obs["object_pos_world"],
+                obs["goal_pos_world"],
+            )
+        
+        # 4. Convert the final valid world pose to a joint action via IK
+        # (This part is the same for both experts)
+        base_pos, base_quat = self._env.get_base_pose()
+        R_world_base = R.from_quat(base_quat)
         R_base_world = R_world_base.inv()
-        pos_target_base = R_base_world.apply(target_pose_world[:3] - base_pos)
-        R_target_base = R_base_world * Rlocal.from_quat(target_pose_world[3:7])
-        target_pose_base = _np.concatenate([pos_target_base, R_target_base.as_quat()]).astype(_np.float32)
+        pos_in_base = R_base_world.apply(pose_world[:3] - base_pos)
+        rot_in_base = R_base_world * R.from_quat(pose_world[3:7])
+        target_pose_base = np.concatenate([pos_in_base, rot_in_base.as_quat()]).astype(np.float32)
 
-        # 9) Solve IK
-        full_proprio = _np.asarray(obs["internal_full_proprio"], dtype=_np.float32)
-        current_joints = full_proprio[:7].astype(_np.float32)
-        expert_action = self._ik_solver.compute_action(target_pose_base, current_joints)
+        current_joints = obs["internal_full_proprio"][:7]
+        arm_action_deltas = self._ik_solver.compute_action(target_pose_base, current_joints)
 
-        def _is_ik_failure(act: _np.ndarray, tol: float = 1e-6) -> bool:
-            if act is None:
-                return True
-            try:
-                return float(_np.linalg.norm(_np.asarray(act, dtype=_np.float64))) < tol
-            except Exception:
-                return True
+        if np.linalg.norm(arm_action_deltas) < 1e-6:
+            logger.debug(
+                f"IK from expert '{expert_source}' resulted in a near-zero action. "
+                "This is expected if the EE is already at the target pose."
+            )
 
-        if _is_ik_failure(expert_action):
-            # fallback: rotate ee_quat into base frame, try position-only
-            R_ee_base = R_base_world * Rlocal.from_quat(ee_quat_world)
-            ee_quat_base = R_ee_base.as_quat()
-            pos_only_target = _np.concatenate([pos_target_base, ee_quat_base]).astype(_np.float32)
-            expert_action = self._ik_solver.compute_action(pos_only_target, current_joints)
-
-        if _is_ik_failure(expert_action):
-            raise RuntimeError("IK failed for all attempts (full-pose and position-only).")
-
-        # 10) align action dim & dtype
-        final_action = self._align_action_dim(_np.asarray(expert_action, dtype=_np.float32))
-
-        # Return original observation (unchanged) and final action vector (numpy)
-        return obs, final_action
-
+        # 5. Combine arm and gripper actions
+        gripper_ctrl = gripper_action_to_ctrl(gripper_action)
+        final_action = np.concatenate([arm_action_deltas[:7], [gripper_ctrl]])
+        
+        # Add metadata to the observation if you want to track the source
+        obs["expert_source"] = 1 if expert_source == "octo" else 0
+        
+        return obs, self._align_action_dim(final_action)
     # ----------------------------
     # IterableDataset API
     # ----------------------------
@@ -495,6 +274,7 @@ class ExpertDataset(IterableDataset):
                     break
 
                 try:
+                    self._env.reset()
                     sample = self._generate_one()
                     samples_this_epoch += 1
                     self._samples_yielded += 1

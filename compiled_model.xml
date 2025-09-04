@@ -125,8 +125,7 @@
 
   <worldbody>
     <geom name="floor" size="0 0 0.05" type="plane" material="grid"/>
-    <camera name="fixed_camera" pos="1.2 0 1.2" quat="0.653281 -0.270598 0.270598 -0.653281"/>
-    <camera name="wrist_camera" target="hand" pos="0 0 0.05" quat="0 1 0 0" mode="targetbody" fovy="60"/>
+    <camera name="fixed_camera" pos="1.433 -0.047 1.86" quat="0.675531 0.236968 0.231118 0.658854"/>
     <light name="top" pos="0 0 2" dir="0 0 -1" mode="trackcom"/>
     <light pos="0 0 1.5" dir="0 0 -1" type="directional"/>
     <body name="link0" childclass="panda">
@@ -220,6 +219,7 @@
                       <geom class="visual" material="off_white" mesh="hand_4"/>
                       <geom class="collision" mesh="hand_c"/>
                       <site name="attachment_site" pos="0 0 0.1" size="0.01" rgba="0 0.8 0 1"/>
+                      <camera name="wrist_camera" pos="0 0 0.1" quat="0 1 0 0" fovy="75"/>
                       <body name="left_finger" pos="0 0 0.0584">
                         <inertial pos="0 0 0" mass="0.015" diaginertia="2.375e-06 2.375e-06 7.5e-07"/>
                         <joint name="finger_joint1" class="finger" pos="0 0 0" axis="0 1 0"/>

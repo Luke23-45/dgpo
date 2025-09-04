@@ -91,34 +91,26 @@ def _stack_tensors(items: Sequence[torch.Tensor]) -> torch.Tensor:
 
 def _collate_obs(batch_obs: List[Union[Dict[str, Any], Tuple[Any, Any], torch.Tensor]]) -> Any:
     """
-    Collate a list of observation entries. Supports:
-      - dict of fields -> each field is tensor-like; stacks per field
-      - single tensor (image) -> stacked
-      - tuple (image, proprio) -> tuples of tensors -> stacked per position
+    Recursively collate a list of observation entries. Supports nested dictionaries.
     """
     first = batch_obs[0]
-    if isinstance(first, Mapping):
-        out = {}
-        keys = first.keys()
-        for k in keys:
-            items_k = [b[k] for b in batch_obs]
-            if torch.is_tensor(items_k[0]):
-                out[k] = _stack_tensors(items_k)
-            elif isinstance(items_k[0], np.ndarray):
-                out[k] = torch.from_numpy(np.stack(items_k, axis=0))
-            else:
-                raise TypeError(f"Unsupported obs field type for key '{k}': {type(items_k[0])}")
-        return out
-    elif torch.is_tensor(first):
-        return _stack_tensors(batch_obs)  # e.g., direct image tensor batch
-    elif isinstance(first, (list, tuple)) and len(first) == 2:
-        # (image, proprio)
-        imgs = [b[0] for b in batch_obs]
-        props = [b[1] for b in batch_obs]
-        return (_stack_tensors(imgs), _stack_tensors(props))
-    else:
-        raise TypeError(f"Unsupported observation type in batch: {type(first)}")
+    # Base case: if the items are tensors or numpy arrays, stack them.
+    if torch.is_tensor(first):
+        return _stack_tensors(batch_obs)
+    elif isinstance(first, np.ndarray):
+        return torch.from_numpy(np.stack(batch_obs, axis=0))
 
+    # Recursive case: if the items are dictionaries, collate each key's values.
+    if isinstance(first, Mapping):
+        return {k: _collate_obs([d[k] for d in batch_obs]) for k in first}
+    
+    # Handle other sequence types like tuples or lists
+    if isinstance(first, (list, tuple)):
+        # Transpose the list of tuples/lists
+        transposed = zip(*batch_obs)
+        return type(first)(_collate_obs(samples) for samples in transposed)
+
+    raise TypeError(f"Unsupported observation type in batch: {type(first)}")
 
 def _default_collate(batch: List[Any]) -> Tuple[Any, torch.Tensor]:
     """
@@ -475,7 +467,13 @@ if __name__ == "__main__":
     # This is more robust than hard-coding dimensions.
     logger.info("Creating a temporary environment to infer model dimensions...")
     from envs.panda_env import PandaEnv # Assuming this is your env
-    temp_env = PandaEnv(xml_path="envs/panda_pick_place.xml") # Adjust path if needed
+    xml_path_for_inference = "envs/panda_pick_place.xml"
+    if not os.path.exists(xml_path_for_inference):
+        raise FileNotFoundError(
+            f"Could not find '{xml_path_for_inference}' for model dimension inference. "
+            f"Please run this script from the project root."
+        )
+    temp_env = PandaEnv(xml_path=xml_path_for_inference)
     obs, _ = temp_env.reset()
     
     action_dim = temp_env.action_space.shape[0]

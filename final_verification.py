@@ -10,7 +10,7 @@ except ImportError:
     VISUALIZATION_ENABLED = False
     print("⚠️ WARNING: `glfw` or `mujoco` not found. Interactive visualization will be disabled.")
 
-from envs.panda_env import PandaEnv
+
 from utils.rl_reward_wrapper import RLRewardWrapper
 from octo.model.octo_model import OctoModel
 

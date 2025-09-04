@@ -26,7 +26,6 @@ import gymnasium as gym
 import mujoco
 import numpy as np
 import torch 
-from utils.obs_adapters import octo_batch_from_env_obs
 logger = logging.getLogger(__name__)
 
 
@@ -459,11 +458,11 @@ class RLRewardWrapper(gym.Wrapper):
                 octo_obs["pad_mask_dict"][proprio_field] = mask
 
             # Legacy alias (inside observations is safest for your checkpoint)
-            octo_obs["timestep_pad_mask"] = mask
+          
 
             # Wrap for the model
             octo_input = {"observations": octo_obs}
-
+            octo_obs["timestep_pad_mask"] = mask
             # (Optional) keep a top-level alias ONLY if some other utility expects it:
             # octo_input["timestep_pad_mask"] = mask
 

@@ -1,0 +1,44 @@
+Folder PATH listing
+Volume serial number is 8C1C-7016
+C:.
+³   tree.txt
+³   
+ÃÄÄÄpage_1
+³       img_1.png
+³       
+ÃÄÄÄpage_19
+³       img_1.png
+³       
+ÃÄÄÄpage_2
+³       img_1.png
+³       
+ÃÄÄÄpage_21
+³       img_1.png
+³       img_2.png
+³       
+ÃÄÄÄpage_22
+³       img_1.jpeg
+³       img_2.png
+³       
+ÃÄÄÄpage_25
+³       img_1.png
+³       
+ÃÄÄÄpage_26
+³       img_1.png
+³       
+ÃÄÄÄpage_29
+³       img_1.png
+³       img_2.jpeg
+³       
+ÃÄÄÄpage_32
+³       img_1.png
+³       
+ÃÄÄÄpage_7
+³       img_1.png
+³       
+ÃÄÄÄpage_8
+³       img_1.png
+³       
+ÀÄÄÄpage_9
+        img_1.png
+        

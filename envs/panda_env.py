@@ -31,7 +31,7 @@ class PandaEnv(gym.Env):
       simulation stepping, and object manipulation to prevent crashes.
     """
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
-    def __init__(self, xml_path: str = "envs/panda_pick_place.xml", render_mode: str = "rgb_array"):
+    def __init__(self, xml_path: str = "envs/panda_pick_place.xml", render_mode: str = "rgb_array",for_sb3: bool = False):
         super().__init__()
 
 
@@ -65,7 +65,11 @@ class PandaEnv(gym.Env):
         self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.ee_site_name)
         if self.ee_site_id == -1:
             raise ValueError(f"Site '{self.ee_site_name}' not found in the MuJoCo model.")
-
+        self._for_sb3 = for_sb3
+        if self._for_sb3:
+            self._define_spaces_sb3()
+        else:
+            self._define_spaces()
     # (Inside PandaEnv class)
     # envs/panda_env.py --> _define_spaces()
     def _define_spaces(self):
@@ -176,6 +180,56 @@ class PandaEnv(gym.Env):
                 "timestep":      np.array(True, dtype=bool),
             },
         }
+    def get_body_pos_expert(self, name: str) -> np.ndarray:
+        """
+        Expert-specific helper to get a body's world position.
+        This is a safe, read-only operation.
+        """
+        body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+        if body_id == -1:
+            raise ValueError(f"Body '{name}' not found for expert pipeline.")
+        return self.data.xpos[body_id].copy()
+
+    def get_object_pos_expert(self) -> np.ndarray:
+        """Gets the ground-truth world position of the object for the expert."""
+        return self.get_body_pos_expert("object")
+
+    def get_goal_pos_expert(self) -> np.ndarray:
+        """Gets the ground-truth world position of the goal for the expert."""
+        return self.get_body_pos_expert("goal")
+
+    def get_base_pose_expert(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Expert-specific version of get_base_pose that guarantees xyzw quaternion
+        and float32 dtype, respecting the expert pipeline's invariants.
+        The original get_base_pose is left untouched for other components.
+        """
+        bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "link0")
+        if bid == -1:
+             raise ValueError("Body 'link0' not found.")
+        pos = self.data.xpos[bid].copy().astype(np.float32)
+        quat_wxyz = self.data.xquat[bid].copy()
+        # Convert to xyzw and ensure float32
+        quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float32)
+        return pos, quat_xyzw
+
+    def get_expert_obs(self) -> Dict[str, np.ndarray]:
+        """
+        Returns a rich observation dictionary tailored specifically for use by
+        the ExpertDataset and ScriptedExpert. This method is non-breaking.
+        """
+        if self._for_sb3:
+            obs = self._get_obs_sb3()
+        else:
+            obs = self._get_obs()
+
+        # Add the ground-truth information needed by the scripted expert
+        obs["ee_pose_world"] = self.get_ee_pose() # get_ee_pose is already compliant
+        obs["object_pos_world"] = self.get_object_pos_expert().astype(np.float32)
+        obs["goal_pos_world"] = self.get_goal_pos_expert().astype(np.float32)
+        
+        return obs
+
 
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:
         """Resets the environment to a new, randomized state."""
@@ -184,7 +238,8 @@ class PandaEnv(gym.Env):
         
         self.timestep = 0
         mujoco.mj_resetData(self.model, self.data)
-
+        home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
+        self.data.qpos[:7] = home_qpos
         # Randomize object position
         cube_qpos = np.array([
             self.np_random.uniform(0.45, 0.65),
@@ -208,7 +263,7 @@ class PandaEnv(gym.Env):
             warnings.warn("Goal body 'goal' not found in model; skipping goal placement.")
 
         mujoco.mj_forward(self.model, self.data)
-        return self._get_obs(), {}
+        return self.get_expert_obs(), {}
 
     def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
         """Applies an action and steps the simulation forward."""
@@ -235,17 +290,22 @@ class PandaEnv(gym.Env):
             for _ in range(5):
                 mujoco.mj_step(self.model, self.data)
 
-        obs = self._get_obs()
+        obs = self.get_expert_obs()
         reward = 0.0
         terminated = False
         truncated = (self.timestep >= self.max_episode_steps)
         
         return obs, reward, terminated, truncated, {}
 
+
     def close(self):
         """Cleans up resources, primarily the renderer."""
         if hasattr(self, "renderer") and self.renderer is not None:
-            self.renderer.close()
+            try:
+                self.renderer.close()
+            finally:
+                # Ensure the renderer handle is cleared even if close() fails
+                self.renderer = None
 
     def get_base_pose(self) -> Tuple[np.ndarray, np.ndarray]:
         """Returns the world-frame pose of the robot's base ('link0')."""
@@ -258,3 +318,40 @@ class PandaEnv(gym.Env):
         quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])
         
         return pos, quat_xyzw
+    
+
+    def _define_spaces_sb3(self):
+        """Defines SB3-COMPATIBLE observation and action spaces (flattened)."""
+        self.observation_space = spaces.Dict({
+            "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
+            "image_wrist":   spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
+            "proprio":       spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
+            "internal_full_proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
+            "timestep":      spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(), dtype=np.int32),
+            # Flattened padding masks for SB3 compatibility
+            "pad_mask_image_primary": spaces.MultiBinary(1),
+            "pad_mask_image_wrist":   spaces.MultiBinary(1),
+            "pad_mask_proprio":       spaces.MultiBinary(1),
+            "pad_mask_timestep":      spaces.MultiBinary(1),
+        })
+        act_dim = int(getattr(self.model, "nu", 8))
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
+
+    def _get_obs_sb3(self) -> dict:
+        """Returns an SB3-COMPATIBLE observation (flattened)."""
+        qpos = np.asarray(self.data.qpos, dtype=np.float32)
+        qvel = np.asarray(self.data.qvel, dtype=np.float32)
+        proprio = np.concatenate([qpos[:7], qvel[:7]])
+
+        return {
+            "image_primary": self.render(),
+            "image_wrist": self.render(camera_name="wrist_camera"),
+            "proprio": proprio,
+            "internal_full_proprio": proprio,
+            "timestep": np.int32(self.timestep),
+            # The observation dict now matches the flattened space
+            "pad_mask_image_primary": np.array([True], dtype=bool),
+            "pad_mask_image_wrist":   np.array([True], dtype=bool),
+            "pad_mask_proprio":       np.array([True], dtype=bool),
+            "pad_mask_timestep":      np.array([True], dtype=bool),
+        }

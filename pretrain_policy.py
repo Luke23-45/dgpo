@@ -39,7 +39,8 @@ from tqdm import tqdm
 # ---------------------------
 from utils.expert_dataset import ExpertDataset
 from models.bc_policy import BCNet
-
+from models.custom_sb3_extractor import BCFeaturesExtractor
+from utils.paths import resolve_path
 # Prefer your BCTrainer, but keep a robust fallback if not present or incompatible
 _BCTrainer = None
 try:
@@ -52,7 +53,7 @@ def _maybe_import_sb3():
     try:
         from stable_baselines3 import PPO
         from envs.panda_env import PandaEnv
-        from utils.transfer_bc_weights import transfer_bc_weights
+        from utils.transfer_bc_to_ppo import transfer_bc_weights
         return PPO, PandaEnv, transfer_bc_weights
     except Exception:
         return None, None, None
@@ -68,14 +69,14 @@ logging.basicConfig(
 # ---------------------------
 
 def set_global_seed(seed: int) -> None:
-    """Deterministic-ish setup. (Note: Full determinism depends on env/backends.)"""
+    """Deterministic-ish setup."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
 
 
 def _to_float32_tree(x):
@@ -128,14 +129,15 @@ def _extract_pred_actions(model_out: Any) -> torch.Tensor:
     raise RuntimeError("Unable to extract predicted actions from model output.")
 
 
+# --- Replace the entire existing _FallbackBCTrainer class with this version ---
+
 class _FallbackBCTrainer:
     """
-    Minimal, safe BC trainer used only if your bc_trainer.BCTrainer is missing/incompatible.
+    Minimal, safe BC trainer using modern torch.amp API and self-contained helpers.
     - Supervised MSE on actions.
     - Gradient clipping + optional weight decay.
     - Logs running loss.
     """
-
     def __init__(
         self,
         model: torch.nn.Module,
@@ -153,26 +155,37 @@ class _FallbackBCTrainer:
             weight_decay=weight_decay,
         )
         self.grad_clip_norm = grad_clip_norm
-        self.amp = bool(amp)
-        self._scaler = torch.cuda.amp.GradScaler(enabled=(amp and device.type == "cuda"))
+        # CORRECT: Safely enable AMP only on CUDA devices
+        self.amp = bool(amp and self.device.type == "cuda")
+        # CORRECT: Use the modern torch.amp API
+        self._scaler = torch.amp.GradScaler(device=self.device, enabled=self.amp)
         self._loss_fn = torch.nn.MSELoss()
 
     def fit(self, loader: DataLoader, epochs: int, log_interval: int = 50) -> None:
         self.model.train()
         for ep in range(1, epochs + 1):
-            running_loss = 0.0   # <-- was `running`
-            num_batches = 0      # <-- was `count`
+            running_loss = 0.0
+            num_batches = 0
             t0 = time.time()
             pbar = tqdm(loader, desc=f"Fallback Trainer Epoch {ep}/{epochs}", leave=False)
             for obs_dict, expert_action in pbar:
-                obs = {
-                    k: v.to(self.device).float() if v.dtype != torch.uint8 else v.to(self.device)
-                    for k, v in obs_dict.items()
-                }
+                # CORRECT: Helper function is self-contained inside the method
+                def to_device_recursive(item, device):
+                    if isinstance(item, torch.Tensor):
+                        # This logic correctly preserves uint8 for images while moving to device
+                        return item.to(device)
+                    if isinstance(item, dict):
+                        return {k: to_device_recursive(v, device) for k, v in item.items()}
+                    if isinstance(item, (list, tuple)):
+                        return type(item)(to_device_recursive(v, device) for v in item)
+                    return item
+
+                obs = to_device_recursive(obs_dict, self.device)
                 target = expert_action.to(self.device).float()
 
                 self.optim.zero_grad(set_to_none=True)
-                with torch.cuda.amp.autocast(enabled=self.amp):
+                # CORRECT: Use the modern torch.amp API
+                with torch.amp.autocast(device_type=self.device.type, enabled=self.amp):
                     out = self.model(obs)
                     pred = _extract_pred_actions(out)
                     loss = self._loss_fn(pred, target)
@@ -204,7 +217,25 @@ class _FallbackBCTrainer:
                 f"Epoch {ep} done in {time.time() - t0:.1f}s | avg loss {avg_loss:.6f}"
             )
 
-
+def _to_device_tree(x, device):
+    """
+    Recursively move all torch.Tensors to the specified device,
+    intelligently handling dtypes for the observation pipeline.
+    """
+    if isinstance(x, torch.Tensor):
+        # Critical step: Keep image data as uint8 to ensure correct
+        # normalization inside the model. Convert all other tensors to float32.
+        if x.dtype == torch.uint8:
+            return x.to(device)
+        return x.to(device).float()
+    
+    if isinstance(x, dict):
+        return {k: _to_device_tree(v, device) for k, v in x.items()}
+    
+    if isinstance(x, (list, tuple)):
+        return type(x)(_to_device_tree(v, device) for v in x)
+    
+    return x
 def _build_dataloader(
     *,
     urdf_path: str,
@@ -255,15 +286,25 @@ def _peek_action_dim_and_small_batch(
     it = iter(loader)
     obs_dict, expert_action = next(it)  # raises if loader misconfigured
 
-    # Coerce to float32 and slice tiny batch for probing
-    obs_small = {k: v[:2].to(device).float() for k, v in obs_dict.items()}
+    # Recursively process the observation dictionary to handle nested structures
+    def process_and_slice_recursive(item):
+        if isinstance(item, torch.Tensor):
+            # Also handle uint8 images correctly, don't convert them to float
+            if item.dtype == torch.uint8:
+                return item[:2].to(device)
+            return item[:2].to(device).float()
+        if isinstance(item, dict):
+            return {k: process_and_slice_recursive(v) for k, v in item.items()}
+        # For any non-tensor, non-dict values, just return them
+        return item
+    
+    obs_small = process_and_slice_recursive(obs_dict)
     target_small = expert_action[:2].to(device).float()
 
     if target_small.ndim != 2:
         raise RuntimeError(f"Expert action batch must be (B, A). Got shape: {tuple(target_small.shape)}")
     action_dim = int(target_small.shape[1])
     return obs_small, target_small, action_dim
-
 
 def _instantiate_bcnet(
     *,
@@ -389,9 +430,9 @@ def _export_to_sb3_zip(
 
     # Instantiate env (try both signatures)
     try:
-        env = PandaEnv(env_xml_path=env_xml_path)
+        env = PandaEnv(env_xml_path=env_xml_path, for_sb3=True)
     except TypeError:
-        env = PandaEnv()
+        env = PandaEnv(for_sb3=True)
 
     # Guard: action dim must match
     env_act_dim = int(env.action_space.shape[0])
@@ -401,16 +442,34 @@ def _export_to_sb3_zip(
             "Ensure dataset/BCNet/env use the same joint ordering and dimension."
         )
 
-    ppo_kwargs = {}
+    policy_kwargs = {
+        "features_extractor_class": BCFeaturesExtractor,
+        "net_arch": {
+            "pi": [512, 256],  # Policy network hidden layers
+            "vf": [512, 256],  # Value network hidden layers
+        }
+    }
+    logger.info(f"Forcing PPO policy_kwargs to match BCNet head: {policy_kwargs}")
+
+    # --- 3. Parse OPTIONAL User-Provided PPO Arguments from command line ---
+    user_ppo_kwargs = {}
     if ppo_kwargs_json:
         try:
-            ppo_kwargs = json.loads(ppo_kwargs_json)
-            assert isinstance(ppo_kwargs, dict)
+            user_ppo_kwargs = json.loads(ppo_kwargs_json)
+            assert isinstance(user_ppo_kwargs, dict)
         except Exception as e:
-            raise ValueError(f"--ppo-kwargs must be a JSON object; got: {ppo_kwargs_json}") from e
+            raise ValueError(f"--ppo-kwargs must be a valid JSON object string; got: {ppo_kwargs_json}") from e
 
-    logger.info("Creating PPO agent with kwargs=%s", ppo_kwargs)
-    agent = PPO("MultiInputPolicy", env, verbose=0, **ppo_kwargs)
+    # --- 4. Create the PPO Agent with the Correct, Merged Configuration ---
+    agent = PPO(
+        "MultiInputPolicy",
+        env,
+        verbose=0,
+        policy_kwargs=policy_kwargs,  # Pass the required architecture here
+        **user_ppo_kwargs              # Pass any other user args (like n_steps) here
+    )
+
+
 
     # Transfer compatible weights
     report = transfer_bc_weights(bc_state_dict, agent, allow_shape_only_fallback=False, verbose=True)
@@ -477,15 +536,38 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------
 # Main
 # ---------------------------
-
 def main() -> None:
     args = parse_args()
     set_global_seed(args.base_seed)
-
+    args.urdf_path = resolve_path(args.urdf_path)
     device = torch.device(args.device)
     logger.info("Device: %s | CUDA available: %s", device, torch.cuda.is_available())
+    print("\n\n >>>>>>>>>> RUNNING THE NEW, CORRECTED MAIN FUNCTION <<<<<<<<<< \n\n")
 
-    # Build DataLoader with an ExpertDataset that yields a finite epoch
+    # --- FIX: Create a temporary loader for shape inference to avoid resource conflicts ---
+    logger.info("Creating a temporary dataloader to infer action dimension...")
+    peek_loader = _build_dataloader(
+        urdf_path=args.urdf_path,
+        instruction=args.instruction,
+        octo_model_name=args.octo_model_name,
+        env_xml_path=args.env_xml_path,
+        base_seed=args.base_seed,
+        warmup=False,  # No need to warmup for just one batch
+        samples_per_epoch=args.batch_size,
+        batch_size=args.batch_size,
+        num_workers=0, # Must use 0 workers for clean resource management
+        pin_memory=False,
+    )
+    obs_small, target_small, action_dim = _peek_action_dim_and_small_batch(peek_loader, device)
+    del peek_loader
+    gc.collect()
+    logger.info("Action dimension inferred successfully. Proceeding with main dataloader.")
+
+    if args.expect_action_dim is not None and int(args.expect_action_dim) != action_dim:
+        raise RuntimeError(f"--expect_action_dim={args.expect_action_dim} but dataset has {action_dim}")
+
+    # --- Now create the main loader for training ---
+    logger.info("Creating main dataloader for training...")
     loader = _build_dataloader(
         urdf_path=args.urdf_path,
         instruction=args.instruction,
@@ -498,11 +580,6 @@ def main() -> None:
         num_workers=args.num_workers,
         pin_memory=True,
     )
-
-    # Peek first batch to determine action_dim (and verify types)
-    obs_small, target_small, action_dim = _peek_action_dim_and_small_batch(loader, device)
-    if args.expect_action_dim is not None and int(args.expect_action_dim) != action_dim:
-        raise RuntimeError(f"--expect_action_dim={args.expect_action_dim} but dataset has {action_dim}")
 
     # Create model with correct action_dim
     model = _instantiate_bcnet(device=device, action_dim=action_dim, model_ctor_overrides=args.model_ctor_overrides)
@@ -528,15 +605,22 @@ def main() -> None:
         _save_bc_weights(model, args.save_bc)
 
     # Export to SB3 .zip if requested
+    # Export to SB3 .zip if requested
     if args.artifact in ("zip", "both"):
-        bc_sd = model.state_dict()
-        _export_to_sb3_zip(
-            bc_state_dict=bc_sd,
-            save_path_zip=args.save_sb3,
-            ppo_kwargs_json=args.ppo_kwargs,
-            expected_action_dim=action_dim,
-            env_xml_path=args.env_xml_path,
-        )
+        logger.info("Attempting to export model to Stable-Baselines3 format...")
+        try:
+            bc_sd = model.state_dict()
+            _export_to_sb3_zip(
+                bc_state_dict=bc_sd,
+                save_path_zip=args.save_sb3,
+                ppo_kwargs_json=args.ppo_kwargs,
+                expected_action_dim=action_dim,
+                env_xml_path=args.env_xml_path,
+            )
+        except Exception as e:
+            logger.warning(f"Could not export to SB3 format. This is non-fatal.")
+            logger.warning(f"Reason: {e}")
+            logger.warning("Please ensure 'stable-baselines3' is installed (`pip install stable-baselines3[extra]`) and all dependencies are met.")
 
     # Cleanup
     del model, loader

@@ -29,11 +29,12 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.utils import set_random_seed
 from octo.model.octo_model import OctoModel
 from gymnasium import spaces 
+from models.custom_sb3_extractor import BCFeaturesExtractor 
 
 
 # weight transfer utility: try to import from the most likely path
 try:
-    from utils.weight_transfer import transfer_bc_weights
+    from utils.transfer_bc_to_ppo import transfer_bc_weights
 except Exception:
     try:
         from utils.transfer_bc_to_ppo import transfer_bc_weights
@@ -195,13 +196,13 @@ def setup_environment(
     Returns a VecEnv ready for SB3.
     """
     def make_env():
-        env = PandaEnv(xml_path=xml_path)
+        env = PandaEnv(xml_path=xml_path, for_sb3=True)
         env = RLRewardWrapper(env, octo_model=octo_model,
                               w_plausibility=w_plausibility,
                               pos_scale=pos_scale, rot_scale=rot_scale, div_clip=div_clip)
 
         # --- Correct wrapper order ---
-        env = FlattenNestedDictObs(env)
+        # env = FlattenNestedDictObs(env) need to check but commenting now
         env = DropKeysWrapper(env, drop_prefixes=("pad_mask_dict/",))
         env = TransposeImageDict(env)
         if enable_downsample:
@@ -386,8 +387,6 @@ def run_experiment(
         logger.info("Loading OCTO model for divergence reward calculation...")
         try:
             octo_model = OctoModel.load_pretrained("hf://rail-berkeley/octo-small-1.5")
-            octo_model.to(torch.device("cpu"))  # Force CPU
-            octo_model.eval()
             logger.info("OCTO model loaded successfully onto CPU.")
         except Exception as e:
             logger.error(f"Could not load OCTO model, divergence reward will be disabled. Error: {e}")
@@ -444,6 +443,13 @@ def run_experiment(
         "vf_coef": 0.5,
         "max_grad_norm": 0.5,
         "device": device_str,
+        "policy_kwargs": {
+            "features_extractor_class": BCFeaturesExtractor,
+            "net_arch": {
+                "pi": [512, 256], # Policy network
+                "vf": [512, 256], # Value network
+            }
+        }
     }
 
     logger.info(f"Initializing PPO agent on device {device_str}...")
