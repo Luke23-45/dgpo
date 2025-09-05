@@ -31,7 +31,7 @@ from octo.model.octo_model import OctoModel
 from gymnasium import spaces 
 from models.custom_sb3_extractor import BCFeaturesExtractor 
 from utils.obs_adapters import OctoToSB3Adapter
-
+from pathlib import Path
 # weight transfer utility: try to import from the most likely path
 try:
     from utils.transfer_bc_to_ppo import transfer_bc_weights
@@ -101,89 +101,6 @@ class DownsampleImageWrapper(gym.ObservationWrapper):
         return obs
 
 
-class FlattenNestedDictObs(gym.ObservationWrapper):
-    """
-    Flattens a nested Dict observation space into a single-level Dict.
-    This is necessary for compatibility with Stable Baselines3.
-    """
-    def __init__(self, env):
-        super().__init__(env)
-        if not isinstance(env.observation_space, spaces.Dict):
-            raise ValueError("This wrapper only works on environments with Dict observation spaces.")
-        
-        self.observation_space = self._flatten_space(env.observation_space)
-
-    def _flatten_space(self, space, prefix=""):
-        flat_spaces = {}
-        for key, sub_space in space.spaces.items():
-            new_prefix = f"{prefix}{key}/" if prefix else f"{key}/"
-            if isinstance(sub_space, spaces.Dict):
-                flat_spaces.update(self._flatten_space(sub_space, new_prefix))
-            else:
-                # Remove trailing slash from the key
-                flat_spaces[new_prefix[:-1]] = sub_space
-        return spaces.Dict(flat_spaces)
-
-    def observation(self, obs):
-        return self._flatten_obs(obs)
-
-    def _flatten_obs(self, obs, prefix=""):
-        flat_obs = {}
-        for key, value in obs.items():
-            new_prefix = f"{prefix}{key}/" if prefix else f"{key}/"
-            if isinstance(value, dict):
-                flat_obs.update(self._flatten_obs(value, new_prefix))
-            else:
-                flat_obs[new_prefix[:-1]] = value
-        return flat_obs
-
-
-class TransposeImageDict(gym.ObservationWrapper):
-    """
-    Transposes HWC image observations in a Dict space to CHW format for SB3.
-    Keeps dtype as uint8 for SB3 CNN extractor.
-    """
-    def __init__(self, env):
-        super().__init__(env)
-        new_spaces = {}
-        for key, space in self.observation_space.spaces.items():
-            if isinstance(space, spaces.Box) and len(space.shape) == 3:
-                # New shape is (C, H, W)
-                new_shape = (space.shape[2], space.shape[0], space.shape[1])
-                new_spaces[key] = spaces.Box(
-                    low=0, high=255, shape=new_shape, dtype=space.dtype
-                )
-            else:
-                new_spaces[key] = space
-        self.observation_space = spaces.Dict(new_spaces)
-
-    def observation(self, obs):
-        new_obs = {}
-        for key, value in obs.items():
-            if key in self.observation_space.spaces and isinstance(self.observation_space.spaces[key], spaces.Box) and len(value.shape) == 3:
-                # Transpose HWC -> CHW, keep uint8
-                new_obs[key] = np.transpose(value, (2, 0, 1))
-            else:
-                new_obs[key] = value
-        return new_obs
-
-
-class DropKeysWrapper(gym.ObservationWrapper):
-    def __init__(self, env, drop_prefixes=()):
-        super().__init__(env)
-        assert isinstance(env.observation_space, spaces.Dict)
-        self.drop_prefixes = tuple(drop_prefixes)
-        kept = {k: v for k, v in env.observation_space.spaces.items()
-                if not any(k.startswith(p) for p in self.drop_prefixes)}
-        self.observation_space = spaces.Dict(kept)
-
-    def observation(self, obs):
-        return {k: v for k, v in obs.items()
-                if k in self.observation_space.spaces}
-
-# In file: run_experiment.py
-
-# --- Replace the entire setup_environment function with this definitive version ---
 
 def setup_environment(
     xml_path: str,
@@ -229,23 +146,36 @@ def setup_environment(
     vec_env = make_vec_env(lambda: make_env(), n_envs=n_envs, seed=seed)
     return vec_env
 
-def initialize_ppo_agent(env, ppo_config: dict, seed: int, policy: str):
+def initialize_ppo_agent(env: gym.vector.VectorEnv, args: argparse.Namespace, device_str: str) -> PPO:
     """
-    Initialize a PPO agent with given config and seed.
-    ppo_config is passed directly to PPO() constructor.
+    Initializes a new PPO agent with a standard configuration.
     """
-    # ensure seed present
-    ppo_config = dict(ppo_config)
-    ppo_config.setdefault("seed", seed)
+    policy_kwargs = {
+        "features_extractor_class": BCFeaturesExtractor,
+        "net_arch": {"pi": [512, 256], "vf": [512, 256]}
+    }
+    
+    # Define the PPO hyperparameters here.
+    # In the future, these could be exposed as CLI arguments in `args`.
+    ppo_config = {
+        "verbose": 1,
+        "n_steps": 2048,
+        "batch_size": 128,
+        "n_epochs": 10,
+        "gamma": 0.99,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "device": device_str,
+        "tensorboard_log": os.path.join("trained_models", args.run_name),
+        "policy_kwargs": policy_kwargs,
+        "seed": args.seed
+    }
+    
+    logger.info("Initializing new PPO agent with config:")
+    for key, val in ppo_config.items():
+        logger.info(f"  {key}: {val}")
 
-    # set unique tensorboard log folder
-    tblog = ppo_config.get("tensorboard_log", "./tensorboard_logs")
-    run_log_dir = os.path.join(tblog, f"dgpo_run_{int(time.time())}")
-    ppo_config["tensorboard_log"] = run_log_dir
-
-    logger.info(f"Initializing PPO agent with '{policy}' (logdir={run_log_dir})") # Use policy in log
-    agent = PPO(policy=policy, env=env, **ppo_config) 
-    return agent
+    return PPO("MultiInputPolicy", env, **ppo_config)
 
 def load_bc_checkpoint(filepath: str, device: torch.device):
     if not os.path.exists(filepath):
@@ -269,98 +199,12 @@ def load_bc_checkpoint(filepath: str, device: torch.device):
     raise RuntimeError("BC checkpoint loaded but format not recognized. Expected dict with 'model_state_dict' or raw state_dict.")
 
 
-class SanitizeDictObs(gym.ObservationWrapper):
-    """
-    - Expand scalar Box() -> Box(shape=(1,), dtype=float32)
-    - Cast all non-image Box spaces to float32
-    - Leave image Boxes (3,H,W or H,W,3) as-is (uint8)
-    """
-    def __init__(self, env):
-        super().__init__(env)
-        assert isinstance(self.observation_space, spaces.Dict), "SanitizeDictObs expects Dict space"
-        self.observation_space = self._sanitize_space(self.observation_space)
-
-    @staticmethod
-    def _is_image_space(space: spaces.Box) -> bool:
-        if not isinstance(space, spaces.Box):
-            return False
-        if space.dtype != np.uint8:
-            return False
-        if len(space.shape) != 3:
-            return False
-        c, h, w = space.shape if space.shape[0] in (1, 3, 4) else (None, None, None)
-        # allow CHW or HWC; we transpose earlier anyway
-        return True
-
-    def _sanitize_space(self, dict_space: spaces.Dict) -> spaces.Dict:
-        new_spaces = {}
-        for key, sp in dict_space.spaces.items():
-            if isinstance(sp, spaces.Dict):
-                new_spaces[key] = self._sanitize_space(sp)
-                continue
-            if isinstance(sp, spaces.Box):
-                if self._is_image_space(sp):
-                    new_spaces[key] = sp  # leave images unchanged
-                else:
-                    # ensure at least 1D and float32
-                    shape = sp.shape
-                    if shape == ():  # scalar -> (1,)
-                        shape = (1,)
-                    new_spaces[key] = spaces.Box(
-                        low=-np.inf,
-                        high=np.inf,
-                        shape=shape,
-                        dtype=np.float32
-                    )
-            elif isinstance(sp, (spaces.MultiBinary, spaces.MultiDiscrete)):
-                # leave as is (SB3 can handle), but they will arrive as int/uint8
-                new_spaces[key] = sp
-            else:
-                # fallback: wrap as a 1D float32 Box of size 1
-                new_spaces[key] = spaces.Box(
-                    low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
-                )
-        return spaces.Dict(new_spaces)
-
-    def observation(self, obs):
-        return self._sanitize_obs(obs, self.observation_space)
-
-    def _sanitize_obs(self, obs_dict, dict_space: spaces.Dict):
-        out = {}
-        for key, sp in dict_space.spaces.items():
-            val = obs_dict[key]
-            if isinstance(sp, spaces.Dict):
-                out[key] = self._sanitize_obs(val, sp)
-                continue
-            if isinstance(sp, spaces.Box):
-                if self._is_image_space(sp):
-                    # ensure numpy array, uint8, correct shape already handled by other wrappers
-                    if not isinstance(val, np.ndarray):
-                        val = np.asarray(val, dtype=np.uint8)
-                    else:
-                        val = val.astype(np.uint8, copy=False)
-                    out[key] = val
-                else:
-                    arr = np.asarray(val)
-                    # expand scalar to (1,)
-                    if arr.shape == ():
-                        arr = arr.reshape(1)
-                    out[key] = arr.astype(np.float32, copy=False)
-            elif isinstance(sp, (spaces.MultiBinary, spaces.MultiDiscrete)):
-                out[key] = np.asarray(val)
-            else:
-                # fallback to float32 (1,)
-                arr = np.asarray(val)
-                if arr.shape == ():
-                    arr = arr.reshape(1)
-                out[key] = arr.astype(np.float32, copy=False)
-        return out
-
 
 
 def run_experiment(
     xml_path: str,
     bc_model_path: Optional[str],
+    resume_from: Optional[str],
     total_timesteps: int,
     run_name: str,
     save_freq: int,
@@ -379,7 +223,10 @@ def run_experiment(
     device_str = resolve_device(device_arg)
     device = torch.device(device_str)
     logger.info(f"Resolved device: {device_str}")
-
+    run_name = time.strftime("%Y-%m-%d_%H-%M-%S")
+    save_dir = os.path.join("trained_models", run_name)
+    os.makedirs(save_dir, exist_ok=True)
+    logger.info(f"All artifacts for this run will be saved in: {save_dir}")
     # reproducibility
     logger.info(f"Setting random seed to {seed} for all libraries.")
     set_random_seed(seed)
@@ -436,92 +283,99 @@ def run_experiment(
         raise TypeError(f"Unsupported observation space type: {type(obs_space)}")
     logger.info(f"Auto-selected policy '{policy}' based on observation space type.")
     # PPO config (you can expand or override via function args)
-    PPO_CONFIG = {
-        "verbose": 1,
-        "n_steps": 2048,
-        "batch_size": 128,
-        "n_epochs": 10,
-        "gamma": 0.99,
-        "gae_lambda": 0.95,
-        "learning_rate": 2.5e-4, # Slightly lower learning rate
-        "clip_range": 0.15,      # Tighter clipping range
-        "target_kl": 0.02,       # KL divergence target to prevent overly large updates
-        "ent_coef": 0.001,
-        "vf_coef": 0.5,
-        "max_grad_norm": 0.5,
-        "device": device_str,
-        "policy_kwargs": {
+
+    if resume_from:
+        logger.info(f"Resuming PPO training from checkpoint: {resume_from}")
+        
+        # We must provide the custom architecture "blueprint" to load the agent correctly.
+        policy_kwargs = {
             "features_extractor_class": BCFeaturesExtractor,
-            "net_arch": {
-                "pi": [512, 256], # Policy network
-                "vf": [512, 256], # Value network
-            }
+            "net_arch": {"pi": [512, 256], "vf": [512, 256]}
         }
-    }
+        
+        # PPO.load restores the model, optimizer, timesteps, etc.
+        ppo_agent = PPO.load(
+            resume_from,
+            env=env,
+            custom_objects={"policy_kwargs": policy_kwargs},
+        )
+        logger.info(f"Agent loaded. Resuming from step {ppo_agent.num_timesteps}.")
 
-    logger.info(f"Initializing PPO agent on device {device_str}...")
-    ppo_agent = initialize_ppo_agent(env, PPO_CONFIG, seed, policy=policy)
-    logger.info("PPO agent ready")
-
-    # Weight transfer from BC if provided
-    if bc_model_path:
-        logger.info(f"BC model path provided: {bc_model_path}")
-        try:
-            logger.info(f"Attempting to load BC checkpoint from: {bc_model_path}")
-            state_dict = load_bc_checkpoint(bc_model_path, device)
-            
-            action_dim = int(act_space.shape[0])
-            logger.info(f"Inferred action dimension from environment: {action_dim}")
-
-            # Instantiate BCNet on CPU first to safely load the state_dict
-            bc_net = BCNet(n_actions=action_dim)
-            
-            # Log missing/unexpected keys for better debugging
-            model_keys = set(bc_net.state_dict().keys())
-            ckpt_keys = set(state_dict.keys())
-            missing_keys = model_keys - ckpt_keys
-            unexpected_keys = ckpt_keys - model_keys
-            if missing_keys:
-                logger.warning(f"BC checkpoint is missing keys: {list(missing_keys)}")
-            if unexpected_keys:
-                logger.warning(f"BC checkpoint has unexpected keys: {list(unexpected_keys)}")
-            
-            bc_net.load_state_dict(state_dict, strict=False)
-            logger.info("Successfully loaded state_dict into BCNet instance.")
-
-            if transfer_bc_weights is None:
-                logger.warning("`transfer_bc_weights` utility not available. Skipping weight transfer.")
-            else:
-                # Move BC model to the target device before transfer
-                bc_net.to(device)
-                logger.info(f"Transferring weights from BCNet (on {device}) to PPO policy...")
-                transfer_bc_weights(bc_net, ppo_agent)
-                logger.info("Weight transfer complete.")
-
-        except Exception as e:
-            logger.error(f"Failed during BC model loading or weight transfer: {e}")
-            logger.exception(e)
-            logger.warning("Continuing RL training from scratch (random initialization).")
     else:
-        logger.info("No BC model provided — starting RL from scratch.")
+        logger.info("Starting a new training run.")
+        logger.info(f"Initializing PPO agent on device {device_str}...")
+        ppo_agent = initialize_ppo_agent(env, args, device_str)
+        logger.info("PPO agent ready")
 
-    # Callbacks and checkpointing
-    save_dir = os.path.join("trained_models", run_name)
-    os.makedirs(save_dir, exist_ok=True)
-    checkpoint_callback = CheckpointCallback(save_freq=max(1, save_freq), save_path=save_dir, name_prefix="dgpo_policy")
+        # Correctly handle weight transfer from BC if provided
+        if args.bc_model_path:
+            logger.info(f"Attempting to load BC checkpoint from: {args.bc_model_path}")
+            try:
+                state_dict = load_bc_checkpoint(args.bc_model_path, device)
+                action_dim = int(act_space.shape[0])
+                logger.info(f"Inferred action dimension from environment: {action_dim}")
 
+                logger.info("Instantiating temporary BCNet for weight transfer...")
+                bc_net = BCNet(n_actions=action_dim)
+                
+                # Robust logging for debugging
+                model_keys = set(bc_net.state_dict().keys())
+                ckpt_keys = set(state_dict.keys())
+                missing_keys = model_keys - ckpt_keys
+                unexpected_keys = ckpt_keys - model_keys
+                if missing_keys:
+                    logger.warning(f"BC checkpoint is missing keys: {list(missing_keys)}")
+                if unexpected_keys:
+                    logger.warning(f"BC checkpoint has unexpected keys: {list(unexpected_keys)}")
+                
+                # Load weights into the temporary model
+                bc_net.load_state_dict(state_dict, strict=False)
+                logger.info("Successfully loaded state_dict into temporary BCNet.")
+                
+                if transfer_bc_weights:
+                    bc_net.to(device)
+                    transfer_bc_weights(bc_net, ppo_agent)
+                    logger.info("Weight transfer from BC model to PPO agent is complete.")
+                else:
+                    logger.warning("`transfer_bc_weights` utility not available. Skipping transfer.")
+
+            except Exception as e:
+                    logger.error(f"Failed during BC model loading or weight transfer: {e}")
+                    logger.exception(e)
+                    logger.warning("Continuing RL training from scratch (random initialization).")
+        else:
+            logger.info("No BC model provided — starting RL")
+
+    save_freq_per_env = max(1, args.save_freq // args.n_envs)
+    logger.info(f"Checkpoint callback configured to save every {args.save_freq} total timesteps "
+                f"({save_freq_per_env} steps per environment).")
+    
+    checkpoint_callback = CheckpointCallback(
+        save_freq=save_freq_per_env,
+        save_path=save_dir,
+        name_prefix="dgpo_policy"
+    )
     # Start RL training (handle potential API differences)
     logger.info(f"Starting RL fine-tuning for {total_timesteps} timesteps...")
     try:
         import inspect
+        reset_timesteps = False if resume_from else True 
         # Check if the `learn` method supports `progress_bar`
         learn_signature = inspect.signature(ppo_agent.learn)
         if "progress_bar" in learn_signature.parameters:
-            logger.info("SB3 version supports `progress_bar`. Training with progress bar.")
-            ppo_agent.learn(total_timesteps=total_timesteps, callback=checkpoint_callback, progress_bar=True)
+            logger.info(f"Starting training (resuming={not reset_timesteps}) for {args.total_timesteps} timesteps...")
+            ppo_agent.learn(
+                total_timesteps=args.total_timesteps,
+                callback=checkpoint_callback,
+                reset_num_timesteps=reset_timesteps,
+                progress_bar=True,
+            )
         else:
-            logger.info("SB3 version does not support `progress_bar`. Training without it.")
-            ppo_agent.learn(total_timesteps=total_timesteps, callback=checkpoint_callback)
+            ppo_agent.learn(
+                total_timesteps=args.total_timesteps,
+                callback=checkpoint_callback,
+                reset_num_timesteps=reset_timesteps
+            )
             
     except Exception as e:
         logger.exception("An error occurred during training.")
@@ -538,13 +392,30 @@ def run_experiment(
     except Exception as e:
         logger.warning(f"Error closing environment: {e}")
 
-
+def _parse_hw(s: str) -> Tuple[int, int]:
+    """Helper to parse HxW string like '128x128' into a tuple."""
+    try:
+        h, w = map(int, s.lower().split("x"))
+        return (h, w)
+    except Exception:
+        raise argparse.ArgumentTypeError(f"Invalid HxW format: '{s}'. Use '128x128'.")
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run DGPO-Foundation RL training")
+    run_group = parser.add_mutually_exclusive_group(required=True)
+
     parser.add_argument("--xml_path", type=str, default="envs/panda_pick_place.xml")
-    parser.add_argument("--bc_model_path", type=str, default="trained_models/policy_pretrained_bc.pth")
+    parser.add_argument("--bc_model_path", type=str, default=None, help="Path to a .pth BC artifact to START a new run.")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to a .zip SB3 checkpoint to RESUME a run.")
     parser.add_argument("--total_timesteps", type=int, default=500_000)
-    parser.add_argument("--run_name", type=str, default=f"dgpo_run_{int(time.time())}")
+    run_group.add_argument("--run_name", type=str,
+                         help="Name for a NEW run. A directory will be created in --output_dir.")
+    run_group.add_argument("--resume_dir", type=str,
+                         help="Path to an existing run directory to RESUME training.")
+
+    # --- Initialization ---
+    parser.add_argument("--bc_init_dir", type=str, default=None,
+                        help="Path to a COMPLETED BC run directory to initialize weights for a NEW run.")
+
     parser.add_argument("--save_freq", type=int, default=20_000)
     parser.add_argument("--enable_downsample", action="store_true",
                         help="Enable antialiased downsampling of image observations for the policy.")
@@ -564,24 +435,39 @@ if __name__ == "__main__":
     parser.add_argument("--div_clip", type=float, default=10.0,
                         help="Maximum value to clip the raw divergence score before weighting.")
     args = parser.parse_args()
+    if args.bc_model_path and args.resume_from:
+        raise argparse.ArgumentTypeError("Cannot provide both --bc_model_path and --resume_from. Choose one to start or resume a run.")
+    if not args.bc_model_path and not args.resume_from:
+        logger.warning("Neither --bc_model_path nor --resume_from was provided. The agent will be trained from scratch with random initialization.")
 
-    # normalize bc_model_path: accept 'None' literal
-    if args.bc_model_path and args.bc_model_path.lower() == "none":
-        args.bc_model_path = None
-    def _parse_hw(s: str) -> Tuple[int, int]:
-        try:
-            h, w = map(int, s.lower().split("x"))
-            return (h, w)
-        except Exception:
-            raise argparse.ArgumentTypeError(f"Invalid HxW format: '{s}'. Use '128x128'.")
+
+    if args.resume_dir:
+        # In resume mode, we ignore bc_init_dir and run_name from the CLI
+        bc_model_path_for_func = None
+        resume_from_for_func = None # The function will find the latest checkpoint inside
+        run_name_for_func = None
+    else:
+        # In new run mode, resume_dir is None
+        # We need to find the best model path from the bc_init_dir
+        if args.bc_init_dir:
+            bc_model_path_for_func = str(Path(args.bc_init_dir) / "checkpoints" / "best_model.pth")
+            if not os.path.exists(bc_model_path_for_func):
+                logger.error(f"BC checkpoint not found at {bc_model_path_for_func}"); sys.exit(1)
+        else:
+            bc_model_path_for_func = None
+        resume_from_for_func = None
+        run_name_for_func = args.run_nam
 
     primary_res = _parse_hw(args.primary_res)
     wrist_res = _parse_hw(args.wrist_res)
+
     run_experiment(
         xml_path=args.xml_path,
-        bc_model_path=args.bc_model_path,
+        bc_model_path=bc_model_path_for_func,
+        resume_from=resume_from_for_func,
         total_timesteps=args.total_timesteps,
-        run_name=args.run_name,
+        run_name=run_name_for_func,
+        resume_dir=args.resume_dir,
         save_freq=args.save_freq,
         seed=args.seed,
         device_arg=args.device,

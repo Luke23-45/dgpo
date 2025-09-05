@@ -38,25 +38,22 @@ from utils.obs_adapters import build_octo_observation
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+OCTO_POSTPROCESS_CONFIG = {
+    # If the predicted z-coordinate is negative (a common failure mode) and the
+    # current end-effector is well above the table, flip the sign.
+    "Z_FLIP_THRESHOLD_LOW": 0.0,
+    "Z_FLIP_THRESHOLD_HIGH": 0.1,
+    
+    # A hard reachability limit to reject nonsensical OCTO predictions.
+    # This is the max distance from the robot base to the target end-effector position.
+    "REACHABILITY_LIMIT": 0.85, # in meters
 
-def _to_torch_image(img: np.ndarray) -> torch.Tensor:
-    """Convert HWC uint8 image to CHW float32 in [-1, 1]."""
-    if not isinstance(img, np.ndarray):
-        img = np.asarray(img)
-    # Ensure HWC
-    if img.ndim != 3 or img.shape[2] != 3:
-        # Try squeeze/reshape defensively
-        img = img.reshape(256, 256, 3)
-    # Cast and normalize to [-1, 1]
-    img_f = img.astype(np.float32)
-    if img_f.max() > 2.0:  # assume 0..255
-        img_f = img_f / 127.5 - 1.0
-    else:  # already near [-1,1] or [0,1]
-        img_f = np.clip(img_f, -1.0, 1.0)
-    # HWC -> CHW
-    img_chw = np.transpose(img_f, (2, 0, 1))
-    return torch.from_numpy(img_chw)
-
+    # Heuristics to determine when the gripper should close.
+    # Closes if the XY distance to the cube is less than this threshold AND
+    # the Z height is below the cube's top plus a small margin.
+    "GRIPPER_CLOSE_XY_THRESHOLD": 0.04, # in meters
+    "GRIPPER_CLOSE_Z_MARGIN": 0.03, # in meters
+}
 
 class ExpertDataset(IterableDataset):
     def __init__(
@@ -72,9 +69,6 @@ class ExpertDataset(IterableDataset):
         warmup: bool = False,
         use_octo: bool = True, # Flag to enable/disable OCTO
         scripted_cfg: ExpertConfig = ExpertConfig(), # Config for our fallback expert
-        device: Optional[torch.device] = None,
-        move_to_device: bool = False,
-        octo_pad_mask: np.ndarray = np.array([[False, True]])
     ) -> None:
         """
         Args:
@@ -96,9 +90,6 @@ class ExpertDataset(IterableDataset):
         self.octo_model_name = octo_model_name
         self.env_xml_path = env_xml_path
         self.base_seed = int(base_seed) if base_seed is not None else None
-        self.device = device
-        self.move_to_device = bool(move_to_device)
-        self.octo_pad_mask = np.asarray(octo_pad_mask)
         self.max_samples_per_epoch = int(max_samples_per_epoch) if max_samples_per_epoch is not None else None
         self.skip_on_error = bool(skip_on_error)
         self.warmup = bool(warmup)
@@ -140,6 +131,25 @@ class ExpertDataset(IterableDataset):
         self._ik_solver = IKSolver(urdf_path=self.urdf_path)
         self._scripted_expert = ScriptedExpert(self.scripted_cfg)
         
+        if self.warmup and self.use_octo:
+            logger.info(f"[worker {worker_id}] Performing OCTO model warmup...")
+            try:
+                dummy_obs = {
+                    "image_primary": np.zeros((256, 256, 3), dtype=np.uint8),
+                    "proprio": np.zeros(14, dtype=np.float32),
+                    # Add other keys expected by build_octo_observation
+                    "task_completed": np.array([0.0], dtype=np.float32),
+                }
+                # Use our robust adapter to build the final OCTO-compliant observation.
+                octo_obs = build_octo_observation(dummy_obs)
+                
+                # Perform one sample action call to trigger JIT compilation.
+                self._octo_model.sample_actions(octo_obs, self._task, rng=self._jax_key)
+                logger.info(f"[worker {worker_id}] OCTO model warmup successful.")
+            except Exception as e:
+                # If warmup fails, it's not a fatal error. We should log it but continue.
+                logger.warning(f"[worker {worker_id}] OCTO model warmup failed: {e}")
+
         self._worker_state_initialized = True
         self._samples_yielded = 0
         logger.info(f"[worker {worker_id}] Worker state initialized.")
@@ -171,7 +181,6 @@ class ExpertDataset(IterableDataset):
         # 1. Reset env and get a rich observation with ground-truth data
         obs = self._env.get_expert_obs()
         self._scripted_expert.reset() # Reset expert state for each new sample
-        obs["task_completed"] = np.array([0.0], dtype=np.float32)
         pose_world = None
         gripper_action = -1.0 # Default to open
         expert_source = "scripted" # Assume scripted unless OCTO succeeds
@@ -188,10 +197,12 @@ class ExpertDataset(IterableDataset):
                 
                 # --- Start Post-Processing and Validation ---
                 # This logic is copied from our debug script
+                # --- Start Post-Processing and Validation ---
                 candidate_pose = np.array(raw_action[0, 0, :7], dtype=np.float32)
                 
-                # Z-flip
-                if (candidate_pose[2] < 0.0) and (obs["ee_pose_world"][2] > 0.1):
+                # Z-flip heuristic
+                if (candidate_pose[2] < OCTO_POSTPROCESS_CONFIG["Z_FLIP_THRESHOLD_LOW"]
+                    and obs["ee_pose_world"][2] > OCTO_POSTPROCESS_CONFIG["Z_FLIP_THRESHOLD_HIGH"]):
                     candidate_pose[2] *= -1.0
                 
                 # Normalize quaternion
@@ -200,8 +211,8 @@ class ExpertDataset(IterableDataset):
                 if qn > 1e-6:
                     candidate_pose[3:7] = q / qn
 
-                # Workspace clamp
-                cfg = self.scripted_cfg # Use same workspace config as scripted expert
+                # Workspace clamp (using the same workspace as the scripted expert is a good choice)
+                cfg = self.scripted_cfg
                 for i, ax in enumerate(("x", "y", "z")):
                     lo, hi = cfg.workspace[ax]
                     candidate_pose[i] = np.clip(candidate_pose[i], lo, hi)
@@ -209,14 +220,20 @@ class ExpertDataset(IterableDataset):
                 # Reachability check
                 base_pos, _ = self._env.get_base_pose()
                 dist_from_base = np.linalg.norm(candidate_pose[:3] - base_pos)
-                if np.all(np.isfinite(candidate_pose)) and dist_from_base <= 0.85:
+                if (np.all(np.isfinite(candidate_pose)) and 
+                    dist_from_base <= OCTO_POSTPROCESS_CONFIG["REACHABILITY_LIMIT"]):
                     # SUCCESS! The OCTO pose is valid.
                     pose_world = candidate_pose
                     expert_source = "octo"
+
                     # Simple gripper heuristic for OCTO
-                    near_cube = np.linalg.norm(pose_world[:2] - obs["object_pos_world"][:2]) < 0.04
-                    is_low_enough = pose_world[2] < (obs["object_pos_world"][2] + 0.03)
-                    gripper_action = 1.0 if (near_cube and is_low_enough) else -1.0
+                    xy_dist_to_cube = np.linalg.norm(pose_world[:2] - obs["object_pos_world"][:2])
+                    z_pos_relative_to_cube = pose_world[2] - obs["object_pos_world"][2]
+
+                    is_near_cube = xy_dist_to_cube < OCTO_POSTPROCESS_CONFIG["GRIPPER_CLOSE_XY_THRESHOLD"]
+                    is_low_enough = z_pos_relative_to_cube < OCTO_POSTPROCESS_CONFIG["GRIPPER_CLOSE_Z_MARGIN"]
+                    
+                    gripper_action = 1.0 if (is_near_cube and is_low_enough) else -1.0
                 else:
                     logger.debug(f"OCTO pose rejected (dist: {dist_from_base:.2f}m). Falling back.")
 
@@ -241,17 +258,18 @@ class ExpertDataset(IterableDataset):
         target_pose_base = np.concatenate([pos_in_base, rot_in_base.as_quat()]).astype(np.float32)
 
         current_joints = obs["internal_full_proprio"][:7]
-        arm_action_deltas = self._ik_solver.compute_action(target_pose_base, current_joints)
+        # compute_action now correctly returns a 7-DOF arm action
+        arm_action = self._ik_solver.compute_action(target_pose_base, current_joints)
 
-        if np.linalg.norm(arm_action_deltas) < 1e-6:
+        if np.linalg.norm(arm_action) < 1e-6:
             logger.debug(
                 f"IK from expert '{expert_source}' resulted in a near-zero action. "
                 "This is expected if the EE is already at the target pose."
             )
 
-        # 5. Combine arm and gripper actions
+        # 5. Combine the computed 7D arm action with the 1D gripper action
         gripper_ctrl = gripper_action_to_ctrl(gripper_action)
-        final_action = np.concatenate([arm_action_deltas[:7], [gripper_ctrl]])
+        final_action = np.concatenate([arm_action, [gripper_ctrl]])
         
         # Add metadata to the observation if you want to track the source
         obs["expert_source"] = 1 if expert_source == "octo" else 0

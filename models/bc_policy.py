@@ -23,7 +23,7 @@ from typing import Dict, Tuple, Union, Any, Optional, List
 
 import logging
 import math
-
+from .registry import register_model
 import torch
 import torch.nn as nn
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 TensorOrDict = Union[torch.Tensor, Dict[str, torch.Tensor]]
 ObsType = Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]
 
-
+@register_model("bc_net_v1")
 class BCNet(nn.Module):
     def __init__(
         self,

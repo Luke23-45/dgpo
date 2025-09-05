@@ -142,7 +142,7 @@ class RLRewardWrapper(gym.Wrapper):
         self.pos_weight = 1.0 / (pos_scale**2) if pos_scale > 1e-6 else 1.0
         self.rot_weight = rot_scale
         if self.octo_model:
-            self.octo_task = self.octo_model.create_tasks(texts=["pick up the red block"])
+            self.octo_task = None
         
         self._episode_trajectory: List[Dict[str, np.ndarray]] = []
         self.div_frame_stride = max(1, div_frame_stride)
@@ -191,10 +191,26 @@ class RLRewardWrapper(gym.Wrapper):
                 self._warned["goal"] = True
             return None
 
-    def reset(self, **kwargs) -> Tuple[Any, Dict[str, Any]]:
+    def reset(self, *, seed: int | None = None, options: dict | None = None) -> tuple[Any, dict[str, Any]]:
         """Resets the environment and the wrapper's internal state."""
-        obs, info = self.env.reset(**kwargs)
-
+        obs, info = self.env.reset(seed=seed, options=options)
+        if self.octo_model:
+            instruction = None
+            if "language_instruction" in info:
+                instruction = info["language_instruction"]
+            elif "language_instruction" in obs:
+                instruction = obs["language_instruction"]
+            
+            if instruction is not None:
+                # Ensure instruction is a plain string
+                if hasattr(instruction, 'decode'):
+                    instruction = instruction.decode('utf-8')
+                self.octo_task = self.octo_model.create_tasks(texts=[str(instruction)])
+                logger.debug(f"RewardWrapper task updated to: '{instruction}'")
+            elif self.octo_task is None:
+                default_instruction = "pick up the red block"
+                self.octo_task = self.octo_model.create_tasks(texts=[default_instruction])
+                logger.warning(f"No instruction found in reset(), using default: '{default_instruction}'")
         # Reset internal state flags
         self._grasp_achieved = False
         self._lift_achieved = False

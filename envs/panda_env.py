@@ -31,7 +31,7 @@ class PandaEnv(gym.Env):
       simulation stepping, and object manipulation to prevent crashes.
     """
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
-    def __init__(self, xml_path: str = "envs/panda_pick_place.xml", render_mode: str = "rgb_array",for_sb3: bool = False):
+    def __init__(self, xml_path: str = "envs/panda_pick_place.xml", render_mode: str = "rgb_array"):
         super().__init__()
 
 
@@ -69,33 +69,34 @@ class PandaEnv(gym.Env):
     # (Inside PandaEnv class)
     # envs/panda_env.py --> _define_spaces()
     def _define_spaces(self):
-        """Defines observation and action spaces to be fully OCTO-compliant."""
+        """
+        Defines observation and action spaces. This version provides all keys
+        that are directly used by the OCTO expert pipeline.
+        """
         self.observation_space = spaces.Dict({
-            # --- Primary modalities ---
+            # --- Core Visual Modalities (HWC format) ---
             "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
             "image_wrist":   spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
-            "proprio":       spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
-            "internal_full_proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
-
-            # --- Control fields required by OCTO ---
-            "timestep":       spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(), dtype=np.int32),
-
-            # --- Nested dictionary for padding masks ---
-            "pad_mask_dict": spaces.Dict({
-                "image_primary": spaces.MultiBinary(1),
-                "image_wrist":   spaces.MultiBinary(1),
-                "proprio":       spaces.MultiBinary(1),
-                "timestep":      spaces.MultiBinary(1),
-            }),
+            
+            # --- Proprioceptive State ---
+            # The primary 14D proprio state (7 joint pos + 7 joint vel)
+            "proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
+            
+            # --- Additional State Information for Expert ---
+            # A scalar indicating if the task is complete (0.0 or 1.0)
+            "task_completed": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
+            
+            # Current timestep in the episode, shaped as a 1D array
+            "timestep": spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(1,), dtype=np.int32),
         })
+        
+        # Action space: 7 arm joint deltas + 1 gripper command
         act_dim = int(getattr(self.model, "nu", 8))
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
-
         
     def render(self, camera_name: str = "fixed_camera"):
         """
         Handles rendering for the 'rgb_array' mode from a specified camera.
-        
         This robust version always renders at the primary camera's resolution
         and then downsamples if a smaller view (like the wrist) is requested.
         This avoids resizing the MuJoCo renderer context, which is more stable.
@@ -115,8 +116,7 @@ class PandaEnv(gym.Env):
 
         try:
             # Update the scene with the desired camera view
-            self.renderer.update_scene(self.data, camera=camera_name)
-            
+            self.renderer.update_scene(self.data, camera=camera_name)  
             # Render the image at the pre-set large resolution
             large_image = self.renderer.render()
         except Exception as e:
@@ -156,26 +156,25 @@ class PandaEnv(gym.Env):
         return np.concatenate([pos, quat_xyzw]).astype(np.float32)
 
     # envs/panda_env.py --> _get_obs()
-    def _get_obs(self) -> dict:
-        """Returns a single-timestep observation that is fully OCTO-compliant."""
+    def _get_obs(self) -> Dict[str, np.ndarray]:
+        """
+        Returns a clean observation dictionary that matches the observation_space.
+        This version includes rendering for both primary and wrist cameras.
+        """
+        # Get base proprioceptive state (joint positions and velocities)
         qpos = np.asarray(self.data.qpos, dtype=np.float32)
         qvel = np.asarray(self.data.qvel, dtype=np.float32)
         proprio = np.concatenate([qpos[:7], qvel[:7]])
 
+        # The observation now includes both rendered images.
         return {
-            "image_primary": self.render(),
+            "image_primary": self.render(camera_name="fixed_camera"),
             "image_wrist": self.render(camera_name="wrist_camera"),
             "proprio": proprio,
-            "internal_full_proprio": proprio, # Keep alias for IK
-            "timestep": np.int32(self.timestep), # scalar int32
-
-            "pad_mask_dict": {
-                "image_primary": np.array(True, dtype=bool),
-                "image_wrist":   np.array(True, dtype=bool),
-                "proprio":       np.array(True, dtype=bool),
-                "timestep":      np.array(True, dtype=bool),
-            },
+            "task_completed": np.array([0.0], dtype=np.float32),
+            "timestep": np.array([self.timestep], dtype=np.int32),
         }
+    
     def get_body_pos_expert(self, name: str) -> np.ndarray:
         """
         Expert-specific helper to get a body's world position.
@@ -194,38 +193,29 @@ class PandaEnv(gym.Env):
         """Gets the ground-truth world position of the goal for the expert."""
         return self.get_body_pos_expert("goal")
 
-    def get_base_pose_expert(self) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Expert-specific version of get_base_pose that guarantees xyzw quaternion
-        and float32 dtype, respecting the expert pipeline's invariants.
-        The original get_base_pose is left untouched for other components.
-        """
-        bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "link0")
-        if bid == -1:
-             raise ValueError("Body 'link0' not found.")
-        pos = self.data.xpos[bid].copy().astype(np.float32)
-        quat_wxyz = self.data.xquat[bid].copy()
-        # Convert to xyzw and ensure float32
-        quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float32)
-        return pos, quat_xyzw
 
     def get_expert_obs(self) -> Dict[str, np.ndarray]:
         """
-        Returns a rich observation dictionary tailored specifically for use by
-        the ExpertDataset and ScriptedExpert. This method is non-breaking.
-        """
+        Returns a rich observation dictionary for the expert pipeline.
 
+        This includes the standard observation (with both camera views) plus
+        ground-truth state information required by the expert.
+        """
+        # Start with the standard observation, which now includes the wrist image.
         obs = self._get_obs()
 
-        # Add the ground-truth information needed by the scripted expert
-        obs["ee_pose_world"] = self.get_ee_pose() # get_ee_pose is already compliant
-        obs["object_pos_world"] = self.get_object_pos_expert().astype(np.float32)
-        obs["goal_pos_world"] = self.get_goal_pos_expert().astype(np.float32)
+        # Add ground-truth data required ONLY by the expert.
+        obs["ee_pose_world"] = self.get_ee_pose()
+        obs["object_pos_world"] = self.get_object_pos_expert()
+        obs["goal_pos_world"] = self.get_goal_pos_expert()
         
+        # Add the redundant proprio key required by the IKSolver.
+        # This isolates the redundancy to the expert pipeline, which is a good design.
+        obs["internal_full_proprio"] = obs["proprio"].copy()
+
         return obs
 
-
-    def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:
+    def reset(self, seed: int = None) -> Tuple[Dict, Dict]:
         """Resets the environment to a new, randomized state."""
         if seed is not None:
             self.np_random, _ = seeding.np_random(seed)
@@ -302,14 +292,20 @@ class PandaEnv(gym.Env):
                 self.renderer = None
 
     def get_base_pose(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Returns the world-frame pose of the robot's base ('link0')."""
+        """
+        Returns the world-frame pose (pos, quat_xyzw) of the robot's base.
+        This version is robust, ensuring float32 dtype and xyzw quaternion format.
+        """
         base_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "link0")
         if base_body_id < 0:
             raise ValueError("Body 'link0' not found in the MuJoCo model.")
         
-        pos = self.data.xpos[base_body_id].copy()
+        # Ensure data is float32
+        pos = self.data.xpos[base_body_id].copy().astype(np.float32)
+        
+        # Ensure quaternion is in xyzw format and float32
         quat_wxyz = self.data.xquat[base_body_id].copy()
-        quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])
+        quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float32)
         
         return pos, quat_xyzw
     

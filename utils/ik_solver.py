@@ -7,33 +7,8 @@ import io
 import logging 
 
 logger = logging.getLogger(__name__) 
-def _quat_xyzw_to_wxyz(q_xyzw: np.ndarray) -> np.ndarray:
-    """Convert quaternion from [x, y, z, w] -> [w, x, y, z] and normalize."""
-    q = np.asarray(q_xyzw, dtype=float).reshape(-1)
-    if q.size != 4:
-        raise ValueError("Quaternion must have 4 elements (x, y, z, w).")
-    x, y, z, w = q
-    n = np.sqrt(w * w + x * x + y * y + z * z)
-    if n == 0.0:
-        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
-    return np.array([w / n, x / n, y / n, z / n], dtype=float)
 
 
-def _rot_from_quat_wxyz(q_wxyz: np.ndarray) -> np.ndarray:
-    """Quaternion [w, x, y, z] -> 3x3 rotation matrix (right-handed)."""
-    w, x, y, z = map(float, q_wxyz)
-    n = np.sqrt(w * w + x * x + y * y + z * z)
-    if n == 0.0:
-        return np.eye(3, dtype=float)
-    w, x, y, z = w / n, x / n, y / n, z / n
-    return np.array(
-        [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-        ],
-        dtype=float,
-    )
 
 
 class IKSolver:
@@ -46,8 +21,7 @@ class IKSolver:
     """
 
     def __init__(self, urdf_path: str, expect_7_dof: bool = True):
-        print(f"⏳ [IKSolver] Loading kinematic chain from: {urdf_path}")
-
+        logger.info(f"⏳ [IKSolver] Loading kinematic chain from: {urdf_path}")
         try:
             # Load full chain starting from "link0"
             self.chain = ikpy.chain.Chain.from_urdf_file(
@@ -69,8 +43,7 @@ class IKSolver:
             self.chain.active_links_mask = active_links_mask
 
         except Exception as e:
-            print("❌ FATAL ERROR [IKSolver]: Could not parse URDF or build chain.")
-            print(f"   Error: {e}")
+            logger.critical("Could not parse URDF or build chain.", exc_info=True)
             raise
 
         # store active indices & names (in-chain indices)
@@ -97,20 +70,41 @@ class IKSolver:
             self._joint_limits.append((lo, hi))
 
         # debug prints
-        print("✅ [IKSolver] Kinematic chain loaded and configured.")
-        print(f"   Total links in chain: {len(self.chain.links)}")
-        print(f"   End effector (last link): {self.chain.links[-1].name}")
-        print(f"   Active joints: {len(self._active_idx)}")
-        for i, name in zip(self._active_idx, self._active_joint_names):
-            print(f"     - [{i:02d}] {name}")
-        print("   Joint limits (low, high) per active joint:")
-        for (lo, hi) in self._joint_limits:
-            print(f"     - ({lo}, {hi})")
+        logger.info("Kinematic chain loaded and configured.")
+        logger.debug(f"End effector (last link): {self.chain.links[-1].name}")
+        logger.debug(f"Found {len(self._active_idx)} active joints: {self._active_joint_names}")
 
         if expect_7_dof and len(self._active_idx) != 7:
-            print(f"⚠️ [IKSolver] Warning: expect_7_dof=True but found {len(self._active_idx)} active joints.")
+            logger.warning(f"Expected 7 active joints but found {len(self._active_idx)}.")
   
-  
+    @staticmethod
+    def _quat_xyzw_to_wxyz(q_xyzw: np.ndarray) -> np.ndarray:
+        """Convert quaternion from [x, y, z, w] -> [w, x, y, z] and normalize."""
+        q = np.asarray(q_xyzw, dtype=float).reshape(-1)
+        if q.size != 4:
+            raise ValueError("Quaternion must have 4 elements (x, y, z, w).")
+        x, y, z, w = q
+        n = np.sqrt(w * w + x * x + y * y + z * z)
+        if n == 0.0:
+            return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+        return np.array([w / n, x / n, y / n, z / n], dtype=float)
+
+    @staticmethod
+    def _rot_from_quat_wxyz(q_wxyz: np.ndarray) -> np.ndarray:
+        """Quaternion [w, x, y, z] -> 3x3 rotation matrix (right-handed)."""
+        w, x, y, z = map(float, q_wxyz)
+        n = np.sqrt(w * w + x * x + y * y + z * z)
+        if n == 0.0:
+            return np.eye(3, dtype=float)
+        w, x, y, z = w / n, x / n, y / n, z / n
+        return np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+            ],
+            dtype=float,
+        )  
     def _get_target_joint_angles(
         self,
         target_pose_7d: np.ndarray,
@@ -138,7 +132,7 @@ class IKSolver:
 
         # --- 1. Prepare IK Inputs ---
         target_position = target_pose_7d[:3]
-        target_orientation_matrix = _rot_from_quat_wxyz(_quat_xyzw_to_wxyz(target_pose_7d[3:]))
+        target_orientation_matrix = self._rot_from_quat_wxyz(self._quat_xyzw_to_wxyz(target_pose_7d[3:]))
 
         target_frame = np.eye(4, dtype=float)
         target_frame[:3, :3] = target_orientation_matrix
@@ -238,7 +232,7 @@ class IKSolver:
         # 2. Handle IK failure
         if target_joint_angles is None:
             # On failure, command a zero-velocity action to hold position
-            return np.zeros(n_active + 1, dtype=np.float32)
+            return np.zeros(n_active, dtype=np.float32)
 
         # 3. Compute the Proportional control action
         arm_action_delta = target_joint_angles - current_joint_angles
@@ -246,10 +240,8 @@ class IKSolver:
         # Scale the delta by the gain (max_delta) and clip to [-1, 1]
         scaled_arm_action = np.clip(arm_action_delta / max_delta, -1.0, 1.0)
 
-        # Append a placeholder gripper action (the caller is responsible for the real gripper command)
-        final_action = np.concatenate([scaled_arm_action, [-1.0]])
-
-        return final_action.astype(np.float32)
+        return scaled_arm_action.astype(np.float32)
+    
     def joint_names(self) -> Tuple[str, ...]:
         """Return the active joint names in order."""
         return self._active_joint_names
