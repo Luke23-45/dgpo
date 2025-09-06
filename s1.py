@@ -74,18 +74,58 @@ def get_debug_info(env: PandaEnv) -> dict:
     # Return the dictionary instead of saving it
     return debug_data
 # ================================================================================
+# FILE: envs/panda_env.py (Replace this entire dataclass)
+"""
+
+
+
+"""
+
 
 def main():
     print("--- Starting Camera Shot Tuning and Visualization Test ---")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     shots_to_test = [
-        CameraShot(pos=(1.0, -0.4, 0.8), target=(0.6, 0.0, 0.5)),
-        CameraShot(pos=(1.0, 0.4, 0.8), target=(0.6, 0.0, 0.5)),
-        CameraShot(pos=(0.9, -0.05, 0.75), target=(0.6, 0.0, 0.5)),
-        CameraShot(pos=(0.8, -0.5, 1.1), target=(0.6, 0.0, 0.45)),
-        CameraShot(pos=(1.1, -0.3, 0.65), target=(0.6, 0.0, 0.55)),
+                # --- Right Three-Quarter Views ---
+        # (From Shot_01/sample_00) - A perfect classic view. Elevation: 39°
+        CameraShot(pos=(0.88, -0.44, 0.95), target=(0.42, -0.02, 0.44)),
+        # (From Shot_04/sample_01) - A slightly wider right view. Elevation: 45.1°
+        CameraShot(pos=(1.07, -0.25, 1.09), target=(0.49, -0.03, 0.44)),
+        # (From Shot_04/sample_01) - A slightly different angle, good composition. Elevation: 53°
+        CameraShot(pos=(0.63, -0.44, 1.07), target=(0.49, -0.00, 0.45)),
+
+
+        # --- Left Three-Quarter Views ---
+        # (From Shot_02/sample_00) - Excellent left-side view. Elevation: 34°
+        CameraShot(pos=(0.83, 0.49, 0.87), target=(0.48, -0.03, 0.43)),
+        # (From Shot_06/sample_01) - A wider left-side view. Elevation: 35°
+        CameraShot(pos=(1.08, 0.36, 0.97), target=(0.47, 0.06, 0.44)),
+
+        # --- Frontal Views ---
+        # (From Shot_09/sample_12) - A centered, slightly higher frontal view. Elevation: 41°
+        CameraShot(pos=(1.14, -0.01, 0.99), target=(0.52, 0.03, 0.43)),
+        # (From Shot_09/sample_12) - A centered, slightly higher frontal view. Elevation: 38.4°
+        CameraShot(pos=(1.02, 0.10, 0.95), target=(0.39, 0.04, 0.45)),
+        # (From Shot_08/sample_00) - A well-balanced frontal shot. Elevation: 30°
+        CameraShot(pos=(1.35, 0.34, 1.00), target=(0.44, -0.01, 0.45)),
+
+
+        # --- High-Angle / Near Top-Down Views ---
+        # (From Shot_03/sample_11) - A high three-quarter view, very informative. Elevation: 44°
+        CameraShot(pos=(1.04, -0.04, 1.04), target=(0.43, 0.01, 0.43)),
+        # (From Shot_07/sample_00) - A balanced top-down view, not too extreme. Elevation: 74°
+        CameraShot(pos=(0.72, 0.00, 1.42), target=(0.45, 0.02, 0.43)),
+
+        # --- Dynamic / Lower Views (Still Safe) ---
+        # (From Shot_01/sample_09) - A lower, more dynamic angle that still works well. Elevation: 27.8°
+        CameraShot(pos=(1.05, -0.37, 0.82), target=(0.44, -0.00, 0.45)),
+        # (From Shot_05/sample_13) - A lower, more dynamic angle that still works well. Elevation: 18°
+        CameraShot(pos=(1.16, -0.27, 0.72), target=(0.48, -0.07, 0.45)),
+        # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
+        CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
     ]
+    
     print(f"Found {len(shots_to_test)} camera shots to visualize and tune.")
 
     # --- NEW: Create a master dictionary to hold all data ---

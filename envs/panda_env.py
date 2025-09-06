@@ -22,7 +22,7 @@ class RenderPostConfig:
     auto_exposure_percentile: float = 0.98
     target_white: float = 0.8          # in linear space
     min_exposure: float = 0.7
-    max_exposure: float = 1
+    max_exposure: float = 1.2
 
     # Color space management
     assume_input_is_srgb: bool = True    # MuJoCo returns 8-bit sRGB-like frames
@@ -39,48 +39,73 @@ class CameraShot:
     pos: Tuple[float, float, float]
     target: Tuple[float, float, float]
 
+
+# FILE: envs/panda_env.py (Replace the dataclass)
+
 @dataclass
 class DomainRandomizationConfig:
     """Holds all parameters for domain randomization."""
-    # Lighting randomization
+    # Lighting and Texture randomization parameters remain the same.
     light_pos_range: Tuple[Tuple[float, float], ...] = ((-1.0, 1.0), (-1.0, 1.0), (1.5, 2.5))
     light_color_range: Tuple[Tuple[float, float], ...] = ((0.6, 1.0), (0.6, 1.0), (0.6, 1.0))
-
-    # Texture randomization (list of valid material names from the XML)
     table_textures: List[str] = field(default_factory=lambda: [
         "mat_table_wood_light", "mat_table_wood_stripe", "mat_table_marble_white",
-        "mat_table_metal_brushed", "mat_table_noise_low","mat_floor_wood_paquet"
+        "mat_table_metal_brushed", "mat_table_noise_low"
     ])
     floor_textures: List[str] = field(default_factory=lambda: [
         "mat_floor_checker_blue", "mat_floor_checker_green",
-        "mat_floor_wood_dark"
+        "mat_floor_wood_dark", "mat_floor_wood_paquet"
     ])
 
-    # Camera sampling ranges (spherical coordinates around TABLE_CENTER)
-    camera_radius_range: Tuple[float, float] = (0.2, 0.5)
-    camera_azimuth_range: Tuple[float, float] = (-0.6, 0.6)   # radians
-    camera_z_range: Tuple[float, float] = (0.8, 1.2)
-    camera_fovy_add_range: Tuple[float, float] = (0.0, 5.0)
-
-    # Optional pre-curated shots (used only if provided and flagged)
+    # ============================ CURATED EXEMPLAR SHOTS ============================
+    # FINAL PATCH: This new list is mined from the best results in your JSON data.
+    # It provides a wider, more robust, and higher-quality set of base viewpoints.
     camera_shots: List[CameraShot] = field(default_factory=lambda: [
-        # Shot 1: The "Classic" - A perfect three-quarter view from the right.
-        # Close enough to see detail, far enough to see context. Eye-level with the hand.
-        CameraShot(pos=(1.0, -0.4, 0.8), target=(0.6, 0.0, 0.5)),
-        
-        # Shot 2: The "Close-Up" - A tight, frontal shot.
-        # Brings the camera in closer for fine-grained detail.
-        CameraShot(pos=(0.9, -0.05, 0.75), target=(0.6, 0.0, 0.5)),
-        
-        # Shot 3: The "Top-Down" - The proven, informative high-angle view.
-        # We bring it slightly lower for more detail.
-        CameraShot(pos=(0.6, 0.0, 1.2), target=(0.6, 0.0, 0.4)),
-        
-        # Shot 4: The "Left View" - A mirror of the classic shot for diversity.
-        # Ensures the policy doesn't overfit to views from one side.
-        CameraShot(pos=(1.0, 0.4, 0.8), target=(0.6, 0.0, 0.5)),
+        # --- Right Three-Quarter Views ---
+        # (From Shot_01/sample_00) - A perfect classic view. Elevation: 39°
+        CameraShot(pos=(0.88, -0.44, 0.95), target=(0.42, -0.02, 0.44)),
+        # (From Shot_04/sample_01) - A slightly wider right view. Elevation: 45.1°
+        CameraShot(pos=(1.07, -0.25, 1.09), target=(0.49, -0.03, 0.44)),
+        # (From Shot_04/sample_01) - A slightly different angle, good composition. Elevation: 53°
+        CameraShot(pos=(0.57, 0.58, 1.01), target=(0.44, -0.01, 0.43)),
+
+
+        # --- Left Three-Quarter Views ---
+        # (From Shot_02/sample_00) - Excellent left-side view. Elevation: 34°
+        CameraShot(pos=(0.83, 0.49, 0.87), target=(0.48, -0.03, 0.43)),
+        # (From Shot_06/sample_01) - A wider left-side view. Elevation: 35°
+        CameraShot(pos=(1.08, 0.36, 0.97), target=(0.47, 0.06, 0.44)),
+
+        # --- Frontal Views ---
+        # (From Shot_09/sample_12) - A centered, slightly higher frontal view. Elevation: 41°
+        # CameraShot(pos=(1.14, -0.01, 0.99), target=(0.52, 0.03, 0.43)),
+        # (From Shot_09/sample_12) - A centered, slightly higher frontal view. Elevation: 38.4°
+        CameraShot(pos=(1.02, 0.10, 0.95), target=(0.39, 0.04, 0.45)),
+        # (From Shot_08/sample_00) - A well-balanced frontal shot. Elevation: 30°
+        CameraShot(pos=(1.35, 0.34, 1.00), target=(0.44, -0.01, 0.45)),
+
+
+        # --- High-Angle / Near Top-Down Views ---
+        # (From Shot_03/sample_11) - A high three-quarter view, very informative. Elevation: 44°
+        CameraShot(pos=(1.04, -0.04, 1.04), target=(0.43, 0.01, 0.43)),
+        # (From Shot_07/sample_00) - A balanced top-down view, not too extreme. Elevation: 74°
+        CameraShot(pos=(0.72, 0.00, 1.42), target=(0.45, 0.02, 0.43)),
+
+        # --- Dynamic / Lower Views (Still Safe) ---
+        # (From Shot_01/sample_09) - A lower, more dynamic angle that still works well. Elevation: 27.8°
+        CameraShot(pos=(1.05, -0.37, 0.82), target=(0.44, -0.00, 0.45)),
+        # (From Shot_05/sample_13) - A lower, more dynamic angle that still works well. Elevation: 18°
+        # CameraShot(pos=(1.16, -0.27, 0.72), target=(0.48, -0.07, 0.45)),
+        # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
+        CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
+
     ])
 
+    radius_jitter: float = 0.10      # meters (reduced from 0.15)
+    azimuth_jitter: float = 0.26     # radians (~15 degrees) (reduced from 0.35)
+    elevation_jitter: float = 0.17   # radians (~10 degrees) (reduced from 0.26)
+    target_pos_jitter: float = 0.05  # meters (reduced from 0.08)
+    fovy_jitter: float = 3.0         # degrees (reduced from 5.0)
 
 
 class PandaEnv(gym.Env):
@@ -324,10 +349,11 @@ class PandaEnv(gym.Env):
         radius = np.linalg.norm(vec)
         # Add a small epsilon to prevent division by zero for radius
         if radius < 1e-6:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, np.pi / 2
         azimuth = np.arctan2(vec[1], vec[0])
         elevation = np.arcsin(vec[2] / radius)
         return radius, azimuth, elevation
+    
     @staticmethod
     def _safe_normalize(vec: np.ndarray, default: np.ndarray = None) -> np.ndarray:
         """Normalizes a vector, returning a default if the norm is close to zero."""
@@ -349,109 +375,61 @@ class PandaEnv(gym.Env):
   
     def _apply_domain_randomization(self, gripper_pos: np.ndarray, goal_pos: np.ndarray):
         """
-        Handles all domain randomization. This now includes the core mode-switching
-        camera logic based on the task geometry.
+        Handles all domain randomization using the new "Exemplar-Based Spherical Jitter" strategy.
+        This guarantees high-quality, varied, and well-framed shots every time.
         """
         if not self.enable_domain_randomization:
             return
-            
-        # === PART 1: Lighting and Texture Randomization (Copied from old version) ===
+
+        # --- Part 1: Photometric Randomization (Lighting and Textures) ---
         self._randomize_photometrics()
 
-        # === PART 2: Mode-Switching Camera Placement ===
-        action_vec = gripper_pos - goal_pos
-        action_scale = np.linalg.norm(action_vec)
-        target_pos = (gripper_pos + goal_pos) / 2.0
+        # --- Part 2: Geometric Randomization (Principled Camera Placement) ---
 
-        if action_scale <= self.LONG_REACH_THRESHOLD:
-            # --- STRATEGY 1 (TIER 1 & 2 UPGRADE): Robust & Aesthetic View Generation ---
+        # 1. Select a random high-quality "exemplar" shot from our curated list.
+        chosen_shot = self.np_random.choice(self.dr_config.camera_shots)
+        base_cam_pos = np.array(chosen_shot.pos)
+        base_target_pos = np.array(chosen_shot.target)
 
-            # 1. Select a random "style" from the curated list.
-            if not self.dr_config.camera_shots:
-                chosen_shot = CameraShot(pos=(1.0, -0.4, 0.8), target=(0.6, 0.0, 0.5))
-            else:
-                chosen_shot = self.np_random.choice(self.dr_config.camera_shots)
+        # 2. Define the dynamic "center of action" for this specific task.
+        # We will aim the camera at the midpoint between the gripper and the goal.
+        action_midpoint = (gripper_pos + goal_pos) / 2.0
 
-            # 2. Extract and ROBUSTLY normalize the pure horizontal direction.
-            base_pos = np.array(chosen_shot.pos)
-            base_target = np.array(chosen_shot.target)
-            base_view_dir_3d = base_pos - base_target
-            
-            horizontal_dir_2d = base_view_dir_3d[:2]
-            # TIER 1 FIX: Handle degenerate azimuths (e.g., from a top-down shot)
-            if np.linalg.norm(horizontal_dir_2d) < 1e-5:
-                random_angle = self.np_random.uniform(0, 2 * np.pi)
-                horizontal_dir = np.array([np.cos(random_angle), np.sin(random_angle)])
-            else:
-                horizontal_dir = self._safe_normalize(horizontal_dir_2d)
+        # 3. Add bounded, random jitter to the target position.
+        # This creates small variations in framing (e.g., rule of thirds).
+        target_jitter = self.np_random.uniform(-self.dr_config.target_pos_jitter,
+                                               self.dr_config.target_pos_jitter,
+                                               size=3)
+        final_target_pos = action_midpoint + target_jitter
+        # Ensure the camera isn't looking at the floor.
+        final_target_pos[2] = max(final_target_pos[2], self.GOAL_Z_HEIGHT)
 
-            # TIER 2 UPGRADE 1: Azimuth Jitter Around Exemplar
-            jitter_angle = self.np_random.uniform(-0.5, 0.5) # ~ +/- 28 degrees
-            c, s = np.cos(jitter_angle), np.sin(jitter_angle)
-            rotation_matrix = np.array([[c, -s], [s, c]])
-            final_horizontal_dir = rotation_matrix @ horizontal_dir
+        # 4. Convert the exemplar's camera position to spherical coordinates relative to its target.
+        radius, azimuth, elevation = self._cartesian_to_spherical(base_cam_pos, base_target_pos)
 
-            # TIER 2 UPGRADE 2: Controlled Elevation Distribution (Truncated Normal)
-            mean_elevation = np.deg2rad(35)
-            std_dev_elevation = np.deg2rad(15)
-            elevation_rad = np.clip(
-                self.np_random.normal(mean_elevation, std_dev_elevation),
-                np.deg2rad(15),  # Min elevation
-                np.deg2rad(65)   # Max elevation
-            )
+        # 5. Apply bounded, random jitter in the more intuitive spherical coordinate space.
+        radius += self.np_random.uniform(-self.dr_config.radius_jitter, self.dr_config.radius_jitter)
+        azimuth += self.np_random.uniform(-self.dr_config.azimuth_jitter, self.dr_config.azimuth_jitter)
+        elevation += self.np_random.uniform(-self.dr_config.elevation_jitter, self.dr_config.elevation_jitter)
 
-            # 4. Reconstruct the 3D view direction
-            cam_z = np.sin(elevation_rad)
-            xy_mag = np.cos(elevation_rad)
-            cam_xy = xy_mag * final_horizontal_dir
-            final_view_dir = self._safe_normalize(np.array([cam_xy[0], cam_xy[1], cam_z]))
+        # Clamp the elevation to prevent extreme low or high angles. This is a critical safety check.
+        elevation = np.clip(elevation, np.deg2rad(20), np.deg2rad(75))
+        radius = np.clip(radius, 0.8, 2.0) # Prevent camera from getting too close or far
 
-            # 5. Adaptive Framing with NON-LINEAR mapping and CLAMPING
-            # TIER 2 UPGRADE 3: Saturating FOV with Sigmoid
-            fovy_range = self.CAM_MAX_FOVY - self.CAM_MIN_FOVY
-            L_mid = 0.3 # Task scale where FOV is halfway to max
-            gamma = 5.0 # Steepness of the curve
-            sigmoid_val = 1 / (1 + np.exp(-gamma * (action_scale - L_mid)))
-            deterministic_fovy = self.CAM_MIN_FOVY + fovy_range * sigmoid_val
-            
-            # TIER 1 FIX: Clamp the distance
-            unclamped_dist = self.CAM_BASE_DISTANCE + action_scale * self.CAM_DISTANCE_SCALE_FACTOR
-            final_distance = np.clip(unclamped_dist, self.CAM_MIN_DISTANCE, self.CAM_MAX_DISTANCE)
-            
-            # 6. Final Jittering and Compositional Offset
-            # TIER 2 UPGRADE 4: Intentional Off-centering
-            up_vec = np.array([0., 0., 1.])
-            side_vec = self._safe_normalize(np.cross(final_view_dir, up_vec), default=np.array([1.,0.,0.]))
-            cam_up_vec = self._safe_normalize(np.cross(side_vec, final_view_dir))
-            
-            offset_magnitude = 0.1 * final_distance # Offset proportional to distance
-            horizontal_offset = self.np_random.uniform(-offset_magnitude, offset_magnitude)
-            vertical_offset = self.np_random.uniform(-offset_magnitude, offset_magnitude)
-            
-            compositional_offset = horizontal_offset * side_vec + vertical_offset * cam_up_vec
-            
-            final_target_pos = target_pos + compositional_offset
+        # 6. Reconstruct the new Cartesian camera position using the jittered spherical coords
+        #    and the NEW dynamic target position.
+        final_cam_pos = self._spherical_to_cartesian(radius, azimuth, elevation, final_target_pos)
 
-            # Calculate deterministic position and apply final radius jitter
-            # We move AWAY from the target along the view direction
-            deterministic_cam_pos = final_target_pos + final_distance * final_view_dir
-            radius_jitter = self.np_random.uniform(-0.05, 0.05)
-            final_cam_pos = deterministic_cam_pos + radius_jitter * final_view_dir
-            
-            # Finalize orientation and FOV, clamping with our new constants
-            new_quat_xyzw = self._calculate_look_at_quat(final_cam_pos, final_target_pos)
-            final_fovy = np.clip(deterministic_fovy + self.np_random.uniform(-2.0, 2.0), self.CAM_MIN_FOVY, self.CAM_MAX_FOVY)
-        else:
-            # --- STRATEGY 2: Strategic Top-Down View ---
-            final_cam_pos = np.array([self.TABLE_CENTER[0], self.TABLE_CENTER[1], 1.5])
-            final_target_pos = np.append(self.TABLE_CENTER, 0.4)
-            new_quat_xyzw = self._calculate_look_at_quat(final_cam_pos, final_target_pos)
-            final_fovy = 70.0
+        # 7. Calculate the final camera orientation and FOV.
+        new_quat_xyzw = self._calculate_look_at_quat(final_cam_pos, final_target_pos)
+        base_fovy = self.model.cam_fovy[self.camera_id]
+        final_fovy = base_fovy + self.np_random.uniform(-self.dr_config.fovy_jitter,
+                                                        self.dr_config.fovy_jitter)
+        final_fovy = np.clip(final_fovy, 35.0, 80.0)
 
-        # === PART 3: Apply the Chosen Camera Pose ===
-        quat_wxyz = [new_quat_xyzw[3], new_quat_xyzw[0], new_quat_xyzw[1], new_quat_xyzw[2]]
+        # --- Part 3: Apply Final Camera Pose to the MuJoCo Model ---
         self.model.cam_pos[self.camera_id] = final_cam_pos
-        self.model.cam_quat[self.camera_id] = quat_wxyz
+        self.model.cam_quat[self.camera_id] = [new_quat_xyzw[3], new_quat_xyzw[0], new_quat_xyzw[1], new_quat_xyzw[2]]
         self.model.cam_fovy[self.camera_id] = final_fovy
 
 
@@ -553,6 +531,7 @@ class PandaEnv(gym.Env):
                 self.model.geom_matid[self.floor_geom_id] = self._dr_mat_ids[chosen_floor_tex]
 
         # --- Advanced Lighting Randomization ---
+        # (This can remain largely the same as your previous version, as the XML change is more impactful)
         angle = self.np_random.uniform(0, 2 * np.pi)
         radius = self.np_random.uniform(1.0, 1.5)
         light_z = self.np_random.uniform(1.5, 2.5)
@@ -561,7 +540,7 @@ class PandaEnv(gym.Env):
             self.TABLE_CENTER[1] + radius * np.sin(angle),
             light_z
         ]
-        target_pos_light = np.append(self.TABLE_CENTER, 0.0) + self.np_random.uniform(-0.1, 0.1, size=3)
+        target_pos_light = np.append(self.TABLE_CENTER, 0.4) + self.np_random.uniform(-0.1, 0.1, size=3)
         direction = target_pos_light - self.model.light_pos[self.light_id]
         self.model.light_dir[self.light_id] = self._safe_normalize(direction, default=np.array([0,0,-1]))
 
@@ -569,10 +548,7 @@ class PandaEnv(gym.Env):
         tint = np.array([1.0 + (kelvin_shift / 2500.0), 1.0, 1.0 - (kelvin_shift / 2500.0)])
         tint = np.clip(tint, 0.85, 1.15)
         
-        self.model.light_diffuse[self.light_id] = self.np_random.uniform(0.6, 1.0, 3) * tint
-        self.model.light_specular[self.light_id] = self.np_random.uniform(0.15, 0.35, 3)
-        self.model.light_ambient[self.light_id] = self.np_random.uniform(0.1, 0.2, 3)
-
+        self.model.light_diffuse[self.light_id] = self.np_random.uniform(0.7, 1.0, 3) * tint
 
     def render(self, camera_name: str = "fixed_camera"):
         """

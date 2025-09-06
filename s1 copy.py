@@ -1,78 +1,59 @@
-# tests/test_camera_shots.py
-import os
-import cv2
-import numpy as np
-import matplotlib.pyplot as plt
-from envs.panda_env import PandaEnv, DomainRandomizationConfig, CameraShot
-import warnings
+# FILE: envs/panda_env.py (Replace this entire dataclass)
 
-# --- Configuration ---
-NUM_SAMPLES_PER_SHOT = 16  # We will generate a 4x4 grid of images for each shot
-OUTPUT_DIR = "debug_output/camera_shot_tests" # A new directory for the new tests
+@dataclass
+class DomainRandomizationConfig:
+    """Holds all parameters for domain randomization."""
+    # Lighting and Texture randomization parameters remain the same.
+    light_pos_range: Tuple[Tuple[float, float], ...] = ((-1.0, 1.0), (-1.0, 1.0), (1.5, 2.5))
+    light_color_range: Tuple[Tuple[float, float], ...] = ((0.6, 1.0), (0.6, 1.0), (0.6, 1.0))
+    table_textures: List[str] = field(default_factory=lambda: [
+        "mat_table_wood_light", "mat_table_wood_stripe", "mat_table_marble_white",
+        "mat_table_metal_brushed", "mat_table_noise_low"
+    ])
+    floor_textures: List[str] = field(default_factory=lambda: [
+        "mat_floor_checker_blue", "mat_floor_checker_green",
+        "mat_floor_wood_dark", "mat_floor_wood_paquet"
+    ])
 
-def create_contact_sheet(image_files, output_path, grid_size=(4, 4)):
-    """Creates a grid of images and saves it."""
-    images = [cv2.imread(f) for f in image_files if os.path.exists(f)]
-    if not images:
-        print(f"Warning: No images found for {output_path}")
-        return
+    # ============================ CURATED EXEMPLAR SHOTS ============================
+    # FINAL PATCH: This new list is mined from the best results in your JSON data.
+    # It provides a wider, more robust, and higher-quality set of base viewpoints.
+    camera_shots: List[CameraShot] = field(default_factory=lambda: [
+        # --- Right Three-Quarter Views ---
+        # (From Shot_01/sample_00) - A perfect classic view. Elevation: 38.9°
+        CameraShot(pos=(0.87, -0.36, 0.94), target=(0.41, 0.05, 0.43)),
+        # (From Shot_04/sample_01) - A slightly wider right view. Elevation: 45.1°
+        CameraShot(pos=(1.07, -0.25, 1.09), target=(0.49, -0.03, 0.44)),
 
-    base_shape = images[0].shape
-    images = [cv2.resize(img, (base_shape[1], base_shape[0])) for img in images]
-    
-    fig, axes = plt.subplots(grid_size[0], grid_size[1], figsize=(12, 12))
-    for i, ax in enumerate(axes.flat):
-        if i < len(images):
-            ax.imshow(cv2.cvtColor(images[i], cv2.COLOR_BGR2RGB))
-        ax.axis('off')
-    
-    title = f"Visualization for: {os.path.basename(output_path).replace('_contact_sheet.png', '')}"
-    fig.suptitle(title, fontsize=16)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(output_path)
-    plt.close(fig)
-    print(f"✔️ Contact sheet saved to: {output_path}")
+        # --- Left Three-Quarter Views ---
+        # (From Shot_02/sample_12) - Excellent left-side view. Elevation: 44.2°
+        CameraShot(pos=(0.57, 0.58, 1.01), target=(0.44, -0.01, 0.43)),
+        # (From Shot_03/sample_15) - A high-angle left view. Elevation: 44.6°
+        CameraShot(pos=(0.78, 0.47, 1.00), target=(0.45, 0.02, 0.44)),
 
-def main():
-    print("--- Starting Camera Shot Visualization Test ---")
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+        # --- Frontal Views ---
+        # (From Shot_08/sample_15) - A well-balanced frontal shot. Elevation: 41.6°
+        CameraShot(pos=(0.86, -0.48, 1.03), target=(0.48, 0.05, 0.45)),
+        # (From Shot_09/sample_12) - A centered, slightly higher frontal view. Elevation: 38.4°
+        CameraShot(pos=(1.02, 0.10, 0.95), target=(0.39, 0.04, 0.45)),
 
-    # 1. Get the "master list" of shots from the default environment config
-    master_config = DomainRandomizationConfig()
-    shots_to_test = master_config.camera_shots
-    print(f"Found {len(shots_to_test)} predefined camera shots to visualize.")
+        # --- High-Angle / Near Top-Down Views ---
+        # (From Shot_07/sample_15) - A balanced top-down view, not too extreme. Elevation: 53.5°
+        CameraShot(pos=(0.70, 0.00, 1.19), target=(0.50, -0.03, 0.44)),
+        # (From Shot_06/sample_11) - A high three-quarter view, very informative. Elevation: 40.3°
+        CameraShot(pos=(1.00, -0.06, 0.93), target=(0.41, -0.06, 0.43)),
 
-    for i, shot in enumerate(shots_to_test):
-        shot_name = f"Shot_{i+1:02d}"
-        print(f"\n--- Testing {shot_name}: pos={shot.pos}, target={shot.target} ---")
-        
-        temp_img_dir = os.path.join(OUTPUT_DIR, shot_name)
-        os.makedirs(temp_img_dir, exist_ok=True)
-        
-        # 2. Create a temporary config that ONLY uses this one shot
-        temp_dr_config = DomainRandomizationConfig()
-        temp_dr_config.camera_shots = [shot] # Isolate the single shot we want to test
-        
-        env = PandaEnv(
-            xml_path="envs/panda_pick_place.xml", 
-            dr_config=temp_dr_config,
-            enable_domain_randomization=True
-        )
+        # --- Dynamic / Lower Views (Still Safe) ---
+        # (From Shot_01/sample_09) - A lower, more dynamic angle that still works well. Elevation: 27.8°
+        CameraShot(pos=(1.05, -0.37, 0.82), target=(0.44, -0.00, 0.45)),
+        # (From Shot_02/sample_00) - A wide, cinematic left view. Elevation: 51.0°
+        CameraShot(pos=(0.59, -0.49, 1.05), target=(0.50, -0.00, 0.43)),
+    ])
 
-        image_files = []
-        for j in range(NUM_SAMPLES_PER_SHOT):
-            print(f"  Generating sample {j+1}/{NUM_SAMPLES_PER_SHOT}...")
-            env.reset()
-            img = env.render(camera_name="fixed_camera")
-            filepath = os.path.join(temp_img_dir, f"sample_{j:02d}.png")
-            cv2.imwrite(filepath, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-            image_files.append(filepath)
-            
-        env.close()
-
-        # 3. Create a contact sheet specifically for this shot
-        contact_sheet_path = os.path.join(OUTPUT_DIR, f"{shot_name}_contact_sheet.png")
-        create_contact_sheet(image_files, contact_sheet_path)
-
-if __name__ == "__main__":
-    main()
+    # ============================ REFINED JITTER PARAMETERS ============================
+    # FINAL PATCH: Tighter bounds to keep variations closer to our golden samples.
+    radius_jitter: float = 0.10      # meters (reduced from 0.15)
+    azimuth_jitter: float = 0.26     # radians (~15 degrees) (reduced from 0.35)
+    elevation_jitter: float = 0.17   # radians (~10 degrees) (reduced from 0.26)
+    target_pos_jitter: float = 0.05  # meters (reduced from 0.08)
+    fovy_jitter: float = 3.0         # degrees (reduced from 5.0)
