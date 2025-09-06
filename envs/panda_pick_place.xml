@@ -11,9 +11,7 @@
     <global azimuth="120" elevation="-20"/>
     <rgba haze="0.15 0.25 0.35 1"/>
   </visual>
-  <visual>
-    <global offwidth="1024" offheight="1024" />
-  </visual>
+
 <asset>
     <!-- =================================================================== -->
     <!--              DOMAIN RANDOMIZATION ASSETS (TEXTURES)                 -->
@@ -24,7 +22,7 @@
     <texture name="tex_checker_green" type="2d" builtin="checker" rgb1="0.1 0.3 0.2" rgb2="0.2 0.4 0.3" width="300" height="300"/>
 
 <texture name="tex_noise_low_contrast" type="2d" builtin="checker" rgb1="0.4 0.4 0.4" rgb2="0.6 0.6 0.6" width="300" height="300"/>
-<texture name="tex_noise_high_contrast" type="2d" builtin="checker" rgb1="0.1 0.1 0.1" rgb2="0.9 0.9 0.9" width="300" height="300"/>
+<texture name="tex_noise_high_contrast" type="2d" builtin="checker" rgb1="0.1 0.1 0.1" rgb2="0.7 0.7 0.7" width="300" height="300"/>
 
 
 
@@ -42,15 +40,31 @@
     <material name="mat_floor_checker_blue" texture="tex_checker_blue" texrepeat="5 5" texuniform="true" reflectance="0.2"/>
     <material name="mat_floor_checker_green" texture="tex_checker_green" texrepeat="5 5" texuniform="true" reflectance="0.2"/>
     <material name="mat_floor_wood_dark" texture="tex_wood_dark" texrepeat="2 2" texuniform="true" reflectance="0.1"/>
-    <material name="mat_floor_wood_paquet" texture="tex_wood_paquet" texrepeat="3 3" texuniform="true" reflectance="0.15"/> 
+    <material name="mat_floor_wood_paquet" texture="tex_wood_paquet" texrepeat="3 3" texuniform="true" reflectance="0.05"/> 
 
     <!-- Materials for the Table -->
-    <material name="mat_table_wood_light" texture="tex_wood_light" texrepeat="1 1" texuniform="true" reflectance="0.1"/>
+    <material name="mat_table_wood_light" 
+              texture="tex_wood_light" 
+              texrepeat="1 1" 
+              texuniform="true"
+              rgba="0.7 0.7 0.7 1"
+              specular="0.05"
+              shininess="0.08"
+              reflectance="0.05"/>
     
-    <material name="mat_table_metal_brushed" texture="tex_metal_brushed" texrepeat="1 1" texuniform="true" reflectance="0.2" specular="0.3"/>
-    <material name="mat_table_marble_white" texture="tex_marble_white" texrepeat="1 1" texuniform="true" reflectance="0.2" specular="0.2"/>
+    <material name="mat_table_metal_brushed" texture="tex_metal_brushed" texrepeat="1 1" texuniform="true" reflectance="0.1" specular="0.1"/>
+
+    <material name="mat_table_marble_white" 
+              texture="tex_marble_white" 
+              texrepeat="1 1" 
+              texuniform="true"
+              rgba="0.8 0.8 0.8 1"
+              specular="0" 
+              shininess="0"
+              reflectance="0.1"/>
+    
     <material name="mat_table_noise_low" texture="tex_noise_low_contrast" texrepeat="1 1" texuniform="true" reflectance="0.05"/>
-    <material name="mat_table_noise_high" texture="tex_noise_high_contrast" texrepeat="1 1" texuniform="true" reflectance="0.05"/>
+    <material name="mat_table_noise_high" texture="tex_noise_low_contrast" texrepeat="1 1" texuniform="true" reflectance="0.05"/>
     <material name="mat_table_wood_stripe" texture="tex_wood_stripe" texrepeat="2 2" texuniform="true" reflectance="0.1"/> 
     <!-- Original materials for the object and goal (we don't randomize these) -->
     <material name="cube_mat" rgba="0.9 0.1 0.1 1.0"/>
@@ -92,7 +106,7 @@
 
     <!-- Camera -->
     <!-- <camera name="fixed_camera" pos="1.2 0 1.2" xyaxes="0 -1 0 0.707 0 -0.707"/> -->
-<camera name="fixed_camera" pos="1.0 0 1.2" xyaxes="0 -1 0 0.707 0 -0.707"/>
+    <camera name="fixed_camera" pos="1.0 0 1.2" xyaxes="0 -1 0 0.707 0 -0.707"/>
 
 
   </worldbody>

@@ -201,3 +201,9 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     main(args)
+
+
+
+"""
+python -m tests.test_procedural_env --output_dir videos --output_filename panda_dr_showcase.mp4 --num_resets 10 --steps_per_reset 20 --fps 10
+"""

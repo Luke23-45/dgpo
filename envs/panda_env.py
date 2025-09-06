@@ -10,6 +10,29 @@ from scipy.spatial.transform import Rotation as R
 from utils.mujoco_utils import set_joint_qpos_by_name
 import cv2
 from dataclasses import dataclass, field 
+
+@dataclass
+class RenderPostConfig:
+    """
+    Controls photometric post-processing for enhanced realism.
+    """
+    apply_tonemap: bool = True
+    tonemap_curve: str = "aces"          # ["aces", "reinhard"]
+    # Auto-exposure aims to map the chosen luminance percentile to target_white
+    auto_exposure_percentile: float = 0.98
+    target_white: float = 0.8          # in linear space
+    min_exposure: float = 0.7
+    max_exposure: float = 1
+
+    # Color space management
+    assume_input_is_srgb: bool = True    # MuJoCo returns 8-bit sRGB-like frames
+    output_srgb: bool = True             # Final dataset should be sRGB 8-bit
+
+    # Finishing touches
+    add_sharpen: bool = False            # Off by default; enable if images look soft
+    sharpen_amount: float = 0.15         # Unsharp mask strength
+    dithering: bool = True               # Add subtle noise before 8-bit quantization
+
 @dataclass
 class CameraShot:
     """Defines a single, known-good camera position and target."""
@@ -26,11 +49,11 @@ class DomainRandomizationConfig:
     # Texture randomization (list of valid material names from the XML)
     table_textures: List[str] = field(default_factory=lambda: [
         "mat_table_wood_light", "mat_table_wood_stripe", "mat_table_marble_white",
-        "mat_table_metal_brushed", "mat_table_noise_low"
+        "mat_table_metal_brushed", "mat_table_noise_low","mat_floor_wood_paquet"
     ])
     floor_textures: List[str] = field(default_factory=lambda: [
         "mat_floor_checker_blue", "mat_floor_checker_green",
-        "mat_floor_wood_dark", "mat_floor_wood_paquet"
+        "mat_floor_wood_dark"
     ])
 
     # Camera sampling ranges (spherical coordinates around TABLE_CENTER)
@@ -107,6 +130,10 @@ class PandaEnv(gym.Env):
     CAM_BASE_FOVY = 45.0
     CAM_FOVY_SCALE_FACTOR = 25.0
     CAM_HEIGHT_ABOVE_TARGET = 0.8
+    CAM_MIN_DISTANCE = 0.4   # Don't let the camera get too close
+    CAM_MAX_DISTANCE = 2.0   # Don't let the camera get too far
+    CAM_MIN_FOVY = 25.0      # Min zoom
+    CAM_MAX_FOVY = 90.0      # Max zoom (wide-angle)
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
 
     def __init__(
@@ -115,9 +142,9 @@ class PandaEnv(gym.Env):
             render_mode: str = "rgb_array",
             dr_config: DomainRandomizationConfig = None,
             enable_domain_randomization: bool = True,
+            post_config: RenderPostConfig = None,
         ):
         super().__init__()
-
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         # --- Load model and data ---
@@ -134,7 +161,7 @@ class PandaEnv(gym.Env):
         except Exception:
             warnings.warn("mujoco.Renderer not available — running headless.")
             self.renderer = None
-
+        self.post = post_config or RenderPostConfig()
         # --- Episode bookkeeping ---
         self.max_episode_steps = 250
         self.timestep = 0
@@ -149,7 +176,8 @@ class PandaEnv(gym.Env):
 
         # Cache IDs of elements to be randomized for performance
         self._cache_dr_element_ids()
-        
+        allowed_prefs = ["random", "left", "right", "front"]
+
         self.ee_site_name = "attachment_site"
         self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.ee_site_name)
         if self.ee_site_id == -1:
@@ -188,7 +216,85 @@ class PandaEnv(gym.Env):
         # Update the config to only include valid textures
         self.dr_config.table_textures = [n for n in self.dr_config.table_textures if n in self._dr_mat_ids]
         self.dr_config.floor_textures = [n for n in self.dr_config.floor_textures if n in self._dr_mat_ids]
-        
+    # ---------- Photometric helpers (sRGB/linear, exposure, tone map) ----------
+
+    @staticmethod
+    def _srgb_to_linear(img: np.ndarray) -> np.ndarray:
+        """img in [0,1] sRGB -> linear RGB (float32)."""
+        img = img.astype(np.float32)
+        a = 0.055
+        low = img <= 0.04045
+        high = ~low
+        out = np.empty_like(img, dtype=np.float32)
+        out[low]  = img[low] / 12.92
+        out[high] = ((img[high] + a) / (1 + a)) ** 2.4
+        return out
+
+    @staticmethod
+    def _linear_to_srgb(img: np.ndarray) -> np.ndarray:
+        """linear RGB in [0,1] -> sRGB [0,1] (float32)."""
+        img = np.clip(img, 0.0, 1.0).astype(np.float32)
+        a = 0.055
+        low = img <= 0.0031308
+        high = ~low
+        out = np.empty_like(img, dtype=np.float32)
+        out[low]  = img[low] * 12.92
+        out[high] = (1 + a) * (img[high] ** (1/2.4)) - a
+        return out
+
+    @staticmethod
+    def _luminance_linear(img_lin: np.ndarray) -> np.ndarray:
+        """Rec.709 luminance of a linear RGB image in [0, +inf)."""
+        return 0.2126 * img_lin[..., 0] + 0.7152 * img_lin[..., 1] + 0.0722 * img_lin[..., 2]
+
+    def _auto_exposure_scale(self, img_lin: np.ndarray) -> float:
+        """Percentile-based exposure so that p% luminance maps to target_white."""
+        lum = self._luminance_linear(img_lin).reshape(-1)
+        # robust against pure-black frames
+        p = np.percentile(lum, self.post.auto_exposure_percentile * 100.0) if lum.size > 0 else 0.0
+        if p <= 1e-6:
+            return 1.0
+        scale = self.post.target_white / float(p)
+        return float(np.clip(scale, self.post.min_exposure, self.post.max_exposure))
+
+    @staticmethod
+    def _tonemap_aces(img_lin: np.ndarray) -> np.ndarray:
+        """ACES fitted filmic curve (applied in linear space)."""
+        a, b, c, d, e = 2.51, 0.03, 2.43, 0.59, 0.14
+        num = img_lin * (a * img_lin + b)
+        den = img_lin * (c * img_lin + d) + e
+        return np.clip(num / den, 0.0, 1.0)
+
+    @staticmethod
+    def _tonemap_reinhard(img_lin: np.ndarray) -> np.ndarray:
+        """Classic Reinhard global operator: x/(1+x) in linear space."""
+        return img_lin / (1.0 + img_lin)
+
+    def _postprocess_image(self, img_u8: np.ndarray) -> np.ndarray:
+        """End-to-end post pipeline: sRGB->linear, auto-exposure, tonemap, linear->sRGB."""
+        img = img_u8.astype(np.float32) / 255.0
+        img_lin = self._srgb_to_linear(img) if self.post.assume_input_is_srgb else img
+
+        exposure = self._auto_exposure_scale(img_lin)
+        img_lin *= exposure
+
+        if self.post.apply_tonemap:
+            if self.post.tonemap_curve.lower() == "aces":
+                img_lin = self._tonemap_aces(img_lin)
+            else:
+                img_lin = self._tonemap_reinhard(img_lin)
+
+        img_out = self._linear_to_srgb(img_lin) if self.post.output_srgb else np.clip(img_lin, 0.0, 1.0)
+
+        if self.post.add_sharpen:
+            blur = cv2.GaussianBlur(img_out, ksize=(0, 0), sigmaX=0.8)
+            img_out = np.clip(img_out + self.post.sharpen_amount * (img_out - blur), 0.0, 1.0)
+
+        if self.post.dithering:
+            noise = (self.np_random.random(img_out.shape).astype(np.float32) - 0.5) / 255.0
+            img_out = np.clip(img_out + noise, 0.0, 1.0)
+
+        return np.clip(np.round(img_out * 255.0), 0, 255).astype(np.uint8)        
     @staticmethod
     def _calculate_look_at_quat(camera_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
         """Calculates a quaternion for a camera to look at a target. Returns xyzw."""
@@ -231,6 +337,8 @@ class PandaEnv(gym.Env):
                 return np.zeros_like(vec)
             return default
         return vec / norm
+
+
     @staticmethod
     def _spherical_to_cartesian(radius: float, azimuth: float, elevation: float, target: np.ndarray) -> np.ndarray:
         """Converts spherical coordinates back to a Cartesian camera position."""
@@ -248,28 +356,7 @@ class PandaEnv(gym.Env):
             return
             
         # === PART 1: Lighting and Texture Randomization (Copied from old version) ===
-        if self.dr_config.table_textures:
-            chosen_table_tex = self.np_random.choice(self.dr_config.table_textures)
-            if chosen_table_tex in self._dr_mat_ids:
-                self.model.geom_matid[self.table_geom_id] = self._dr_mat_ids[chosen_table_tex]
-        
-        if self.dr_config.floor_textures:
-            chosen_floor_tex = self.np_random.choice(self.dr_config.floor_textures)
-            if chosen_floor_tex in self._dr_mat_ids:
-                self.model.geom_matid[self.floor_geom_id] = self._dr_mat_ids[chosen_floor_tex]
-
-        angle = self.np_random.uniform(0, 2 * np.pi)
-        radius = self.np_random.uniform(1.0, 1.5)
-        light_z = self.np_random.uniform(*self.dr_config.light_pos_range[2])
-        self.model.light_pos[self.light_id] = [self.TABLE_CENTER[0] + radius * np.cos(angle),
-                                              self.TABLE_CENTER[1] + radius * np.sin(angle),
-                                              light_z]
-        target_pos_light = np.append(self.TABLE_CENTER, 0.0) + self.np_random.uniform(-0.1, 0.1, size=3)
-        direction = target_pos_light - self.model.light_pos[self.light_id]
-        if np.linalg.norm(direction) > 1e-6:
-            self.model.light_dir[self.light_id] = direction / np.linalg.norm(direction)
-        base_intensity = self.np_random.uniform(0.5, 0.7)
-        self.model.light_diffuse[self.light_id] = np.clip(base_intensity + self.np_random.uniform(-0.1, 0.1, size=3), 0.4, 0.9)
+        self._randomize_photometrics()
 
         # === PART 2: Mode-Switching Camera Placement ===
         action_vec = gripper_pos - goal_pos
@@ -277,32 +364,83 @@ class PandaEnv(gym.Env):
         target_pos = (gripper_pos + goal_pos) / 2.0
 
         if action_scale <= self.LONG_REACH_THRESHOLD:
-            # --- STRATEGY 1: Three-Quarter Detail View ---
+            # --- STRATEGY 1 (TIER 1 & 2 UPGRADE): Robust & Aesthetic View Generation ---
+
+            # 1. Select a random "style" from the curated list.
+            if not self.dr_config.camera_shots:
+                chosen_shot = CameraShot(pos=(1.0, -0.4, 0.8), target=(0.6, 0.0, 0.5))
+            else:
+                chosen_shot = self.np_random.choice(self.dr_config.camera_shots)
+
+            # 2. Extract and ROBUSTLY normalize the pure horizontal direction.
+            base_pos = np.array(chosen_shot.pos)
+            base_target = np.array(chosen_shot.target)
+            base_view_dir_3d = base_pos - base_target
+            
+            horizontal_dir_2d = base_view_dir_3d[:2]
+            # TIER 1 FIX: Handle degenerate azimuths (e.g., from a top-down shot)
+            if np.linalg.norm(horizontal_dir_2d) < 1e-5:
+                random_angle = self.np_random.uniform(0, 2 * np.pi)
+                horizontal_dir = np.array([np.cos(random_angle), np.sin(random_angle)])
+            else:
+                horizontal_dir = self._safe_normalize(horizontal_dir_2d)
+
+            # TIER 2 UPGRADE 1: Azimuth Jitter Around Exemplar
+            jitter_angle = self.np_random.uniform(-0.5, 0.5) # ~ +/- 28 degrees
+            c, s = np.cos(jitter_angle), np.sin(jitter_angle)
+            rotation_matrix = np.array([[c, -s], [s, c]])
+            final_horizontal_dir = rotation_matrix @ horizontal_dir
+
+            # TIER 2 UPGRADE 2: Controlled Elevation Distribution (Truncated Normal)
+            mean_elevation = np.deg2rad(35)
+            std_dev_elevation = np.deg2rad(15)
+            elevation_rad = np.clip(
+                self.np_random.normal(mean_elevation, std_dev_elevation),
+                np.deg2rad(15),  # Min elevation
+                np.deg2rad(65)   # Max elevation
+            )
+
+            # 4. Reconstruct the 3D view direction
+            cam_z = np.sin(elevation_rad)
+            xy_mag = np.cos(elevation_rad)
+            cam_xy = xy_mag * final_horizontal_dir
+            final_view_dir = self._safe_normalize(np.array([cam_xy[0], cam_xy[1], cam_z]))
+
+            # 5. Adaptive Framing with NON-LINEAR mapping and CLAMPING
+            # TIER 2 UPGRADE 3: Saturating FOV with Sigmoid
+            fovy_range = self.CAM_MAX_FOVY - self.CAM_MIN_FOVY
+            L_mid = 0.3 # Task scale where FOV is halfway to max
+            gamma = 5.0 # Steepness of the curve
+            sigmoid_val = 1 / (1 + np.exp(-gamma * (action_scale - L_mid)))
+            deterministic_fovy = self.CAM_MIN_FOVY + fovy_range * sigmoid_val
+            
+            # TIER 1 FIX: Clamp the distance
+            unclamped_dist = self.CAM_BASE_DISTANCE + action_scale * self.CAM_DISTANCE_SCALE_FACTOR
+            final_distance = np.clip(unclamped_dist, self.CAM_MIN_DISTANCE, self.CAM_MAX_DISTANCE)
+            
+            # 6. Final Jittering and Compositional Offset
+            # TIER 2 UPGRADE 4: Intentional Off-centering
             up_vec = np.array([0., 0., 1.])
+            side_vec = self._safe_normalize(np.cross(final_view_dir, up_vec), default=np.array([1.,0.,0.]))
+            cam_up_vec = self._safe_normalize(np.cross(side_vec, final_view_dir))
+            
+            offset_magnitude = 0.1 * final_distance # Offset proportional to distance
+            horizontal_offset = self.np_random.uniform(-offset_magnitude, offset_magnitude)
+            vertical_offset = self.np_random.uniform(-offset_magnitude, offset_magnitude)
+            
+            compositional_offset = horizontal_offset * side_vec + vertical_offset * cam_up_vec
+            
+            final_target_pos = target_pos + compositional_offset
 
-            action_dir = self._safe_normalize(action_vec, default=np.array([1., 0., 0.]))
-            
-            side_on_vec = np.cross(action_dir, up_vec)
-            side_on_vec = self._safe_normalize(side_on_vec, default=np.array([0., 1., 0.]))
-            
-            ideal_view_vec = 0.7 * side_on_vec + 0.3 * action_dir
-            ideal_view_vec = self._safe_normalize(ideal_view_vec, default=side_on_vec)
-            
-            final_distance = self.CAM_BASE_DISTANCE + action_scale * self.CAM_DISTANCE_SCALE_FACTOR
-            deterministic_cam_pos = target_pos + final_distance * ideal_view_vec + self.CAM_HEIGHT_ABOVE_TARGET * up_vec
-            deterministic_fovy = np.clip(self.CAM_BASE_FOVY + action_scale * self.CAM_FOVY_SCALE_FACTOR, 40.0, 85.0)
-
-            radius, azimuth, elevation = self._cartesian_to_spherical(deterministic_cam_pos, target_pos)
+            # Calculate deterministic position and apply final radius jitter
+            # We move AWAY from the target along the view direction
+            deterministic_cam_pos = final_target_pos + final_distance * final_view_dir
             radius_jitter = self.np_random.uniform(-0.05, 0.05)
-            azimuth_jitter_rad = self.np_random.uniform(-0.1, 0.1)
-            elevation_jitter_rad = self.np_random.uniform(-0.1, 0.1)
-            target_jitter = self.np_random.uniform(-0.03, 0.03, size=3)
-            final_target_pos = target_pos + target_jitter
+            final_cam_pos = deterministic_cam_pos + radius_jitter * final_view_dir
             
-            final_cam_pos = self._spherical_to_cartesian(radius + radius_jitter, azimuth + azimuth_jitter_rad, elevation + elevation_jitter_rad, final_target_pos)
+            # Finalize orientation and FOV, clamping with our new constants
             new_quat_xyzw = self._calculate_look_at_quat(final_cam_pos, final_target_pos)
-            final_fovy = np.clip(deterministic_fovy + self.np_random.uniform(-2.0, 2.0), 40.0, 85.0)
-
+            final_fovy = np.clip(deterministic_fovy + self.np_random.uniform(-2.0, 2.0), self.CAM_MIN_FOVY, self.CAM_MAX_FOVY)
         else:
             # --- STRATEGY 2: Strategic Top-Down View ---
             final_cam_pos = np.array([self.TABLE_CENTER[0], self.TABLE_CENTER[1], 1.5])
@@ -315,6 +453,8 @@ class PandaEnv(gym.Env):
         self.model.cam_pos[self.camera_id] = final_cam_pos
         self.model.cam_quat[self.camera_id] = quat_wxyz
         self.model.cam_fovy[self.camera_id] = final_fovy
+
+
     def _is_pos_in_camera_view(
         self, pos_world: np.ndarray, camera_name: str, margin: int = 0
     ) -> Tuple[bool, Dict]:
@@ -397,49 +537,79 @@ class PandaEnv(gym.Env):
         # Action space: 7 arm joint deltas + 1 gripper command
         act_dim = int(getattr(self.model, "nu", 8))
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
+
+
+    def _randomize_photometrics(self):
+        """Randomizes scene lighting and textures to improve policy robustness."""
+        # --- Randomize Textures ---
+        if self.dr_config.table_textures:
+            chosen_table_tex = self.np_random.choice(self.dr_config.table_textures)
+            if chosen_table_tex in self._dr_mat_ids:
+                self.model.geom_matid[self.table_geom_id] = self._dr_mat_ids[chosen_table_tex]
         
+        if self.dr_config.floor_textures:
+            chosen_floor_tex = self.np_random.choice(self.dr_config.floor_textures)
+            if chosen_floor_tex in self._dr_mat_ids:
+                self.model.geom_matid[self.floor_geom_id] = self._dr_mat_ids[chosen_floor_tex]
+
+        # --- Advanced Lighting Randomization ---
+        angle = self.np_random.uniform(0, 2 * np.pi)
+        radius = self.np_random.uniform(1.0, 1.5)
+        light_z = self.np_random.uniform(1.5, 2.5)
+        self.model.light_pos[self.light_id] = [
+            self.TABLE_CENTER[0] + radius * np.cos(angle),
+            self.TABLE_CENTER[1] + radius * np.sin(angle),
+            light_z
+        ]
+        target_pos_light = np.append(self.TABLE_CENTER, 0.0) + self.np_random.uniform(-0.1, 0.1, size=3)
+        direction = target_pos_light - self.model.light_pos[self.light_id]
+        self.model.light_dir[self.light_id] = self._safe_normalize(direction, default=np.array([0,0,-1]))
+
+        kelvin_shift = self.np_random.uniform(-500, 500)
+        tint = np.array([1.0 + (kelvin_shift / 2500.0), 1.0, 1.0 - (kelvin_shift / 2500.0)])
+        tint = np.clip(tint, 0.85, 1.15)
+        
+        self.model.light_diffuse[self.light_id] = self.np_random.uniform(0.6, 1.0, 3) * tint
+        self.model.light_specular[self.light_id] = self.np_random.uniform(0.15, 0.35, 3)
+        self.model.light_ambient[self.light_id] = self.np_random.uniform(0.1, 0.2, 3)
+
+
     def render(self, camera_name: str = "fixed_camera"):
         """
-        Handles rendering for the 'rgb_array' mode from a specified camera.
-        This robust version always renders at the primary camera's resolution
-        and then downsamples if a smaller view (like the wrist) is requested.
-        This avoids resizing the MuJoCo renderer context, which is more stable.
+        Robust renderer with filmic post-processing.
+        Always returns tonemapped sRGB uint8 frames at the requested shape.
         """
+        is_wrist = "wrist" in camera_name
+        target_key = "image_wrist" if is_wrist else "image_primary"
+        target_h, target_w, _ = self.observation_space[target_key].shape
+
         if self.render_mode != "rgb_array" or self.renderer is None:
-            # Determine target shape for the black placeholder
-            is_wrist = "wrist" in camera_name
-            h = self.observation_space["image_wrist" if is_wrist else "image_primary"].shape[0]
-            w = self.observation_space["image_wrist" if is_wrist else "image_primary"].shape[1]
             warnings.warn(f"Renderer not available, returning a black frame for camera '{camera_name}'.")
-            return np.zeros((h, w, 3), dtype=np.uint8)
+            return np.zeros((target_h, target_w, 3), dtype=np.uint8)
 
-        # Set the renderer to the largest size needed (primary camera) to initialize it
-        if self.renderer.width != self.observation_space["image_primary"].shape[1]:
-            self.renderer.width = self.observation_space["image_primary"].shape[1]
-            self.renderer.height = self.observation_space["image_primary"].shape[0]
-
+        # Render once at the native 256x256 resolution
         try:
-            # Update the scene with the desired camera view
-            self.renderer.update_scene(self.data, camera=camera_name)  
-            # Render the image at the pre-set large resolution
-            large_image = self.renderer.render()
+            # Ensure renderer is at the primary camera's resolution
+            if self.renderer.width != self.observation_space["image_primary"].shape[1]:
+                 self.renderer.width = self.observation_space["image_primary"].shape[1]
+                 self.renderer.height = self.observation_space["image_primary"].shape[0]
+
+            self.renderer.update_scene(self.data, camera=camera_name)
+            img_raw = self.renderer.render()  # uint8, sRGB-ish
         except Exception as e:
             warnings.warn(f"Failed to render from camera '{camera_name}': {e}")
-            is_wrist = "wrist" in camera_name
-            h = self.observation_space["image_wrist" if is_wrist else "image_primary"].shape[0]
-            w = self.observation_space["image_wrist" if is_wrist else "image_primary"].shape[1]
-            return np.zeros((h, w, 3), dtype=np.uint8)
+            return np.zeros((target_h, target_w, 3), dtype=np.uint8)
 
-        # Downsample if the requested camera is the wrist camera
-        if "wrist" in camera_name:
-            target_h = self.observation_space["image_wrist"].shape[0]
-            target_w = self.observation_space["image_wrist"].shape[1]
-            # Use INTER_AREA for robust downsampling
-            resized_image = cv2.resize(large_image, (target_w, target_h), interpolation=cv2.INTER_AREA)
-            return resized_image
+        # Photometric post-processing (tone map etc.) at the native render resolution
+        img_processed = self._postprocess_image(img_raw)
+
+        # Downsample to target shape if needed (e.g., for the wrist camera)
+        if img_processed.shape[0] != target_h or img_processed.shape[1] != target_w:
+            img_out = cv2.resize(img_processed, (target_w, target_h), interpolation=cv2.INTER_AREA)
         else:
-            return large_image
+            img_out = img_processed
 
+        return img_out
 
     def get_ee_pose(self) -> np.ndarray:
         """
