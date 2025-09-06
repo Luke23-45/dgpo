@@ -11,7 +11,9 @@
     <global azimuth="120" elevation="-20"/>
     <rgba haze="0.15 0.25 0.35 1"/>
   </visual>
-
+  <visual>
+    <global offwidth="1024" offheight="1024" />
+  </visual>
 <asset>
     <!-- =================================================================== -->
     <!--              DOMAIN RANDOMIZATION ASSETS (TEXTURES)                 -->

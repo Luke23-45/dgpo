@@ -10,6 +10,7 @@ from scipy.spatial.transform import Rotation as R
 from utils.mujoco_utils import set_joint_qpos_by_name
 import cv2
 from dataclasses import dataclass, field 
+
 @dataclass
 class CameraShot:
     """Defines a single, known-good camera position and target."""
@@ -98,15 +99,6 @@ class PandaEnv(gym.Env):
     OBJECT_Z_HEIGHT = 0.42 
     # Z-height for the goal on the table
     GOAL_Z_HEIGHT = 0.401
-    LONG_REACH_THRESHOLD = 0.5
-
-    # Parameters for the "Three-Quarter Detail View" strategy.
-    # Placing them here makes them easy to tune.
-    CAM_BASE_DISTANCE = 0.8
-    CAM_DISTANCE_SCALE_FACTOR = 1.5
-    CAM_BASE_FOVY = 45.0
-    CAM_FOVY_SCALE_FACTOR = 25.0
-    CAM_HEIGHT_ABOVE_TARGET = 0.8
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
 
     def __init__(
@@ -154,9 +146,6 @@ class PandaEnv(gym.Env):
         self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.ee_site_name)
         if self.ee_site_id == -1:
             raise ValueError(f"Site '{self.ee_site_name}' not found in the MuJoCo model.")
-
-
-
 
 
     def _cache_dr_element_ids(self):
@@ -222,15 +211,7 @@ class PandaEnv(gym.Env):
         azimuth = np.arctan2(vec[1], vec[0])
         elevation = np.arcsin(vec[2] / radius)
         return radius, azimuth, elevation
-    @staticmethod
-    def _safe_normalize(vec: np.ndarray, default: np.ndarray = None) -> np.ndarray:
-        """Normalizes a vector, returning a default if the norm is close to zero."""
-        norm = np.linalg.norm(vec)
-        if norm < 1e-6:
-            if default is None:
-                return np.zeros_like(vec)
-            return default
-        return vec / norm
+
     @staticmethod
     def _spherical_to_cartesian(radius: float, azimuth: float, elevation: float, target: np.ndarray) -> np.ndarray:
         """Converts spherical coordinates back to a Cartesian camera position."""
@@ -239,82 +220,94 @@ class PandaEnv(gym.Env):
         z = radius * np.sin(elevation)
         return target + np.array([x, y, z])
   
-    def _apply_domain_randomization(self, gripper_pos: np.ndarray, goal_pos: np.ndarray):
-        """
-        Handles all domain randomization. This now includes the core mode-switching
-        camera logic based on the task geometry.
-        """
-        if not self.enable_domain_randomization:
-            return
+    def _apply_domain_randomization(self):
+            """
+            Randomizes textures, lighting, and camera.
+            This version uses a robust spherical coordinate jittering method for stable camera views.
+            """
+            if not self.enable_domain_randomization:
+                return
+
+            # --- Texture and Lighting Randomization (remains the same) ---
+            if self.dr_config.table_textures:
+                chosen_table_tex = self.np_random.choice(self.dr_config.table_textures)
+                if chosen_table_tex in self._dr_mat_ids:
+                    self.model.geom_matid[self.table_geom_id] = self._dr_mat_ids[chosen_table_tex]
             
-        # === PART 1: Lighting and Texture Randomization (Copied from old version) ===
-        if self.dr_config.table_textures:
-            chosen_table_tex = self.np_random.choice(self.dr_config.table_textures)
-            if chosen_table_tex in self._dr_mat_ids:
-                self.model.geom_matid[self.table_geom_id] = self._dr_mat_ids[chosen_table_tex]
-        
-        if self.dr_config.floor_textures:
-            chosen_floor_tex = self.np_random.choice(self.dr_config.floor_textures)
-            if chosen_floor_tex in self._dr_mat_ids:
-                self.model.geom_matid[self.floor_geom_id] = self._dr_mat_ids[chosen_floor_tex]
+            if self.dr_config.floor_textures:
+                chosen_floor_tex = self.np_random.choice(self.dr_config.floor_textures)
+                if chosen_floor_tex in self._dr_mat_ids:
+                    self.model.geom_matid[self.floor_geom_id] = self._dr_mat_ids[chosen_floor_tex]
 
-        angle = self.np_random.uniform(0, 2 * np.pi)
-        radius = self.np_random.uniform(1.0, 1.5)
-        light_z = self.np_random.uniform(*self.dr_config.light_pos_range[2])
-        self.model.light_pos[self.light_id] = [self.TABLE_CENTER[0] + radius * np.cos(angle),
-                                              self.TABLE_CENTER[1] + radius * np.sin(angle),
-                                              light_z]
-        target_pos_light = np.append(self.TABLE_CENTER, 0.0) + self.np_random.uniform(-0.1, 0.1, size=3)
-        direction = target_pos_light - self.model.light_pos[self.light_id]
-        if np.linalg.norm(direction) > 1e-6:
-            self.model.light_dir[self.light_id] = direction / np.linalg.norm(direction)
-        base_intensity = self.np_random.uniform(0.5, 0.7)
-        self.model.light_diffuse[self.light_id] = np.clip(base_intensity + self.np_random.uniform(-0.1, 0.1, size=3), 0.4, 0.9)
+            angle = self.np_random.uniform(0, 2 * np.pi)
+            radius = self.np_random.uniform(1.0, 1.5)
+            light_z = self.np_random.uniform(*self.dr_config.light_pos_range[2])
+            self.model.light_pos[self.light_id] = [self.TABLE_CENTER[0] + radius * np.cos(angle),
+                                                  self.TABLE_CENTER[1] + radius * np.sin(angle),
+                                                  light_z]
+            target_pos = np.append(self.TABLE_CENTER, 0.0) + self.np_random.uniform(-0.1, 0.1, size=3)
+            direction = target_pos - self.model.light_pos[self.light_id]
 
-        # === PART 2: Mode-Switching Camera Placement ===
-        action_vec = gripper_pos - goal_pos
-        action_scale = np.linalg.norm(action_vec)
-        target_pos = (gripper_pos + goal_pos) / 2.0
+            norm = np.linalg.norm(direction)
+            if norm > 1e-6:
+                self.model.light_dir[self.light_id] = direction / norm
+            base_intensity = self.np_random.uniform(0.5, 0.7)
+            self.model.light_diffuse[self.light_id] = np.clip(base_intensity + self.np_random.uniform(-0.1, 0.1, size=3), 0.4, 0.9)
 
-        if action_scale <= self.LONG_REACH_THRESHOLD:
-            # --- STRATEGY 1: Three-Quarter Detail View ---
-            up_vec = np.array([0., 0., 1.])
+            # --- REFACTORED CAMERA RANDOMIZATION ---
+            if not self.dr_config.camera_shots:
+                warnings.warn("No camera_shots defined in DR config; skipping camera randomization.")
+                return
 
-            action_dir = self._safe_normalize(action_vec, default=np.array([1., 0., 0.]))
+            # 1. Select a known-good shot from the curated list.
+            chosen_shot = self.np_random.choice(self.dr_config.camera_shots)
+            base_pos = np.array(chosen_shot.pos)
+            base_target = np.array(chosen_shot.target)
+
+            # 2. Jitter the target point first, constrained to the table surface.
+            # This ensures the camera will always look at a relevant area.
+            target_jitter_xy = self.np_random.uniform(-0.08, 0.08, size=2)
+            target_jitter_z = self.np_random.uniform(-0.05, 0.05)
+            final_target = base_target.copy()
+            final_target[:2] += target_jitter_xy
+            final_target[2] += target_jitter_z
+            # Clamp the target Z to be near the table height
+            final_target[2] = np.clip(final_target[2], 0.4, 0.55)
+
+            # 3. Convert the original camera position to spherical coordinates relative to the *original* target.
+            radius, azimuth, elevation = self._cartesian_to_spherical(base_pos, base_target)
+
+            # 4. Apply a small, controlled jitter to the spherical coordinates.
+            # These ranges are smaller and safer than the previous Cartesian jitter.
+            radius_jitter = self.np_random.uniform(-0.1, 0.1) 
+            azimuth_jitter_rad = self.np_random.uniform(-0.2, 0.2) # ~11.5 degrees
+            elevation_jitter_rad = self.np_random.uniform(-0.2, 0.2) # ~11.5 degrees
             
-            side_on_vec = np.cross(action_dir, up_vec)
-            side_on_vec = self._safe_normalize(side_on_vec, default=np.array([0., 1., 0.]))
-            
-            ideal_view_vec = 0.7 * side_on_vec + 0.3 * action_dir
-            ideal_view_vec = self._safe_normalize(ideal_view_vec, default=side_on_vec)
-            
-            final_distance = self.CAM_BASE_DISTANCE + action_scale * self.CAM_DISTANCE_SCALE_FACTOR
-            deterministic_cam_pos = target_pos + final_distance * ideal_view_vec + self.CAM_HEIGHT_ABOVE_TARGET * up_vec
-            deterministic_fovy = np.clip(self.CAM_BASE_FOVY + action_scale * self.CAM_FOVY_SCALE_FACTOR, 40.0, 85.0)
+            final_radius = np.clip(radius + radius_jitter, 0.3, 1.5) # Ensure camera doesn't go too close or far
+            final_azimuth = azimuth + azimuth_jitter_rad
+            final_elevation = elevation + elevation_jitter_rad
 
-            radius, azimuth, elevation = self._cartesian_to_spherical(deterministic_cam_pos, target_pos)
-            radius_jitter = self.np_random.uniform(-0.05, 0.05)
-            azimuth_jitter_rad = self.np_random.uniform(-0.1, 0.1)
-            elevation_jitter_rad = self.np_random.uniform(-0.1, 0.1)
-            target_jitter = self.np_random.uniform(-0.03, 0.03, size=3)
-            final_target_pos = target_pos + target_jitter
-            
-            final_cam_pos = self._spherical_to_cartesian(radius + radius_jitter, azimuth + azimuth_jitter_rad, elevation + elevation_jitter_rad, final_target_pos)
-            new_quat_xyzw = self._calculate_look_at_quat(final_cam_pos, final_target_pos)
-            final_fovy = np.clip(deterministic_fovy + self.np_random.uniform(-2.0, 2.0), 40.0, 85.0)
+            # 5. Convert the new spherical coordinates back to a Cartesian position,
+            # but relative to the new *jittered* target.
+            final_cam_pos = self._spherical_to_cartesian(final_radius, final_azimuth, final_elevation, final_target)
 
-        else:
-            # --- STRATEGY 2: Strategic Top-Down View ---
-            final_cam_pos = np.array([self.TABLE_CENTER[0], self.TABLE_CENTER[1], 1.5])
-            final_target_pos = np.append(self.TABLE_CENTER, 0.4)
-            new_quat_xyzw = self._calculate_look_at_quat(final_cam_pos, final_target_pos)
-            final_fovy = 70.0
+            # --- The rest of the function applies the calculated values ---
+            new_quat_xyzw = self._calculate_look_at_quat(final_cam_pos, final_target)
+            quat_wxyz = [new_quat_xyzw[3], new_quat_xyzw[0], new_quat_xyzw[1], new_quat_xyzw[2]]
+            self.model.cam_pos[self.camera_id] = final_cam_pos
+            self.model.cam_quat[self.camera_id] = quat_wxyz
 
-        # === PART 3: Apply the Chosen Camera Pose ===
-        quat_wxyz = [new_quat_xyzw[3], new_quat_xyzw[0], new_quat_xyzw[1], new_quat_xyzw[2]]
-        self.model.cam_pos[self.camera_id] = final_cam_pos
-        self.model.cam_quat[self.camera_id] = quat_wxyz
-        self.model.cam_fovy[self.camera_id] = final_fovy
+            # FOV adjustment (remains the same)
+            base_fovy = float(self.model.cam_fovy[self.camera_id]) if self.model.cam_fovy.size > self.camera_id else 45.0 
+            fov_add = float(self.np_random.uniform(*self.dr_config.camera_fovy_add_range))
+            self.model.cam_fovy[self.camera_id] = float(np.clip(base_fovy + fov_add, 30.0, 90.0))
+
+            # Safety forward to make sure data arrays reflect model edits
+            try:
+                mujoco.mj_forward(self.model, self.data)
+            except Exception:
+                pass
+
     def _is_pos_in_camera_view(
         self, pos_world: np.ndarray, camera_name: str, margin: int = 0
     ) -> Tuple[bool, Dict]:
@@ -519,56 +512,46 @@ class PandaEnv(gym.Env):
         return obs
 
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:
+        """Final, simplified reset. Placement happens AFTER all randomizations are applied."""
         super().reset(seed=seed)
         if seed is not None: self.np_random, _ = seeding.np_random(seed)
         
+        # 1. Apply ALL randomizations at once. Since every shot is good, we don't need a safe view.
+        self._apply_domain_randomization()
+        
+        # 2. Reset state and compute kinematics for the chosen random view
         self.timestep = 0
         mujoco.mj_resetData(self.model, self.data)
-
-        # === STAGE 1: UNBIASED TASK GENERATION ===
-        # 1a. Reset robot to a jittered home position.
         home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
+        
+        # FIX: Add small jitter to the robot's home position to prevent static occlusions.
         qpos_jitter = self.np_random.uniform(-0.03, 0.03, size=home_qpos.shape)
         self.data.qpos[:7] = home_qpos + qpos_jitter
-        mujoco.mj_forward(self.model, self.data) # CRITICAL: Update kinematics for a valid gripper pose.
+        
+        mujoco.mj_forward(self.model, self.data)
 
-        # 1b. Perform BLIND placement of goal and object to get candidate positions.
-        #     This ensures a truly random and unbiased task distribution.
+        # 3. Perform object placement
+        if options is None: options = {}
+        placement_mode = options.get("placement_mode", "random")
         obj_zone_key, goal_zone_key = self.np_random.choice(list(self.PLACEMENT_ZONES.keys()), 2, replace=True)
         obj_zone, goal_zone = self.PLACEMENT_ZONES[obj_zone_key], self.PLACEMENT_ZONES[goal_zone_key]
-        
-        object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT, check_visibility=False)
-        goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT, check_visibility=False)
+        object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT, camera_name="fixed_camera")
+        goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT, camera_name="fixed_camera")
 
-        # === STAGE 2: ADAPTIVE CAMERA PLACEMENT & DOMAIN RANDOMIZATION ===
-        # 2a. Get key positions to inform the camera logic.
-        gripper_pos = self.get_ee_pose()[:3]
-        
-        # 2b. Delegate all camera and DR logic to the refactored helper function.
-        self._apply_domain_randomization(gripper_pos, goal_pos)
-
-        # === STAGE 3: COMMIT SCENE & FINALIZE ===
-        # 3a. Now that the camera is set, commit the object and goal positions to the simulation state.
-        if np.linalg.norm(goal_pos[:2] - object_pos[:2]) < 0.05:
-            goal_pos[0] += 0.05 # Ensure a small separation if they spawn too close.
+        if np.linalg.norm(goal_pos[:2] - object_pos[:2]) < 0.05: goal_pos[0] += 0.05
         
         self.data.joint("object_joint").qpos[:3] = object_pos
         self.model.body("goal").pos = goal_pos
         
-        # 3b. Final forward pass to ensure all changes (camera, objects) are reflected.
+        # 4. Final forward pass to reflect object placements
         mujoco.mj_forward(self.model, self.data)
-        
         return self.get_expert_obs(), {}
-
-    # ======================== REPLACE THIS ENTIRE METHOD ========================
-
     def _place_object_in_zone(
         self,
         object_name: str,
         zone_key: str,
         zone: Tuple[np.ndarray, np.ndarray],
         z_plane: float,
-        check_visibility: bool = True,
         camera_name: str = "fixed_camera",
         max_attempts: int = 100,
         margin: int = 20,
@@ -578,16 +561,7 @@ class PandaEnv(gym.Env):
         inside the provided camera view. Falls back to zone center if none found.
         Returns an (x,y,z) world position.
         """
-        # FIX: Moved this line to the top of the function.
-        # It now runs before any logic that depends on it.
         min_offset, max_offset = zone
-
-        if not check_visibility:
-            # Perform a blind placement without any visibility checks.
-            offset = self.np_random.uniform(low=min_offset, high=max_offset)
-            return np.append(self.TABLE_CENTER + offset, z_plane)
-
-        # The rest of the logic for visibility checks.
         debug_printed = False
         for attempt in range(max_attempts):
             offset = self.np_random.uniform(low=min_offset, high=max_offset)
