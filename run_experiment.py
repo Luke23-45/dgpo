@@ -32,7 +32,8 @@ from gymnasium import spaces
 from models.custom_sb3_extractor import BCFeaturesExtractor 
 from utils.obs_adapters import OctoToSB3Adapter
 from pathlib import Path
-# weight transfer utility: try to import from the most likely path
+import sys
+import json
 try:
     from utils.transfer_bc_to_ppo import transfer_bc_weights
 except Exception:
@@ -146,7 +147,7 @@ def setup_environment(
     vec_env = make_vec_env(lambda: make_env(), n_envs=n_envs, seed=seed)
     return vec_env
 
-def initialize_ppo_agent(env: gym.vector.VectorEnv, args: argparse.Namespace, device_str: str) -> PPO:
+def initialize_ppo_agent(env: gym.vector.VectorEnv, run_name: str, seed: int, device_str: str) -> PPO:
     """
     Initializes a new PPO agent with a standard configuration.
     """
@@ -166,9 +167,9 @@ def initialize_ppo_agent(env: gym.vector.VectorEnv, args: argparse.Namespace, de
         "learning_rate": 3e-4,
         "clip_range": 0.2,
         "device": device_str,
-        "tensorboard_log": os.path.join("trained_models", args.run_name),
+        "tensorboard_log": os.path.join("trained_models", run_name),
         "policy_kwargs": policy_kwargs,
-        "seed": args.seed
+        "seed": seed
     }
     
     logger.info("Initializing new PPO agent with config:")
@@ -205,6 +206,7 @@ def run_experiment(
     xml_path: str,
     bc_model_path: Optional[str],
     resume_from: Optional[str],
+    output_dir: str,
     total_timesteps: int,
     run_name: str,
     save_freq: int,
@@ -218,7 +220,40 @@ def run_experiment(
     enable_downsample: bool = False,
     primary_res: Tuple[int, int] = (128, 128),
     wrist_res: Tuple[int, int] = (96, 96),
+    resume_dir: Optional[str] = None,
+
 ):
+    if resume_dir:
+        run_dir = Path(resume_dir)
+        # Load the original config and overwrite the necessary local variables for this run
+        config_path = run_dir / "config.json"
+        logger.info(f"RESUME mode: Loading config from {config_path}")
+        if not config_path.is_file():
+            logger.critical(f"Resume failed: config.json not found in {run_dir}"); sys.exit(1)
+        with config_path.open("r") as f:
+            original_args = json.load(f)
+        
+        # Overwrite key parameters for the resumed run
+        xml_path = original_args.get("xml_path", xml_path)
+        seed = original_args.get("seed", seed)
+        run_name = original_args.get("run_name") # Use the original name
+        # Find the latest checkpoint
+        checkpoints = sorted(list((run_dir / "checkpoints").glob("*.zip")))
+        if not checkpoints:
+            logger.critical(f"Resume failed: No .zip checkpoints found in {run_dir / 'checkpoints'}"); sys.exit(1)
+        resume_from = str(checkpoints[-1])
+        bc_model_path = None # Disable BC init
+    else:
+        run_name = run_name or time.strftime("%Y%m%d-%H%M%S")
+        run_dir = Path(output_dir) / run_name
+        checkpoints_dir = run_dir / "checkpoints"
+        logs_dir = run_dir / "logs"
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        # Save the config
+        config_to_save = {k: v for k, v in locals().items() if not k == 'octo_model'}
+        with (run_dir / "config.json").open("w") as f:
+            json.dump({k: str(v) for k, v in config_to_save.items()}, f, indent=4)
     logger.info("🚀 Starting DGPO-Foundation experiment")
     device_str = resolve_device(device_arg)
     device = torch.device(device_str)
@@ -304,11 +339,11 @@ def run_experiment(
     else:
         logger.info("Starting a new training run.")
         logger.info(f"Initializing PPO agent on device {device_str}...")
-        ppo_agent = initialize_ppo_agent(env, args, device_str)
+        ppo_agent = initialize_ppo_agent(env, run_name, seed, device_str)
         logger.info("PPO agent ready")
 
         # Correctly handle weight transfer from BC if provided
-        if args.bc_model_path:
+        if bc_model_path:
             logger.info(f"Attempting to load BC checkpoint from: {args.bc_model_path}")
             try:
                 state_dict = load_bc_checkpoint(args.bc_model_path, device)
@@ -346,8 +381,8 @@ def run_experiment(
         else:
             logger.info("No BC model provided — starting RL")
 
-    save_freq_per_env = max(1, args.save_freq // args.n_envs)
-    logger.info(f"Checkpoint callback configured to save every {args.save_freq} total timesteps "
+    save_freq_per_env = max(1, save_freq // n_envs)
+    logger.info(f"Checkpoint callback configured to save every {save_freq} total timesteps "
                 f"({save_freq_per_env} steps per environment).")
     
     checkpoint_callback = CheckpointCallback(
@@ -363,7 +398,7 @@ def run_experiment(
         # Check if the `learn` method supports `progress_bar`
         learn_signature = inspect.signature(ppo_agent.learn)
         if "progress_bar" in learn_signature.parameters:
-            logger.info(f"Starting training (resuming={not reset_timesteps}) for {args.total_timesteps} timesteps...")
+            logger.info(f"Starting training (resuming={not reset_timesteps}) for {total_timesteps} timesteps...")
             ppo_agent.learn(
                 total_timesteps=args.total_timesteps,
                 callback=checkpoint_callback,
@@ -434,29 +469,48 @@ if __name__ == "__main__":
                         help="Weight for the rotation component of the divergence reward.")
     parser.add_argument("--div_clip", type=float, default=10.0,
                         help="Maximum value to clip the raw divergence score before weighting.")
+    parser.add_argument("--output_dir", type=str, default="trained_models")
+
     args = parser.parse_args()
-    if args.bc_model_path and args.resume_from:
-        raise argparse.ArgumentTypeError("Cannot provide both --bc_model_path and --resume_from. Choose one to start or resume a run.")
-    if not args.bc_model_path and not args.resume_from:
-        logger.warning("Neither --bc_model_path nor --resume_from was provided. The agent will be trained from scratch with random initialization.")
-
-
+    if args.resume_dir and args.bc_init_dir:
+        raise argparse.ArgumentTypeError("Cannot provide both --resume_dir and --bc_init_dir.")
+    
+    # This block acts as an "adapter" from the new CLI to the old function signature.
     if args.resume_dir:
-        # In resume mode, we ignore bc_init_dir and run_name from the CLI
+        # --- RESUME MODE ---
+        logger.info(f"Resume mode activated. Loading from: {args.resume_dir}")
+        run_dir = Path(args.resume_dir)
+        checkpoints_dir = run_dir / "checkpoints"
+        checkpoints = sorted(list(checkpoints_dir.glob("*.zip")))
+        if not checkpoints:
+            logger.critical(f"Resume failed: No .zip checkpoints found in {checkpoints_dir}")
+            sys.exit(1)
+            
+        # Set the variables for the function call
         bc_model_path_for_func = None
-        resume_from_for_func = None # The function will find the latest checkpoint inside
-        run_name_for_func = None
+        resume_from_for_func = str(checkpoints[-1])
+        run_name_for_func = run_dir.name # Use the existing directory name
+        output_dir_for_func = str(run_dir.parent)
     else:
-        # In new run mode, resume_dir is None
-        # We need to find the best model path from the bc_init_dir
-        if args.bc_init_dir:
-            bc_model_path_for_func = str(Path(args.bc_init_dir) / "checkpoints" / "best_model.pth")
-            if not os.path.exists(bc_model_path_for_func):
-                logger.error(f"BC checkpoint not found at {bc_model_path_for_func}"); sys.exit(1)
-        else:
-            bc_model_path_for_func = None
+        # --- NEW RUN MODE ---
+        if not args.run_name:
+            args.run_name = time.strftime("run_%Y%m%d_%H%M%S")
+            logger.info(f"No run name provided. Generated run name: {args.run_name}")
+
+        run_name_for_func = args.run_name
+        output_dir_for_func = args.output_dir
         resume_from_for_func = None
-        run_name_for_func = args.run_nam
+
+        if args.bc_init_dir:
+            # Find the best BC model checkpoint to pass to the function
+            bc_checkpoint_path = Path(args.bc_init_dir) / "checkpoints" / "best_model.pth"
+            if not bc_checkpoint_path.is_file():
+                logger.error(f"BC checkpoint 'best_model.pth' not found in {bc_checkpoint_path.parent}")
+                sys.exit(1)
+            bc_model_path_for_func = str(bc_checkpoint_path)
+        else:
+            logger.warning("No --bc_init_dir provided for new run. Training from random initialization.")
+            bc_model_path_for_func = None
 
     primary_res = _parse_hw(args.primary_res)
     wrist_res = _parse_hw(args.wrist_res)
@@ -469,6 +523,7 @@ if __name__ == "__main__":
         run_name=run_name_for_func,
         resume_dir=args.resume_dir,
         save_freq=args.save_freq,
+        output_dir=output_dir_for_func,
         seed=args.seed,
         device_arg=args.device,
         n_envs=args.n_envs,

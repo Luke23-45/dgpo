@@ -33,7 +33,7 @@ from utils.scripted_expert import ExpertConfig, ScriptedExpert
 XML_PATH = "envs/panda_pick_place.xml"
 URDF_PATH = "urdf/panda_mujoco_kinematics.urdf"
 SEED = 42
-MAX_EPISODE_STEPS = 250  # Give the expert enough time to complete the task
+MAX_EPISODE_STEPS = 10  # Give the expert enough time to complete the task
 VIDEO_FPS = 30
 OUTPUT_DIR = "debug_output"
 OUTPUT_VIDEO_FILENAME = "scripted_trajectory.mp4"
@@ -42,6 +42,7 @@ OUTPUT_VIDEO_FILENAME = "scripted_trajectory.mp4"
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
 )
+
 log = logging.getLogger("SCRIPTED_DEBUG")
 
 
@@ -179,3 +180,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

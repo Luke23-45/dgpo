@@ -6,14 +6,51 @@
   <option timestep="0.002" integrator="RK4" gravity="0 0 -9.81" cone="elliptic"/>
 
   <visual>
-    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <quality shadowsize="4096"/>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.4 0.4 0.4" specular="0 0 0"/>
     <global azimuth="120" elevation="-20"/>
     <rgba haze="0.15 0.25 0.35 1"/>
   </visual>
 
-  <asset>
-    <texture name="grid" type="2d" builtin="checker" rgb1="0.1 0.2 0.3" rgb2="0.2 0.3 0.4" width="300" height="300"/>
-    <material name="grid" texture="grid" texrepeat="5 5" texuniform="true" reflectance="0.2"/>
+<asset>
+    <!-- =================================================================== -->
+    <!--              DOMAIN RANDOMIZATION ASSETS (TEXTURES)                 -->
+    <!-- =================================================================== -->
+
+    <!-- 1. Procedural Textures (Built-in) -->
+    <texture name="tex_checker_blue" type="2d" builtin="checker" rgb1="0.1 0.2 0.3" rgb2="0.2 0.3 0.4" width="300" height="300"/>
+    <texture name="tex_checker_green" type="2d" builtin="checker" rgb1="0.1 0.3 0.2" rgb2="0.2 0.4 0.3" width="300" height="300"/>
+
+<texture name="tex_noise_low_contrast" type="2d" builtin="checker" rgb1="0.4 0.4 0.4" rgb2="0.6 0.6 0.6" width="300" height="300"/>
+<texture name="tex_noise_high_contrast" type="2d" builtin="checker" rgb1="0.1 0.1 0.1" rgb2="0.9 0.9 0.9" width="300" height="300"/>
+
+
+
+    <!-- 2. Realistic Textures (from image files) -->
+    <!-- IMPORTANT: Update the file paths to match your project structure -->
+    <texture name="tex_wood_light" type="2d" file="assets/textures/wood_light.png"/>
+    <texture name="tex_wood_dark" type="2d" file="assets/textures/wood_dark.png"/>
+    <texture name="tex_metal_brushed" type="2d" file="assets/textures/metal_brushed.png"/>
+    <texture name="tex_marble_white" type="2d" file="assets/textures/marble_white.png"/>
+
+    <texture name="tex_wood_stripe" type="2d" file="assets/textures/wood_stripe.png"/> <!-- NEW -->
+    <texture name="tex_wood_paquet" type="2d" file="assets/textures/wood_paquet.png"/> <!-- NEW -->
+
+    <!-- Materials for the Floor -->
+    <material name="mat_floor_checker_blue" texture="tex_checker_blue" texrepeat="5 5" texuniform="true" reflectance="0.2"/>
+    <material name="mat_floor_checker_green" texture="tex_checker_green" texrepeat="5 5" texuniform="true" reflectance="0.2"/>
+    <material name="mat_floor_wood_dark" texture="tex_wood_dark" texrepeat="2 2" texuniform="true" reflectance="0.1"/>
+    <material name="mat_floor_wood_paquet" texture="tex_wood_paquet" texrepeat="3 3" texuniform="true" reflectance="0.15"/> 
+
+    <!-- Materials for the Table -->
+    <material name="mat_table_wood_light" texture="tex_wood_light" texrepeat="1 1" texuniform="true" reflectance="0.1"/>
+    
+    <material name="mat_table_metal_brushed" texture="tex_metal_brushed" texrepeat="1 1" texuniform="true" reflectance="0.2" specular="0.3"/>
+    <material name="mat_table_marble_white" texture="tex_marble_white" texrepeat="1 1" texuniform="true" reflectance="0.2" specular="0.2"/>
+    <material name="mat_table_noise_low" texture="tex_noise_low_contrast" texrepeat="1 1" texuniform="true" reflectance="0.05"/>
+    <material name="mat_table_noise_high" texture="tex_noise_high_contrast" texrepeat="1 1" texuniform="true" reflectance="0.05"/>
+    <material name="mat_table_wood_stripe" texture="tex_wood_stripe" texrepeat="2 2" texuniform="true" reflectance="0.1"/> 
+    <!-- Original materials for the object and goal (we don't randomize these) -->
     <material name="cube_mat" rgba="0.9 0.1 0.1 1.0"/>
     <material name="goal_mat" rgba="0.1 0.9 0.1 0.5"/>
   </asset>
@@ -21,12 +58,19 @@
     <geom solref="0.005 1" solimp="0.95 0.99 0.001" friction="1.0 0.1 0.01"/>
   </default>
   <worldbody>
-    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
-    <geom name="floor" type="plane" size="0 0 0.05" material="grid"/>
+  <light name="main_light" pos="0.6 0 2.0" dir="0 0 -1" directional="false"
+      diffuse="0.8 0.8 0.8" specular="0.3 0.3 0.3"
+      cutoff="60" exponent="10" castshadow="true"/>
+  <light name="fill_light" pos="-1 0 1.5" dir="1 0 -1" directional="true"
+      diffuse="0.4 0.4 0.4" specular="0.1 0.1 0.1" castshadow="false"/>
+
+
+    <geom name="floor" type="plane" size="0 0 0.05" material="mat_floor_checker_blue"/>
 
     <!-- Table -->
+
     <body name="table" pos="0.6 0 0.2">
-      <geom name="table_geom" type="box" size="0.4 0.4 0.2" rgba="0.8 0.8 0.8 1"/>
+      <geom name="table_geom" type="box" size="0.4 0.4 0.2" material="mat_table_wood_light"/>
     </body>
 
     <!-- Robot base anchor -->
@@ -56,9 +100,11 @@
     <weld body1="robot_base" body2="link0"/>
   </equality>
 
-  <!-- Extra contact exclusions -->
+  <!-- Extra contact exclusions quat="0.707 0.707 0 0" -->
   <contact>
     <exclude body1="left_finger" body2="table"/>
     <exclude body1="right_finger" body2="table"/>
   </contact>
 </mujoco>
+
+
