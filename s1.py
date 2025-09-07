@@ -179,42 +179,46 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     shots_to_test = [
-    # --- Right Three-Quarter Views ---
-        # (From Shot_01/sample_00) - A perfect classic view. Elevation: 43.5°
-        CameraShot(pos=(0.87, -0.50, 1.02), target=(0.52, -0.01, 0.45)),
-        # (From Shot_04/sample_01) - A slightly wider right view. Elevation: 45.1°
-        CameraShot(pos=(1.07, -0.25, 1.09), target=(0.49, -0.03, 0.44)),
+        # # --- Right Three-Quarter Views ---
+        # # [Source: Shot_01/sample_00] Perfect, balanced right view. Elevation: 38.3°
+        # CameraShot(pos=(0.90, -0.57, 1.03), target=(0.41, -0.02, 0.45)),
+        # # (From Shot_04/sample_01) - A slightly wider right view. Elevation: 45.1°
+        # CameraShot(pos=(1.07, -0.25, 1.09), target=(0.49, -0.03, 0.44)),
 
-        # --- Left Three-Quarter Views ---
-        # (From Shot_02/sample_00) - Excellent left-side view. Elevation: 34°
-        CameraShot(pos=(0.83, 0.49, 0.87), target=(0.48, -0.03, 0.43)),
-        # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
-        CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
-        # (From Shot_04/sample_00 - adapted) - Another good left-side view for variety. Elevation: 53°
-        CameraShot(pos=(0.57, 0.58, 1.01), target=(0.44, -0.01, 0.43)),
+        # # --- Left Three-Quarter Views ---
+        # # [Source: Shot_04/sample_00] Excellent, clear left-side composition. Elevation: 53.0°
+        # CameraShot(pos=(0.57, 0.58, 1.01), target=(0.44, -0.01, 0.43)),
+        # # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
+        # CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
+        # # [Source: Shot_12/sample_01] Another strong left view, slightly different framing. Elevation: 39.2°
+        # CameraShot(pos=(1.10, 0.41, 1.01), target=(0.52, 0.06, 0.45)),
         # --- Frontal Views ---
-        # (From Shot_09/sample_12) - A centered, slightly higher frontal view. Elevation: 41°
-        # CameraShot(pos=(1.14, -0.01, 0.99), target=(0.52, 0.03, 0.43)),
-        # (From Shot_02/sample_13 - adapted) - A slightly different frontal composition. Elevation: 38.4°
+        # [Source: Shot_08/sample_00] A perfect, direct frontal shot. Elevation: 31.0°
+        CameraShot(pos=(1.09, 0.14, 0.87), target=(0.40, 0.03, 0.44)),
+        # [Source: Shot_09/sample_12] A slightly higher frontal view, great for context. Elevation: 36.1°
+        CameraShot(pos=(1.17, 0.06, 0.98), target=(0.45, -0.02, 0.45)),
+        # [Source: Shot_06/sample_02] A wider frontal view. Elevation: 41.3°
         CameraShot(pos=(1.02, 0.10, 0.95), target=(0.39, 0.04, 0.45)),
-        # (From Shot_08/sample_00) - A well-balanced frontal shot. Elevation: 30°
-        CameraShot(pos=(1.35, 0.34, 1.00), target=(0.44, -0.01, 0.45)),
-        # (From Shot_09/sample_12) - A centered, slightly higher frontal view. Elevation: 41°
-        CameraShot(pos=(1.14, -0.01, 0.99), target=(0.52, 0.03, 0.43)),
 
-        # --- High-Angle / Near Top-Down Views ---
-        # (From Shot_03/sample_11) - A high three-quarter view, very informative. Elevation: 44°
-        CameraShot(pos=(1.04, -0.04, 1.04), target=(0.43, 0.01, 0.43)),
-        # (From Shot_07/sample_00) - A balanced top-down view, not too extreme. Elevation: 74°
-        CameraShot(pos=(0.72, 0.00, 1.42), target=(0.45, 0.02, 0.43)),
+        # # --- High-Angle / Near Top-Down Views ---
+        # # [Source: Shot_09/sample_00] A well-composed high three-quarter view. Elevation: 48.7°
+        # CameraShot(pos=(1.02, 0.05, 1.10), target=(0.45, -0.02, 0.44)),
+        # # [Source: Shot_10/sample_01 - MODIFIED] A safe top-down, clamped away from the extreme 74°. Elevation: 68.0°
+        # CameraShot(pos=(0.77, -0.15, 1.30), target=(0.40, -0.04, 0.45)),
 
-        # --- Dynamic / Lower Views (Still Safe) ---
-        # (From Shot_01/sample_09) - A lower, more dynamic angle that still works well. Elevation: 27.8°
-        CameraShot(pos=(1.05, -0.37, 0.82), target=(0.44, -0.00, 0.45)),
-        # (From Shot_06/sample_01) - Another strong, slightly lower left view. Elevation: 35°
-        CameraShot(pos=(1.08, 0.36, 0.97), target=(0.47, 0.06, 0.44)),
-        # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
-        CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
+        # # --- Dynamic / Lower Views (Still Safe) ---
+        # # [Source: Shot_11/sample_00] The perfect low-angle shot, just above the limit. Elevation: 25.2°
+        # CameraShot(pos=(1.15, -0.53, 0.82), target=(0.51, -0.06, 0.45)),
+        # # [Source: Shot_13/sample_01] A fantastic wide, low-left perspective. Elevation: 27.4°
+        # CameraShot(pos=(0.98, 0.53, 0.82), target=(0.48, -0.01, 0.44)),
+
+        # # --- Extra Views for Maximum Variety ---    
+        # # [Source: Shot_03/sample_00] An interesting over-the-shoulder left view. Elevation: 35.0°
+        # CameraShot(pos=(0.75, 0.54, 0.91), target=(0.40, -0.02, 0.44)),
+        # # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
+        # CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
+        # # [Source: Shot_07/sample_00] A very wide three-quarter view, good for seeing the whole table. Elevation: 23.5° (clamped to 25)
+        # CameraShot(pos=(1.45, 0.59, 0.93), target=(0.52, 0.01, 0.45)),
     ]
     
     print(f"Found {len(shots_to_test)} camera shots to test.")

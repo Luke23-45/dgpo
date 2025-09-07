@@ -6,10 +6,10 @@
   <option timestep="0.002" integrator="RK4" gravity="0 0 -9.81" cone="elliptic"/>
 
   <visual>
-    <quality shadowsize="4096"/>
-    <headlight diffuse="0 0 0" ambient="0.4 0.4 0.4" specular="0 0 0" />
-    <global azimuth="120" elevation="-20"/>
-    <rgba haze="0.15 0.25 0.35 1"/>
+    <quality shadowsize="8192" />
+    <headlight diffuse="0 0 0" ambient="0.4 0.4 0.4" specular="0 0 0" active="1" />
+    <global azimuth="120" elevation="-20" />
+    <!-- <rgba haze="0.15 0.25 0.35 1"/> -->
   </visual>
 
 <asset>
@@ -95,11 +95,36 @@
   </default>
   <worldbody>
 
+  <light name="main_light"
+           pos="1.5 0.5 2.5"
+           dir="0 0 -1"
+           directional="false"
+           castshadow="true"
+           cutoff="60"
+           exponent="30"
+           diffuse="0.8 0.8 0.8"
+           specular="0.2 0.2 0.2"/>
 
-<light name="main_light" pos="0.8 0.5 2.5" dir="-0.3 -0.2 -1" directional="true"
-        diffuse="0.8 0.8 0.8" specular="0.15 0.15 0.15" castshadow="true"/>
-    <light name="fill_light" pos="-0.2 -0.5 2.0" dir="0.1 0.2 -1" directional="true"
-        diffuse="0.4 0.4 0.4" specular="0.05 0.05 0.05" castshadow="false"/> 
+    <light name="fill_light"
+           pos="-0.5 -0.5 2.0"
+           dir="0 0 -1"
+           directional="false"
+           castshadow="true"
+           cutoff="80"
+           exponent="20"
+           diffuse="0.4 0.4 0.4"
+           specular="0.05 0.05 0.05"/>
+
+    <light name="back_light"
+           pos="0.6 -1.0 1.5"
+           dir="0 0 -1"
+           directional="false"
+           castshadow="true"
+           cutoff="70"
+           exponent="25"
+           diffuse="0.25 0.25 0.25"
+           specular="0.1 0.1 0.1"/>
+
     <geom name="floor" type="box" pos="0.5 0 -0.05" size="5 5 0.05" material="mat_floor_checker_blue" contype="0" conaffinity="0"/>
 
     <!-- Table -->
@@ -107,7 +132,9 @@
     <body name="table" pos="0.6 0 0.2">
       <geom name="table_geom" type="box" size="0.4 0.4 0.2" material="mat_table_wood_light"/>
     </body>
-
+    <body name="tablse" pos="-1 -0.5 2.0">
+      <geom name="tabsle_geom" type="box" size="0.4 0.7 0.2" material="mat_table_wood_light"/>
+    </body>
     <!-- Robot base anchor -->
     <body name="robot_base" pos="0 0 0"/>
 

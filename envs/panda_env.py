@@ -22,7 +22,7 @@ class RenderPostConfig:
     auto_exposure_percentile: float = 0.98
     target_white: float = 0.75        # in linear space
     min_exposure: float = 0.7
-    max_exposure: float = 1.2
+    max_exposure: float = 1.3
 
     # Color space management
     assume_input_is_srgb: bool = True    # MuJoCo returns 8-bit sRGB-like frames
@@ -62,42 +62,45 @@ class DomainRandomizationConfig:
     # It provides a wider, more robust, and higher-quality set of base viewpoints.
     camera_shots: List[CameraShot] = field(default_factory=lambda: [
         # --- Right Three-Quarter Views ---
-        # (From Shot_01/sample_00) - A perfect classic view. Elevation: 43.5°
-        CameraShot(pos=(0.87, -0.50, 1.02), target=(0.52, -0.01, 0.45)),
+        # [Source: Shot_01/sample_00] Perfect, balanced right view. Elevation: 38.3°
+        CameraShot(pos=(0.90, -0.57, 1.03), target=(0.41, -0.02, 0.45)),
         # (From Shot_04/sample_01) - A slightly wider right view. Elevation: 45.1°
         CameraShot(pos=(1.07, -0.25, 1.09), target=(0.49, -0.03, 0.44)),
 
         # --- Left Three-Quarter Views ---
-        # (From Shot_02/sample_00) - Excellent left-side view. Elevation: 34°
-        CameraShot(pos=(0.83, 0.49, 0.87), target=(0.48, -0.03, 0.43)),
+        # [Source: Shot_04/sample_00] Excellent, clear left-side composition. Elevation: 53.0°
+        CameraShot(pos=(0.57, 0.58, 1.01), target=(0.44, -0.01, 0.43)),
         # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
         CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
-        # (From Shot_04/sample_00 - adapted) - Another good left-side view for variety. Elevation: 53°
-        CameraShot(pos=(0.57, 0.58, 1.01), target=(0.44, -0.01, 0.43)),
+        # [Source: Shot_12/sample_01] Another strong left view, slightly different framing. Elevation: 39.2°
+        CameraShot(pos=(1.10, 0.41, 1.01), target=(0.52, 0.06, 0.45)),
         # --- Frontal Views ---
-        # (From Shot_09/sample_12) - A centered, slightly higher frontal view. Elevation: 41°
-        # CameraShot(pos=(1.14, -0.01, 0.99), target=(0.52, 0.03, 0.43)),
-        # (From Shot_02/sample_13 - adapted) - A slightly different frontal composition. Elevation: 38.4°
+        # [Source: Shot_08/sample_00] A perfect, direct frontal shot. Elevation: 31.0°
+        CameraShot(pos=(1.09, 0.14, 0.87), target=(0.40, 0.03, 0.44)),
+        # [Source: Shot_09/sample_12] A slightly higher frontal view, great for context. Elevation: 36.1°
+        CameraShot(pos=(1.17, 0.06, 0.98), target=(0.45, -0.02, 0.45)),
+        # [Source: Shot_06/sample_02] A wider frontal view. Elevation: 41.3°
         CameraShot(pos=(1.02, 0.10, 0.95), target=(0.39, 0.04, 0.45)),
-        # (From Shot_08/sample_00) - A well-balanced frontal shot. Elevation: 30°
-        CameraShot(pos=(1.35, 0.34, 1.00), target=(0.44, -0.01, 0.45)),
-        # (From Shot_09/sample_12) - A centered, slightly higher frontal view. Elevation: 41°
-        CameraShot(pos=(1.14, -0.01, 0.99), target=(0.52, 0.03, 0.43)),
 
         # --- High-Angle / Near Top-Down Views ---
-        # (From Shot_03/sample_11) - A high three-quarter view, very informative. Elevation: 44°
-        CameraShot(pos=(1.04, -0.04, 1.04), target=(0.43, 0.01, 0.43)),
-        # (From Shot_07/sample_00) - A balanced top-down view, not too extreme. Elevation: 74°
-        CameraShot(pos=(0.72, 0.00, 1.42), target=(0.45, 0.02, 0.43)),
+        # [Source: Shot_09/sample_00] A well-composed high three-quarter view. Elevation: 48.7°
+        CameraShot(pos=(1.02, 0.05, 1.10), target=(0.45, -0.02, 0.44)),
+        # [Source: Shot_10/sample_01 - MODIFIED] A safe top-down, clamped away from the extreme 74°. Elevation: 68.0°
+        CameraShot(pos=(0.85, -0.15, 1.25), target=(0.40, -0.04, 0.45)),
 
         # --- Dynamic / Lower Views (Still Safe) ---
-        # (From Shot_01/sample_09) - A lower, more dynamic angle that still works well. Elevation: 27.8°
-        CameraShot(pos=(1.05, -0.37, 0.82), target=(0.44, -0.00, 0.45)),
-        # (From Shot_06/sample_01) - Another strong, slightly lower left view. Elevation: 35°
-        CameraShot(pos=(1.08, 0.36, 0.97), target=(0.47, 0.06, 0.44)),
+        # [Source: Shot_11/sample_00] The perfect low-angle shot, just above the limit. Elevation: 25.2°
+        CameraShot(pos=(1.15, -0.53, 0.82), target=(0.51, -0.06, 0.45)),
+        # [Source: Shot_13/sample_01] A fantastic wide, low-left perspective. Elevation: 27.4°
+        CameraShot(pos=(0.98, 0.53, 0.82), target=(0.48, -0.01, 0.44)),
+
+        # --- Extra Views for Maximum Variety ---    
+        # [Source: Shot_03/sample_00] An interesting over-the-shoulder left view. Elevation: 35.0°
+        CameraShot(pos=(0.75, 0.54, 0.91), target=(0.40, -0.02, 0.44)),
         # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
         CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
-
+        # [Source: Shot_07/sample_00] A very wide three-quarter view, good for seeing the whole table. Elevation: 23.5° (clamped to 25)
+        CameraShot(pos=(1.20, 0.55, 0.95), target=(0.52, 0.01, 0.45)),
     ])
 
     radius_jitter: float = 0.10      # meters (reduced from 0.15)
@@ -200,7 +203,7 @@ class PandaEnv(gym.Env):
 
         # Cache IDs of elements to be randomized for performance
         self._cache_dr_element_ids()
-        allowed_prefs = ["random", "left", "right", "front"]
+
 
         self.ee_site_name = "attachment_site"
         self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.ee_site_name)
@@ -220,11 +223,12 @@ class PandaEnv(gym.Env):
         # --- Cache critical element IDs (fail fast if missing) ---
         self.light_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_LIGHT, "main_light")
         self.fill_light_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_LIGHT, "fill_light") 
+        self.back_light_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_LIGHT, "back_light")
         self.table_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "table_geom")
         self.floor_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
         self.camera_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "fixed_camera")
 
-        if any(id_ == -1 for id_ in [self.light_id, self.table_geom_id, self.floor_geom_id, self.camera_id]):
+        if any(id_ == -1 for id_ in [self.light_id, self.table_geom_id, self.floor_geom_id, self.camera_id, self.back_light_id, self.fill_light_id]):
             raise ValueError("One or more critical elements (main_light, table_geom, floor, fixed_camera) "
                              "are missing a 'name' attribute in the XML and cannot be randomized.")
 
@@ -383,7 +387,7 @@ class PandaEnv(gym.Env):
             return
 
         # --- Part 1: Photometric Randomization (Lighting and Textures) ---
-        self._randomize_photometrics()
+
 
         # --- Part 2: Geometric Randomization (Principled Camera Placement) ---
 
@@ -395,7 +399,7 @@ class PandaEnv(gym.Env):
         # 2. Define the dynamic "center of action" for this specific task.
         # We will aim the camera at the midpoint between the gripper and the goal.
         action_midpoint = (gripper_pos + goal_pos) / 2.0
-
+        self._randomize_photometrics(action_midpoint)
         # 3. Add bounded, random jitter to the target position.
         # This creates small variations in framing (e.g., rule of thirds).
         target_jitter = self.np_random.uniform(-self.dr_config.target_pos_jitter,
@@ -518,52 +522,93 @@ class PandaEnv(gym.Env):
         # Action space: 7 arm joint deltas + 1 gripper command
         act_dim = int(getattr(self.model, "nu", 8))
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
-
-
-    def _randomize_photometrics(self):
-            """Randomizes scene lighting and textures to improve policy robustness."""
-            # --- Randomize Textures ---
+        
+    def _randomize_photometrics(self, light_target: np.ndarray):
+            """
+            Implements an advanced 3-point lighting strategy with material randomization
+            to create a more realistic and visually diverse scene.
+            """
+            # --- Part 1: Randomize Textures ---
             if self.dr_config.table_textures:
                 chosen_table_tex = self.np_random.choice(self.dr_config.table_textures)
                 if chosen_table_tex in self._dr_mat_ids:
                     self.model.geom_matid[self.table_geom_id] = self._dr_mat_ids[chosen_table_tex]
-            
+
             if self.dr_config.floor_textures:
                 chosen_floor_tex = self.np_random.choice(self.dr_config.floor_textures)
                 if chosen_floor_tex in self._dr_mat_ids:
                     self.model.geom_matid[self.floor_geom_id] = self._dr_mat_ids[chosen_floor_tex]
 
-            # --- Advanced Lighting Randomization ---
-            # Main Light
-            angle = self.np_random.uniform(0, 2 * np.pi)
-            radius = self.np_random.uniform(1.0, 1.5)
-            light_z = self.np_random.uniform(1.5, 2.5)
-            main_light_pos = np.array([
-                self.TABLE_CENTER[0] + radius * np.cos(angle),
-                self.TABLE_CENTER[1] + radius * np.sin(angle),
-                light_z
+            # --- Part 2: Randomize Table Material Properties ---
+            table_mat_id = self.model.geom_matid[self.table_geom_id]
+            # PATCH: Tightly constrained ranges to prevent overly glossy/plastic looks.
+            self.model.mat_shininess[table_mat_id] = self.np_random.uniform(30, 50)
+            spec_intensity = self.np_random.uniform(0.05, 0.2)
+            self.model.mat_specular[table_mat_id] = spec_intensity
+
+            # --- Part 3: Advanced 3-Point Lighting Randomization ---
+            target_pos_light = light_target + self.np_random.uniform(-0.05, 0.05, size=3)
+            # print(f"DEBUG: Lighting target is at {np.round(target_pos_light, 2)}") 
+            target_pos_light[2] = max(target_pos_light[2], 0.4)
+
+            # PATCH: More robust color logic for natural lighting.
+            # Generate a base color temperature (from warm white to cool white).
+            base_color_temp = self.np_random.uniform(0.9, 1.0)
+            key_color = np.array([1.0, base_color_temp, base_color_temp - 0.15])
+            key_color = self._safe_normalize(key_color) * self.np_random.uniform(0.9, 1.1)
+            key_color = np.clip(key_color, 0.0, 1.0)
+
+            # The fill light is intentionally made cooler (more blue) for nice contrast.
+            fill_tint = np.array([0.85, 0.9, 1.0])
+            fill_color = key_color * fill_tint
+            fill_color = self._safe_normalize(fill_color) * self.np_random.uniform(0.9, 1.1)
+            fill_color = np.clip(fill_color, 0.0, 1.0)
+            
+            key_intensity = self.np_random.uniform(0.7, 0.9)
+            fill_intensity = self.np_random.uniform(0.3, 0.45)
+            back_intensity = self.np_random.uniform(0.25, 0.4)
+
+            # 1. KEY LIGHT (Main Light)
+            key_azimuth = self.np_random.uniform(np.deg2rad(-60), np.deg2rad(60))
+            key_elevation = self.np_random.uniform(np.deg2rad(45), np.deg2rad(70))
+            key_radius = self.np_random.uniform(1.5, 2.2)
+            key_pos = target_pos_light + np.array([
+                key_radius * np.cos(key_elevation) * np.cos(key_azimuth),
+                key_radius * np.cos(key_elevation) * np.sin(key_azimuth),
+                key_radius * np.sin(key_elevation)
             ])
-            self.model.light_pos[self.light_id] = main_light_pos
-            
-            target_pos_light = np.append(self.TABLE_CENTER, 0.4) + self.np_random.uniform(-0.1, 0.1, size=3)
-            direction = target_pos_light - self.model.light_pos[self.light_id]
-            self.model.light_dir[self.light_id] = self._safe_normalize(direction, default=np.array([0,0,-1]))
+            self.model.light_pos[self.light_id] = key_pos
+            self.model.light_dir[self.light_id] = self._safe_normalize(target_pos_light - key_pos)
+            self.model.light_diffuse[self.light_id] = key_intensity * key_color
 
-            kelvin_shift = self.np_random.uniform(-500, 500)
-            tint = np.array([1.0 + (kelvin_shift / 2500.0), 1.0, 1.0 - (kelvin_shift / 2500.0)])
-            tint = np.clip(tint, 0.85, 1.15)
-            
-            self.model.light_diffuse[self.light_id] = self.np_random.uniform(0.7, 0.95, 3) * tint
+            # 2. FILL LIGHT
+            fill_azimuth_offset = self.np_random.uniform(np.deg2rad(90), np.deg2rad(150)) * self.np_random.choice([-1, 1])
+            fill_azimuth = key_azimuth + fill_azimuth_offset
+            fill_elevation = self.np_random.uniform(np.deg2rad(30), np.deg2rad(50))
+            fill_radius = self.np_random.uniform(1.2, 1.8)
+            fill_pos = target_pos_light + np.array([
+                fill_radius * np.cos(fill_elevation) * np.cos(fill_azimuth),
+                fill_radius * np.cos(fill_elevation) * np.sin(fill_azimuth),
+                fill_radius * np.sin(fill_elevation)
+            ])
+            self.model.light_pos[self.fill_light_id] = fill_pos
+            self.model.light_dir[self.fill_light_id] = self._safe_normalize(target_pos_light - fill_pos)
+            self.model.light_diffuse[self.fill_light_id] = fill_intensity * fill_color
 
-            # ✅ START NEW CODE for Fill Light
-            # Place fill light roughly opposite the main light
-            self.model.light_pos[self.fill_light_id] = main_light_pos * np.array([-0.8, -0.8, 1.0])
-            # Point it towards the center
-            fill_dir = target_pos_light - self.model.light_pos[self.fill_light_id]
-            self.model.light_dir[self.fill_light_id] = self._safe_normalize(fill_dir, default=np.array([0,0,-1]))
-            # Make it weaker and with a slightly different color tint
-            self.model.light_diffuse[self.fill_light_id] = self.np_random.uniform(0.3, 0.5, 3) * tint * 0.9
-            # ✅ END NEW CODE
+            # 3. BACK LIGHT (Rim Light)
+            back_azimuth = key_azimuth + np.pi + self.np_random.uniform(np.deg2rad(-45), np.deg2rad(45))
+            back_elevation = self.np_random.uniform(np.deg2rad(40), np.deg2rad(60))
+            back_radius = self.np_random.uniform(1.5, 2.0)
+            back_pos = target_pos_light + np.array([
+                back_radius * np.cos(back_elevation) * np.cos(back_azimuth),
+                back_radius * np.cos(back_elevation) * np.sin(back_azimuth),
+                back_radius * np.sin(back_elevation)
+            ])
+            self.model.light_pos[self.back_light_id] = back_pos
+            self.model.light_dir[self.back_light_id] = self._safe_normalize(target_pos_light - back_pos)
+            self.model.light_diffuse[self.back_light_id] = back_intensity * key_color
+            # print(f"DEBUG: Main Light DIR: {np.round(self.model.light_dir[self.light_id], 2)}")
+            # print(f"DEBUG: Fill Light DIR: {np.round(self.model.light_dir[self.fill_light_id], 2)}")
     def render(self, camera_name: str = "fixed_camera"):
         """
         Robust renderer with filmic post-processing.
