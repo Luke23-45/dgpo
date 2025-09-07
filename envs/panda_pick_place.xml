@@ -7,7 +7,7 @@
 
   <visual>
     <quality shadowsize="4096"/>
-    <headlight diffuse="0.1 0.1 0.1" ambient="0.4 0.4 0.4" specular="0 0 0"/>
+    <headlight diffuse="0 0 0" ambient="0.4 0.4 0.4" specular="0 0 0" />
     <global azimuth="120" elevation="-20"/>
     <rgba haze="0.15 0.25 0.35 1"/>
   </visual>
@@ -54,9 +54,7 @@
               texture="tex_metal_brushed"
               texrepeat="1 1"
               texuniform="true"
-              specular="0.1"
-              shininess="0.3"
-              reflectance="0.05"/>
+              specular="0.8"      shininess="0.6"     reflectance="0.05"/>
 
     <material name="mat_table_marble_white"
               texture="tex_marble_white"
@@ -76,7 +74,7 @@
 
 
     <material name="mat_table_noise_high"
-              texture="tex_noise_low_contrast"
+              texture="tex_noise_high_contrast"
               texrepeat="1 1"
               texuniform="true"
               specular="0.0"
@@ -96,12 +94,12 @@
     <geom solref="0.005 1" solimp="0.95 0.99 0.001" friction="1.0 0.1 0.01"/>
   </default>
   <worldbody>
-    <light name="main_light" pos="0.8 0.5 2.5" dir="-0.3 -0.2 -1" directional="true"
+
+
+<light name="main_light" pos="0.8 0.5 2.5" dir="-0.3 -0.2 -1" directional="true"
         diffuse="0.8 0.8 0.8" specular="0.15 0.15 0.15" castshadow="true"/>
     <light name="fill_light" pos="-0.2 -0.5 2.0" dir="0.1 0.2 -1" directional="true"
-        diffuse="0.4 0.4 0.4" specular="0.05 0.05 0.05" castshadow="false"/>
-
-
+        diffuse="0.4 0.4 0.4" specular="0.05 0.05 0.05" castshadow="false"/> 
     <geom name="floor" type="box" pos="0.5 0 -0.05" size="5 5 0.05" material="mat_floor_checker_blue" contype="0" conaffinity="0"/>
 
     <!-- Table -->
