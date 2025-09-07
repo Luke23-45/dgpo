@@ -7,9 +7,9 @@ from gymnasium import spaces
 from gymnasium.utils import seeding
 from typing import Tuple, Dict,List, Callable
 from scipy.spatial.transform import Rotation as R
-from utils.mujoco_utils import set_joint_qpos_by_name
 import cv2
 from dataclasses import dataclass, field 
+from typing import Optional
 
 @dataclass
 class RenderPostConfig:
@@ -23,6 +23,13 @@ class RenderPostConfig:
     target_white: float = 0.75        # in linear space
     min_exposure: float = 0.7
     max_exposure: float = 1.3
+    flip_vertical: Optional[bool] = None
+    # When True and flip_vertical is None, the environment will attempt to determine
+    # if flip is required by testing the camera up-vector sign (robust in most cases).
+    flip_vertical_auto_detect: bool = True
+
+    # Occasionally you want to flip horizontally (keep here for completeness)
+    flip_horizontal: bool = False
 
     # Color space management
     assume_input_is_srgb: bool = True    # MuJoCo returns 8-bit sRGB-like frames
@@ -98,7 +105,6 @@ class DomainRandomizationConfig:
         # [Source: Shot_03/sample_00] An interesting over-the-shoulder left view. Elevation: 35.0°
         CameraShot(pos=(0.75, 0.54, 0.91), target=(0.40, -0.02, 0.44)),
         # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
-        CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
         # [Source: Shot_07/sample_00] A very wide three-quarter view, good for seeing the whole table. Elevation: 23.5° (clamped to 25)
         CameraShot(pos=(1.20, 0.55, 0.95), target=(0.52, 0.01, 0.45)),
     ])
@@ -299,6 +305,51 @@ class PandaEnv(gym.Env):
         """Classic Reinhard global operator: x/(1+x) in linear space."""
         return img_lin / (1.0 + img_lin)
 
+    def _mujoco_quat_to_scipy_xyzw(self, quat_wxyz: np.ndarray) -> np.ndarray:
+        """
+        MuJoCo stores quaternions in [w, x, y, z] order in model arrays.
+        SciPy Rotation.from_quat expects [x, y, z, w].
+        This helper returns the SciPy-compatible ordering.
+        """
+        q = np.asarray(quat_wxyz, dtype=float).reshape(4)
+        return np.array([q[1], q[2], q[3], q[0]], dtype=float)
+
+    def _scipy_xyzw_to_mujoco_wxyz(self, quat_xyzw: np.ndarray) -> np.ndarray:
+        """
+        Convert scipy-style [x,y,z,w] quaternion into MuJoCo [w,x,y,z] format.
+        """
+        q = np.asarray(quat_xyzw, dtype=float).reshape(4)
+        return np.array([q[3], q[0], q[1], q[2]], dtype=float)
+    
+    def _decide_flip_for_camera(self, camera_name: str) -> bool:
+        # 1) explicit override via config
+        if self.post.flip_vertical is not None:
+            return bool(self.post.flip_vertical)
+
+        # 2) cached calibration per camera (set by calibration or earlier render)
+        if hasattr(self, "_camera_flip_cache") and camera_name in self._camera_flip_cache:
+            return bool(self._camera_flip_cache[camera_name])
+
+        # 3) auto detect using quaternion up-vector (with small margin)
+        flip = False
+        if self.post.flip_vertical_auto_detect:
+            try:
+                cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
+                if cam_id != -1:
+                    quat_wxyz = np.asarray(self.model.cam_quat[cam_id], dtype=float)
+                    quat_xyzw = self._mujoco_quat_to_scipy_xyzw(quat_wxyz)
+                    R_wc = R.from_quat(quat_xyzw).as_matrix()
+                    cam_up_world = R_wc @ np.array([0.0, 1.0, 0.0], dtype=float)
+                    flip = float(cam_up_world[2]) < -1e-3
+            except Exception:
+                flip = False
+
+        # cache the decision for the camera for this runtime (can be invalidated if camera moves)
+        if not hasattr(self, "_camera_flip_cache"):
+            self._camera_flip_cache = {}
+        self._camera_flip_cache[camera_name] = bool(flip)
+        return bool(flip)
+
     def _postprocess_image(self, img_u8: np.ndarray) -> np.ndarray:
         """End-to-end post pipeline: sRGB->linear, auto-exposure, tonemap, linear->sRGB."""
         img = img_u8.astype(np.float32) / 255.0
@@ -323,7 +374,8 @@ class PandaEnv(gym.Env):
             noise = (self.np_random.random(img_out.shape).astype(np.float32) - 0.5) / 255.0
             img_out = np.clip(img_out + noise, 0.0, 1.0)
 
-        return np.clip(np.round(img_out * 255.0), 0, 255).astype(np.uint8)        
+        return np.clip(np.round(img_out * 255.0), 0, 255).astype(np.uint8)  
+          
     @staticmethod
     def _calculate_look_at_quat(camera_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
         """Calculates a quaternion for a camera to look at a target. Returns xyzw."""
@@ -436,9 +488,10 @@ class PandaEnv(gym.Env):
         # --- Part 3: Apply Final Camera Pose to the MuJoCo Model ---
         self.model.cam_pos[self.camera_id] = final_cam_pos
         # MuJoCo uses w,x,y,z format for quaternions
-        self.model.cam_quat[self.camera_id] = [new_quat_xyzw[3], new_quat_xyzw[0], new_quat_xyzw[1], new_quat_xyzw[2]]
+        self.model.cam_quat[self.camera_id] = self._scipy_xyzw_to_mujoco_wxyz(new_quat_xyzw).tolist()
         self.model.cam_fovy[self.camera_id] = final_fovy
-
+        if hasattr(self, "_camera_flip_cache"):
+            self._camera_flip_cache.clear()
 
     def _is_pos_in_camera_view(
         self, pos_world: np.ndarray, camera_name: str, margin: int = 0
@@ -451,7 +504,9 @@ class PandaEnv(gym.Env):
         debug_info = {}
 
         # Image size from your observation_space
-        height, width, _ = self.observation_space.spaces["image_primary"].shape
+        # Choose correct observation size for this camera (wrist vs primary)
+        target_key = "image_wrist" if "wrist" in camera_name else "image_primary"
+        height, width, _ = self.observation_space.spaces[target_key].shape
         debug_info["image_shape"] = (height, width)
 
         cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
@@ -464,7 +519,8 @@ class PandaEnv(gym.Env):
         debug_info["cam_pos_model"] = cam_pos
         debug_info["cam_quat_model"] = quat_wxyz
         
-        R_wc = R.from_quat([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]).as_matrix()
+        quat_xyzw = self._mujoco_quat_to_scipy_xyzw(quat_wxyz)
+        R_wc = R.from_quat(quat_xyzw).as_matrix()
         R_cw = R_wc.T
 
         # Transform the world point into the camera frame
@@ -490,13 +546,32 @@ class PandaEnv(gym.Env):
         v = -fy * (Pc[1] / z_c_safe) + 0.5 * height
         debug_info["projected_pixel"] = (u, v)
 
+
+        flip_vertical = self._decide_flip_for_camera(camera_name)
+
+
+        debug_info["render_flip_applied"] = bool(flip_vertical)
+
+        if flip_vertical:
+            v_img = (height - 1) - v
+        else:
+            v_img = v
+
+        debug_info["projected_pixel_after_flip"] = (u, v_img)
         # Final bounds check
-        is_visible = (margin <= u < (width - margin)) and (margin <= v < (height - margin))
+        adaptive_margin = int(0.05 * min(width, height))  # 5% of image size
+        is_visible = (
+            adaptive_margin <= u < (width - adaptive_margin)
+            and adaptive_margin <= v_img < (height - adaptive_margin)
+)
+
         if not is_visible:
             debug_info["failure_reason"] = "Projected pixel is outside the image margin."
-            debug_info["bounds"] = {"u": u, "v": v, "margin": margin, "width": width, "height": height}
+            debug_info["bounds"] = {"u": u, "v": v, "adaptive_margin": adaptive_margin, "width": width, "height": height}
         
         return is_visible, debug_info
+  
+  
     def _define_spaces(self):
         """
         Defines observation and action spaces. This version provides all keys
@@ -611,41 +686,62 @@ class PandaEnv(gym.Env):
             # print(f"DEBUG: Fill Light DIR: {np.round(self.model.light_dir[self.fill_light_id], 2)}")
     def render(self, camera_name: str = "fixed_camera"):
         """
-        Robust renderer with filmic post-processing.
-        Always returns tonemapped sRGB uint8 frames at the requested shape.
+        Robust and FAST renderer with filmic post-processing.
+        
+        This optimized version maintains a single, large renderer (256x256) and
+        downsamples for smaller camera views. This avoids the extremely slow process
+        of destroying and re-creating the renderer every step.
         """
         is_wrist = "wrist" in camera_name
         target_key = "image_wrist" if is_wrist else "image_primary"
         target_h, target_w, _ = self.observation_space[target_key].shape
 
-        if self.render_mode != "rgb_array" or self.renderer is None:
-            warnings.warn(f"Renderer not available, returning a black frame for camera '{camera_name}'.")
+        if self.render_mode != "rgb_array":
+            warnings.warn(f"Render mode is not 'rgb_array', returning a black frame for camera '{camera_name}'.")
             return np.zeros((target_h, target_w, 3), dtype=np.uint8)
 
-        # Render once at the native 256x256 resolution
         try:
-            # Ensure renderer is at the primary camera's resolution
-            if self.renderer.width != self.observation_space["image_primary"].shape[1]:
-                 self.renderer.width = self.observation_space["image_primary"].shape[1]
-                 self.renderer.height = self.observation_space["image_primary"].shape[0]
+            # --- START OF FAST RENDERING LOGIC ---
+            # 1. Ensure the renderer exists and is at the MAXIMUM resolution (256x256).
+            # This logic only runs if the renderer is missing or has been closed.
+            max_h, max_w, _ = self.observation_space["image_primary"].shape
+            if (self.renderer is None) or (self.renderer.width != max_w or self.renderer.height != max_h):
+                if self.renderer is not None:
+                    self.renderer.close()
+                self.renderer = mujoco.Renderer(self.model, height=max_h, width=max_w)
 
+            # 2. Render the scene at the native 256x256 resolution.
             self.renderer.update_scene(self.data, camera=camera_name)
-            img_raw = self.renderer.render()  # uint8, sRGB-ish
+            img_raw_large = self.renderer.render()
+            
+            # 3. Apply necessary patches (flipping and cache clearing).
+            if self._decide_flip_for_camera(camera_name):
+                img_raw_large = np.flipud(img_raw_large)
+            
+            if is_wrist and hasattr(self, "_camera_flip_cache"):
+                if camera_name in self._camera_flip_cache:
+                    del self._camera_flip_cache[camera_name]
+            # --- END OF FAST RENDERING LOGIC ---
+
         except Exception as e:
             warnings.warn(f"Failed to render from camera '{camera_name}': {e}")
             return np.zeros((target_h, target_w, 3), dtype=np.uint8)
 
-        # Photometric post-processing (tone map etc.) at the native render resolution
-        img_processed = self._postprocess_image(img_raw)
-
-        # Downsample to target shape if needed (e.g., for the wrist camera)
-        if img_processed.shape[0] != target_h or img_processed.shape[1] != target_w:
-            img_out = cv2.resize(img_processed, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        # 4. Apply post-processing ON THE LARGE IMAGE.
+        # This is optional and can be disabled for even more speed.
+        if self.post:
+            img_processed_large = self._postprocess_image(img_raw_large)
         else:
-            img_out = img_processed
+            img_processed_large = img_raw_large
+
+        # 5. Downsample to the target shape ONLY IF NECESSARY (e.g., for wrist camera).
+        if img_processed_large.shape[0] != target_h or img_processed_large.shape[1] != target_w:
+            # Use INTER_AREA for high-quality downsampling.
+            img_out = cv2.resize(img_processed_large, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        else:
+            img_out = img_processed_large
 
         return img_out
-
     def get_ee_pose(self) -> np.ndarray:
         """
         Calculates and returns the current 7D pose of the end-effector.
@@ -722,7 +818,6 @@ class PandaEnv(gym.Env):
         obs["internal_full_proprio"] = obs["proprio"].copy()
 
         return obs
-
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:
         super().reset(seed=seed)
         if seed is not None: self.np_random, _ = seeding.np_random(seed)
@@ -742,8 +837,8 @@ class PandaEnv(gym.Env):
         obj_zone_key, goal_zone_key = self.np_random.choice(list(self.PLACEMENT_ZONES.keys()), 2, replace=True)
         obj_zone, goal_zone = self.PLACEMENT_ZONES[obj_zone_key], self.PLACEMENT_ZONES[goal_zone_key]
         
-        object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT, check_visibility=False)
-        goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT, check_visibility=False)
+        object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT, camera_name="fixed_camera", check_visibility=False)
+        goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT, camera_name="fixed_camera", check_visibility=False)
 
         # === STAGE 2: ADAPTIVE CAMERA PLACEMENT & DOMAIN RANDOMIZATION ===
         # 2a. Get key positions to inform the camera logic.
@@ -757,15 +852,28 @@ class PandaEnv(gym.Env):
         if np.linalg.norm(goal_pos[:2] - object_pos[:2]) < 0.05:
             goal_pos[0] += 0.05 # Ensure a small separation if they spawn too close.
         
-        self.data.joint("object_joint").qpos[:3] = object_pos
-        self.model.body("goal").pos = goal_pos
+        # --- Start of Patched Code ---
+        # PATCH 1: Use the robust, ID-based method to set the object's position.
+        joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
+        if joint_id != -1 and hasattr(self.model, "jnt_qposadr"):
+            qpos_adr = int(self.model.jnt_qposadr[joint_id])
+            self.data.qpos[qpos_adr:qpos_adr + 3] = object_pos
+        else:
+            # Fallback if the object doesn't have a joint
+            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
+            if body_id != -1:
+                self.data.xpos[body_id] = object_pos
+
+        # PATCH 2: Write to `self.data`, not `self.model`, to set the goal's position.
+        goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "goal")
+        if goal_body_id != -1:
+            self.data.xpos[goal_body_id] = goal_pos
+        # --- End of Patched Code ---
         
         # 3b. Final forward pass to ensure all changes (camera, objects) are reflected.
         mujoco.mj_forward(self.model, self.data)
         
         return self.get_expert_obs(), {}
-
-    # ======================== REPLACE THIS ENTIRE METHOD ========================
 
     def _place_object_in_zone(
         self,
@@ -773,8 +881,8 @@ class PandaEnv(gym.Env):
         zone_key: str,
         zone: Tuple[np.ndarray, np.ndarray],
         z_plane: float,
+        camera_name: str,
         check_visibility: bool = True,
-        camera_name: str = "fixed_camera",
         max_attempts: int = 100,
         margin: int = 20,
     ) -> np.ndarray:
@@ -786,7 +894,6 @@ class PandaEnv(gym.Env):
         # FIX: Moved this line to the top of the function.
         # It now runs before any logic that depends on it.
         min_offset, max_offset = zone
-
         if not check_visibility:
             # Perform a blind placement without any visibility checks.
             offset = self.np_random.uniform(low=min_offset, high=max_offset)
@@ -830,14 +937,20 @@ class PandaEnv(gym.Env):
     def _camera_extrinsics(self, camera_id: int):
         """Return cam_pos (3,), R_wc (3x3 rotation camera->world), fx, fy, cx, cy, height, width."""
         # image size
-        height, width, _ = self.observation_space["image_primary"].shape
+
+        cam_name_bytes = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_id)
+        camera_name = cam_name_bytes.decode() if isinstance(cam_name_bytes, (bytes, bytearray)) else str(cam_name_bytes)
+        target_key = "image_wrist" if "wrist" in camera_name else "image_primary"
+        height, width, _ = self.observation_space.spaces[target_key].shape
+
 
         cam_pos = np.array(self.model.cam_pos[camera_id], dtype=float)
 
         # MuJoCo stores cam_quat as WXYZ ; scipy expects (x,y,z,w)
-        quat_wxyz = np.array(self.model.cam_quat[camera_id], dtype=float)
-        quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=float)
+        quat_wxyz = np.asarray(self.model.cam_quat[camera_id], dtype=float)
+        quat_xyzw = self._mujoco_quat_to_scipy_xyzw(quat_wxyz)
         R_wc = R.from_quat(quat_xyzw).as_matrix()  # rotation: camera -> world
+
 
         # intrinsics from model.cam_fovy (vertical FOV in degrees)
         if self.model.cam_fovy.size > camera_id:
