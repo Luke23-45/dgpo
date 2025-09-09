@@ -7,7 +7,7 @@
 
   <visual>
     <quality shadowsize="8192" />
-    <headlight diffuse="0 0 0" ambient="0.4 0.4 0.4" specular="0 0 0" active="1" />
+    <headlight diffuse="0 0 0" ambient="0.5 0.5 0.5" specular="0 0 0" active="1" />
     <global azimuth="120" elevation="-20" />
     <!-- <rgba haze="0.15 0.25 0.35 1"/> -->
   </visual>
@@ -156,17 +156,33 @@
 
 
   </worldbody>
+  <!-- <actuator>
+    <general name="grasp_actuator" equality="grasp_weld" gainprm="1 0 0" biasprm="0 -100 -10" ctrlrange="0 1000"/>
+  </actuator> -->
 
-  <!-- Weld Panda base to our scene base -->
-  <equality>
+
+
+<equality>
+
     <weld body1="robot_base" body2="link0"/>
-  </equality>
+
+
+
+</equality>
 
   <!-- Extra contact exclusions quat="0.707 0.707 0 0" -->
-  <contact>
+<contact>
+    <!-- Exclude contacts between the fingers and the table to prevent sticking -->
     <exclude body1="left_finger" body2="table"/>
     <exclude body1="right_finger" body2="table"/>
-  </contact>
+    
+    <!-- THIS IS THE FIX: Prevent the main hand from sticking to the table -->
+    <exclude body1="hand" body2="table"/>
+
+    <exclude body1="left_finger" body2="object"/>
+    <exclude body1="right_finger" body2="object"/>
+    <exclude body1="hand" body2="object"/>
+</contact>
 </mujoco>
 
 

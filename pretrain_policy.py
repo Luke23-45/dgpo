@@ -51,7 +51,37 @@ from pathlib import Path
 from training.bc_trainer import BCTrainer
 from utils.model_utils import sanity_forward_shape
 
+# DELETE the old `create_loss_aware_collate_fn` function and ADD THIS CLASS in its place.
+# It should be at the top level of the script, not inside any function.
 
+class LossAwareCollate:
+    """
+    A picklable collate function implemented as a class.
+    It wraps the base float32 collate and formats the action tensor 
+    correctly for the specified loss function.
+    """
+    def __init__(self, loss_type: str):
+        self.loss_type = loss_type
+        # The base collate function is now a member
+        self.base_collate = _float32_collate
+
+    def __call__(self, batch):
+        # First, do the standard collation (numpy -> torch, float32, etc.)
+        obs_batch, act_batch = self.base_collate(batch)
+
+        # Now, perform the final transformation based on the loss type stored during init
+        if self.loss_type == "ce":
+            # For CrossEntropy, target must be Long and 1D (B,)
+            if act_batch.ndim == 2 and act_batch.shape[1] == 1:
+                act_batch = act_batch.squeeze(1)
+            if act_batch.is_floating_point():
+                act_batch = act_batch.long()
+        else:
+            # For regression losses, ensure it's a float tensor
+            if not act_batch.is_floating_point():
+                act_batch = act_batch.float()
+        
+        return obs_batch, act_batch
 
 def _maybe_import_sb3():
     try:
@@ -196,6 +226,7 @@ def _build_dataloaders(
     )
 
     val_loader = None
+    collate_fn = LossAwareCollate(loss_type=loss_type)
     if val_split_ratio > 0.0:
         # Since ExpertDataset is an IterableDataset, we cannot use traditional splitting.
         # Instead, we create two separate datasets with different seeds and sample counts.
@@ -225,7 +256,7 @@ def _build_dataloaders(
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=False, # Don't drop last for validation
-            collate_fn=create_loss_aware_collate_fn(loss_type),
+            collate_fn=collate_fn,
         )
     
     train_loader = DataLoader(
@@ -235,7 +266,7 @@ def _build_dataloaders(
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=True,
-        collate_fn=create_loss_aware_collate_fn(loss_type),
+        collate_fn=collate_fn,
     )
     
     return train_loader, val_loader
@@ -608,7 +639,10 @@ def parse_args() -> argparse.Namespace:
                          help="Name for a NEW run. A directory will be created in --output_dir.")
     run_group.add_argument("--resume_dir", type=str,
                          help="Path to an existing run directory to RESUME training.")
-
+    p.add_argument("--resume-from", type=str, default=None, choices=["latest", "best", "error"],
+                   help="Explicitly choose which checkpoint to resume from within --resume_dir: "
+                        "'latest' (end-of-epoch), 'best' (best validation), or 'error' (emergency save). "
+                        "If not set, uses automatic fallback.")
     # Artifacts
     p.add_argument("--artifact", type=str, default="both", choices=("pth", "zip", "both"),
                    help="Which artifacts to produce.")
@@ -636,30 +670,69 @@ def main() -> None:
     if args.resume_dir:
         # --- RESUME MODE ---
         logger.info(f"Resuming training from directory: {args.resume_dir}")
+
         run_dir = Path(args.resume_dir)
+        run_name = run_dir.name
+        checkpoints_dir = run_dir / "checkpoints"
+        logs_dir = run_dir / "logs"
         config_path = run_dir / "config.json"
-        resume_checkpoint_path = run_dir / "checkpoints" / "resume_checkpoint.pth"
+
+        error_ckpt = checkpoints_dir / "resume_on_error.pth"
+        latest_ckpt = checkpoints_dir / "resume_checkpoint.pth"
+        best_ckpt = checkpoints_dir / "best_model.pth"
+        
+        resume_checkpoint_path = None
+
+        if args.resume_from:
+            # --- 1. EXPLICIT USER CHOICE ---
+            logger.info(f"Attempting to resume from explicitly requested checkpoint: '{args.resume_from}'")
+            if args.resume_from == "latest" and latest_ckpt.is_file():
+                resume_checkpoint_path = latest_ckpt
+            elif args.resume_from == "best" and best_ckpt.is_file():
+                resume_checkpoint_path = best_ckpt
+            elif args.resume_from == "error" and error_ckpt.is_file():
+                resume_checkpoint_path = error_ckpt
+            
+            if resume_checkpoint_path is None:
+                 logger.critical(f"Resume failed: Explicitly requested checkpoint '{args.resume_from}' not found in {checkpoints_dir}")
+                 sys.exit(1)
+
+        else:
+            # --- 2. AUTOMATIC FALLBACK (NO KEYWORD PROVIDED) ---
+            # Priority: Emergency Save > Latest Epoch > Best Model
+            logger.info("No specific checkpoint requested. Using automatic fallback priority.")
+            if error_ckpt.is_file():
+                resume_checkpoint_path = error_ckpt
+                logger.info(f"Found emergency checkpoint '{error_ckpt.name}', will resume.")
+            elif latest_ckpt.is_file():
+                resume_checkpoint_path = latest_ckpt
+                logger.info(f"Found standard resume checkpoint '{latest_ckpt.name}', will resume.")
+            elif best_ckpt.is_file():
+                resume_checkpoint_path = best_ckpt
+                logger.info(f"No standard resume checkpoint found. Falling back to best model '{best_ckpt.name}'.")
 
         if not config_path.is_file():
             logger.critical(f"Resume failed: config.json not found in {run_dir}")
             sys.exit(1)
-        if not resume_checkpoint_path.is_file():
-            logger.critical(f"Resume failed: resume_checkpoint.pth not found in {run_dir / 'checkpoints'}")
+        if resume_checkpoint_path is None:
+            logger.critical(f"Resume failed: No valid checkpoint (.pth) found in {checkpoints_dir}")
             sys.exit(1)
 
         # Load the ORIGINAL config, but override a few key values from the new command
         with config_path.open("r") as f:
             original_config = json.load(f)
-        
-        # Create a new args object from the loaded config
-        # This ensures we use the same model, dataset params, etc.
+
+        # Re-parse the current command line arguments just to get new values
+        current_cli_args = parse_args()
+
+        # Create the final args object by loading the old config...
         args = argparse.Namespace(**original_config)
-        
-        # Override with new values from the resume command
-        args.epochs = parse_args().epochs # Get the new epoch count
-        # You could add other overridable args here, like --lr
-        
-        # Set the path for the trainer to find the resume checkpoint
+
+        # ... and then surgically overriding specific values from the new command
+        args.epochs = current_cli_args.epochs
+        # You could add other overridable args here, e.g., args.lr = current_cli_args.lr
+
+        # This tells the rest of the script which checkpoint file to load
         args.resume_from_path_internal = str(resume_checkpoint_path)
     else:
         run_name = args.run_name or time.strftime("%Y%m%d-%H%M%S")
@@ -741,7 +814,7 @@ def main() -> None:
         device=device,
         action_dim=action_dim,
         model_ctor_overrides=args.model_ctor_overrides,
-        resume_from_path=args.resume_from,
+        resume_from_path=args.resume_from_path_internal,
     )
 
     optimizer = torch.optim.AdamW(
@@ -804,8 +877,6 @@ def main() -> None:
         epochs=args.epochs,
         run_dir=run_dir,
         val_loader=val_loader,
-        resume_from_path=args.resume_from_path_internal
-        
     )
 
     best_model_path = run_dir / "checkpoints" / "best_model.pth"

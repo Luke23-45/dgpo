@@ -209,12 +209,33 @@ class PandaEnv(gym.Env):
 
         # Cache IDs of elements to be randomized for performance
         self._cache_dr_element_ids()
-
+        # diagnostic: print actuator and joint names + ctrl ranges to ensure mapping
+        # Corrected Diagnostic Block
+        # try:
+        #     print("\n--- PANDA ENV DIAGNOSTICS (Corrected) ---")
+        #     # Correctly get actuator names using model.nu
+        #     actuator_names = [mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i) for i in range(self.model.nu)]
+        #     print(f"Actuator Names (count = {self.model.nu}): {actuator_names}")
+        #     # Correctly get joint names using model.njnt
+        #     joint_names = [mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(self.model.njnt)]
+        #     print(f"Joint Names (count = {self.model.njnt}): {joint_names}")
+        #     print("-----------------------------------------\n")
+        # except Exception as e:
+        #     print(f"Could not list actuator/joint names: {e}")
 
         self.ee_site_name = "attachment_site"
         self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.ee_site_name)
         if self.ee_site_id == -1:
             raise ValueError(f"Site '{self.ee_site_name}' not found in the MuJoCo model.")
+        self._is_kinematically_grasped = False
+        self._grasp_offset_pos = None  # Stores the cube's position relative to the gripper
+        self._grasp_offset_rot = None  # Stores the cube's orientation relative to the gripper
+
+        # Cache the ID and qpos address for the object's free joint
+        self.object_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
+        if self.object_joint_id == -1:
+            raise ValueError("Kinematic grasp requires the 'object' to have a named 'object_joint' in the XML.")
+        self.object_qpos_addr = self.model.jnt_qposadr[self.object_joint_id]
 
 
 
@@ -595,7 +616,9 @@ class PandaEnv(gym.Env):
         })
         
         # Action space: 7 arm joint deltas + 1 gripper command
-        act_dim = int(getattr(self.model, "nu", 8))
+        act_dim = 8 # We are defining a consistent 8D action space for the agent.
+
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
         
     def _randomize_photometrics(self, light_target: np.ndarray):
@@ -747,8 +770,6 @@ class PandaEnv(gym.Env):
         Calculates and returns the current 7D pose of the end-effector.
         This version is optimized by using a cached site ID.
         """
-        mujoco.mj_forward(self.model, self.data)
-        
         # Use the cached ID for efficient access
         pos = self.data.site_xpos[self.ee_site_id].copy()
         
@@ -816,6 +837,7 @@ class PandaEnv(gym.Env):
         # Add the redundant proprio key required by the IKSolver.
         # This isolates the redundancy to the expert pipeline, which is a good design.
         obs["internal_full_proprio"] = obs["proprio"].copy()
+        obs["is_grasped"] = np.array([self._is_kinematically_grasped], dtype=bool)
 
         return obs
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:
@@ -824,13 +846,18 @@ class PandaEnv(gym.Env):
         
         self.timestep = 0
         mujoco.mj_resetData(self.model, self.data)
-
+        
+        # Reset the kinematic grasp state for the new episode
+        self._is_kinematically_grasped = False
+        self._grasp_offset_pos = None
+        self._grasp_offset_rot = None
         # === STAGE 1: UNBIASED TASK GENERATION ===
         # 1a. Reset robot to a jittered home position.
         home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
         qpos_jitter = self.np_random.uniform(-0.03, 0.03, size=home_qpos.shape)
         self.data.qpos[:7] = home_qpos + qpos_jitter
-        mujoco.mj_forward(self.model, self.data) # CRITICAL: Update kinematics for a valid gripper pose.
+        self.data.qpos[:7] = home_qpos + qpos_jitter
+        mujoco.mj_forward(self.model, self.data)
 
         # 1b. Perform BLIND placement of goal and object to get candidate positions.
         #     This ensures a truly random and unbiased task distribution.
@@ -872,7 +899,7 @@ class PandaEnv(gym.Env):
         
         # 3b. Final forward pass to ensure all changes (camera, objects) are reflected.
         mujoco.mj_forward(self.model, self.data)
-        
+
         return self.get_expert_obs(), {}
 
     def _place_object_in_zone(
@@ -966,38 +993,100 @@ class PandaEnv(gym.Env):
         return cam_pos, R_wc, fx, fy, cx, cy, height, width
 
 
+# FILE: envs/panda_env.py
+
+# ... (all other methods remain the same) ...
+
     def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
         """Applies an action and steps the simulation forward."""
         self.timestep += 1
         
         # --- Robust Action Application ---
         action = np.asarray(action, dtype=float).ravel()
-        if action.size != self.model.nu:
-            raise ValueError(f"Action dimension mismatch: got {action.size}, expected {self.model.nu}")
+        expected_dim = self.action_space.shape[0]
+        if action.size != expected_dim:
+            raise ValueError(f"Action dimension mismatch: got {action.size}, expected {expected_dim}")
         
-        try:
-            ctrl_range = self.model.actuator_ctrlrange
-            lo, hi = ctrl_range[:, 0], ctrl_range[:, 1]
-            scaled_action = lo + 0.5 * (action + 1.0) * (hi - lo)
-        except Exception:
-            scaled_action = action # Pass through if scaling fails
+        if action.size == 8:
+            arm_action = action[:7]
+            gripper_action = action[7] # This is a normalized value [-1, 1]
+        else: # Failsafe if only arm action is provided
+            arm_action = action
+            gripper_action = -1.0 # Default to open
+
+        # Scale the arm action using its defined ctrlrange
+        arm_ctrl_range = self.model.actuator_ctrlrange[:7]
+        arm_lo, arm_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
+        scaled_arm_action = arm_lo + 0.5 * (arm_action + 1.0) * (arm_hi - arm_lo)
+        # Correctly map normalized gripper action to actuator control range [0, 255]
+        scaled_gripper_action = 255.0 if gripper_action > 0 else 0.0
+
+        # Write the scaled actions to the control buffer
+        self.data.ctrl[:7] = scaled_arm_action
+        self.data.ctrl[7] = scaled_gripper_action
+        
+        # The kinematic grasp ("puppeteering") must be enforced BEFORE EVERY SUBSTEP.
+        N_SUBSTEPS = 5
+        for _ in range(N_SUBSTEPS):
+            # --- Grasp State Logic (Applied every substep) ---
+            gripper_pose = self.get_ee_pose()
+            R_world_gripper = R.from_quat(gripper_pose[3:])
             
-        self.data.ctrl[:scaled_action.size] = scaled_action
+            object_pos_world = self.data.body("object").xpos.copy()
+            object_quat_world_wxyz = self.data.body("object").xquat.copy()
+            object_quat_world_xyzw = self._mujoco_quat_to_scipy_xyzw(object_quat_world_wxyz)
+            R_world_object = R.from_quat(object_quat_world_xyzw)
 
-        # --- Robust Simulation Stepping ---
-        try:
-            mujoco.mj_step(self.model, self.data, nstep=5)
-        except TypeError: # Fallback for APIs that don't support nstep
-            for _ in range(5):
-                mujoco.mj_step(self.model, self.data)
+            distance = np.linalg.norm(gripper_pose[:3] - object_pos_world)
+            GRASP_THRESHOLD = 0.04
 
+            # --- Grasp Activation Logic ---
+            if not self._is_kinematically_grasped and gripper_action > 0 and distance < GRASP_THRESHOLD:
+                self._is_kinematically_grasped = True
+                R_gripper_world = R_world_gripper.inv()
+                self._grasp_offset_pos = R_gripper_world.apply(object_pos_world - gripper_pose[:3])
+                self._grasp_offset_rot = R_gripper_world * R_world_object
+
+            # --- Grasp Release Logic ---
+            elif self._is_kinematically_grasped and gripper_action < 0:
+                self._is_kinematically_grasped = False
+                self._grasp_offset_pos = None
+                self._grasp_offset_rot = None
+
+            # --- Maintain Grasp (The "Puppeteer" Logic) ---
+            if self._is_kinematically_grasped:
+                # Calculate the desired new world pose of the object
+                new_object_pos_world = gripper_pose[:3] + R_world_gripper.apply(self._grasp_offset_pos)
+                new_object_rot_world = R_world_gripper * self._grasp_offset_rot
+
+                # Directly set the object's 7D joint qpos
+                qpos_addr = self.object_qpos_addr
+                self.data.qpos[qpos_addr : qpos_addr + 3] = new_object_pos_world
+                new_object_quat_mujoco = self._scipy_xyzw_to_mujoco_wxyz(new_object_rot_world.as_quat())
+                self.data.qpos[qpos_addr + 3 : qpos_addr + 7] = new_object_quat_mujoco
+            
+            # Step Physics Forward (Single Substep)
+            mujoco.mj_step(self.model, self.data)
+        
+        # =========================================================================
+        # VVVVVV           THIS IS THE FINAL STATE SYNCHRONIZATION FIX         VVVVVV
+        # =========================================================================
+        # 1. After all physics substeps are complete, run ONE forward pass.
+        #    This synchronizes all kinematic-dependent calculations (like site_xpos
+        #    for the end-effector) with the final state of the simulation.
+        mujoco.mj_forward(self.model, self.data)
+
+        # 2. Now that the state is fully synchronized, get the observation.
+        #    Both the expert's logic and the rendered video will now see the
+        #    TRUE, current state of the robot.
         obs = self.get_expert_obs()
+        
         reward = 0.0
         terminated = False
         truncated = (self.timestep >= self.max_episode_steps)
         
         return obs, reward, terminated, truncated, {}
-
+  
     def close(self):
         """Cleans up resources, primarily the renderer."""
         if hasattr(self, "renderer") and self.renderer is not None:

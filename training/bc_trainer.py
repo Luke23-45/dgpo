@@ -272,7 +272,6 @@ class BCTrainer:
         epochs: int,
         run_dir: Path, 
         val_loader: Optional[DataLoader] = None,
-        resume_from_path: Optional[str] = None,
     ):
         """
         Main training loop. Saves artifacts to a standardized directory structure
@@ -288,15 +287,6 @@ class BCTrainer:
         best_path = checkpoints_dir / "best_model.pth"
         resume_path = checkpoints_dir / "resume_checkpoint.pth"
 
-        # Logic is now: use explicit path if given, otherwise try auto-resume.
-        if resume_from_path and Path(resume_from_path).is_file():
-            logger.info(f"Explicitly resuming from: {resume_from_path}")
-            self.load_checkpoint(resume_from_path)
-        elif resume_path.is_file() and self.start_epoch == 0:
-            logger.info(f"Auto-resuming from {resume_path}")
-            self.load_checkpoint(str(resume_path)) # Use string for os.path.exists compatibility if needed
-        logger.info(f"Starting training for {epochs} epochs (resuming at epoch index {self.start_epoch})")
-        
         try:
             for epoch in range(self.start_epoch, epochs):
                 # --- Train Step ---

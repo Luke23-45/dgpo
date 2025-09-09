@@ -152,19 +152,19 @@ def main(args: argparse.Namespace):
             reset_options={"placement_mode": "easy"}
         )
         
-        # Segment 2: Hard Placements (no DR)
-        generate_and_record_segment(
-            env=env_no_dr, video_writer=video_writer, segment_title="Hard Placements",
-            num_resets=args.num_resets, steps_per_reset=args.steps_per_reset,
-            reset_options={"placement_mode": "hard"}
-        )
+        # # Segment 2: Hard Placements (no DR)
+        # generate_and_record_segment(
+        #     env=env_no_dr, video_writer=video_writer, segment_title="Hard Placements",
+        #     num_resets=args.num_resets, steps_per_reset=args.steps_per_reset,
+        #     reset_options={"placement_mode": "hard"}
+        # )
 
-        # Segment 3: Full Domain Randomization (with random placement)
-        generate_and_record_segment(
-            env=env_with_dr, video_writer=video_writer, segment_title="Full Domain Randomization",
-            num_resets=args.num_resets * 2, steps_per_reset=args.steps_per_reset,
-            reset_options={"placement_mode": "random"} # Let placement be random during DR
-        )
+        # # Segment 3: Full Domain Randomization (with random placement)
+        # generate_and_record_segment(
+        #     env=env_with_dr, video_writer=video_writer, segment_title="Full Domain Randomization",
+        #     num_resets=args.num_resets * 2, steps_per_reset=args.steps_per_reset,
+        #     reset_options={"placement_mode": "random"} # Let placement be random during DR
+        # )
 
     except Exception as e:
         log.critical(f"An error occurred during video generation: {e}", exc_info=True)

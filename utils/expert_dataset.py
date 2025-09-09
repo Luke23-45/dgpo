@@ -105,7 +105,7 @@ class ExpertDataset(IterableDataset):
         self.skipped_samples = 0
         self.scripted_cfg = scripted_cfg
         self._scripted_expert: Optional[ScriptedExpert] = None # Add placeholder
-
+        self._episode_buffer: list = []
         logger.info("ExpertDataset created (lazy initialization).")
 
     # ----------------------------
@@ -170,7 +170,7 @@ class ExpertDataset(IterableDataset):
     # Sample generation core
     # ----------------------------
 
-    def _generate_one(self) -> Tuple[Dict, np.ndarray]:
+    def _generate_one(self, current_obs: Dict) -> Tuple[Dict, np.ndarray]:
         """
         Generates a single (observation, action) sample.
 
@@ -179,8 +179,8 @@ class ExpertDataset(IterableDataset):
         deterministic ScriptedExpert to guarantee a high-quality sample.
         """
         # 1. Reset env and get a rich observation with ground-truth data
-        obs = self._env.get_expert_obs()
-        self._scripted_expert.reset() # Reset expert state for each new sample
+        obs = current_obs
+        # self._scripted_expert.reset() # Reset expert state for each new sample
         pose_world = None
         gripper_action = -1.0 # Default to open
         expert_source = "scripted" # Assume scripted unless OCTO succeeds
@@ -275,52 +275,66 @@ class ExpertDataset(IterableDataset):
         obs["expert_source"] = 1 if expert_source == "octo" else 0
         
         return obs, self._align_action_dim(final_action)
+  
+  
     # ----------------------------
     # IterableDataset API
     # ----------------------------
-    def __iter__(self) -> Iterator[Tuple[Dict[str, torch.Tensor], torch.Tensor]]:
-        """
-        The main iterator. Initializes per-worker state lazily,
-        then generates either infinite stream or up to max_samples_per_epoch samples.
-        """
+    # In ExpertDataset class, REPLACE the body of the __iter__ method
+
+# In utils/expert_dataset.py -> ExpertDataset class
+
+# In ExpertDataset class, REPLACE the body of the __iter__ method
+
+    def __iter__(self) -> Iterator[Tuple[Dict, np.ndarray]]:
         self._init_worker_state()
+        self._episode_buffer.clear()
         samples_this_epoch = 0
 
-        try:
-            while True:
-                if self.max_samples_per_epoch is not None and samples_this_epoch >= self.max_samples_per_epoch:
-                    break
+        while True:
+            if self.max_samples_per_epoch is not None and samples_this_epoch >= self.max_samples_per_epoch:
+                return
 
+            # --- Producer: Generate a full trajectory if the buffer is empty ---
+            if not self._episode_buffer:
                 try:
-                    self._env.reset()
-                    sample = self._generate_one()
-                    samples_this_epoch += 1
-                    self._samples_yielded += 1
-                    yield sample
+                    self._scripted_expert.reset()
+                    obs, _ = self._env.reset()
+                    temp_trajectory = []
+                    
+                    # Run one full episode
+                    for _ in range(self._env.max_episode_steps):
+                        logger.info(f"[Heartbeat] Generating step {+1}/{self._env.max_episode_steps} in trajectory. Expert state: {self._scripted_expert.get_state()}")
+                        policy_obs, final_action = self._generate_one(obs)
+                        temp_trajectory.append((policy_obs, final_action))
+                        obs, _, terminated, truncated, _ = self._env.step(final_action)
+                        
+                        # Break if the task is done or the episode is otherwise over
+                        if self._scripted_expert.done or terminated or truncated:
+                            break
+                    
+                    # CRITICAL: Only add the trajectory to the buffer IF it was successful
+                    if self._scripted_expert.done:
+                        self._episode_buffer.extend(temp_trajectory)
+                    else:
+                        logger.debug("Expert did not complete trajectory within time limit, discarding.")
 
                 except Exception as exc:
                     if self.skip_on_error:
-                        self.skipped_samples += 1
-                        if self.skipped_samples % 100 == 1: # Log every 100 skips
-                            logger.warning(
-                                f"[ExpertDataset] Skipped {self.skipped_samples} samples so far due to errors. "
-                                f"Last error: {exc}"
-                            )
-                        continue
+                        logger.warning(f"Skipped trajectory generation due to error: {exc}", exc_info=True)
+                        continue # Try to generate a new episode
                     else:
                         raise
 
-        finally:
-            # Clean up the worker-local env to release mujoco resources
-            try:
-                if getattr(self, "_env", None) is not None:
-                    try:
-                        self._env.close()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            # --- Consumer: Yield one sample from the buffer ---
+            # If generation failed, the buffer is empty, and we loop to try again
+            if not self._episode_buffer:
+                continue
 
+            obs_to_yield, action_to_yield = self._episode_buffer.pop(0)
+            yield obs_to_yield, action_to_yield
+            samples_this_epoch += 1
+  
     # ----------------------------
     # Optional helpers
     # ----------------------------
