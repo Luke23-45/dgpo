@@ -21,7 +21,7 @@ import mujoco
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-
+from utils.scripted_expert import ScriptedExpert, ObjectProfile
 # --- Project Imports ---
 import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -45,11 +45,14 @@ def main(args: argparse.Namespace):
     output_dir = Path("verification_output")
     output_dir.mkdir(parents=True, exist_ok=True)
     video_path = output_dir / f"expert_trajectory_seed{args.seed}.mp4"
-
+    object_to_grasp = ObjectProfile(
+        size=np.array([0.04, 0.04, 0.04]),
+        grasp_width_normalized=0.6 # Close most of the way but not fully
+    )
     # --- 1. Initialize Core Components ---
     log.info("Initializing components...")
     env = PandaEnv(xml_path=args.xml_path)
-    expert = ScriptedExpert()
+    expert = ScriptedExpert(object_profile=object_to_grasp)
     ik_solver = IKSolver(urdf_path=args.urdf_path)
     log.info("Components initialized.")
     
@@ -88,6 +91,7 @@ def main(args: argparse.Namespace):
 
     # --- 3. Run One Full Episode ---
     log.info(f"Starting episode generation. Video will be saved to: {video_path}")
+    env.set_object_size(object_to_grasp.size)
     expert.reset()
     obs, _ = env.reset(seed=args.seed)
 

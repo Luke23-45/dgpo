@@ -10,6 +10,7 @@ from scipy.spatial.transform import Rotation as R
 import cv2
 from dataclasses import dataclass, field 
 from typing import Optional
+from scipy.spatial.transform import Rotation, Slerp
 
 @dataclass
 class RenderPostConfig:
@@ -236,8 +237,11 @@ class PandaEnv(gym.Env):
         if self.object_joint_id == -1:
             raise ValueError("Kinematic grasp requires the 'object' to have a named 'object_joint' in the XML.")
         self.object_qpos_addr = self.model.jnt_qposadr[self.object_joint_id]
+        self.smoothing_factor = 0.2 
 
-
+        self.object_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "object_geom")
+        if self.object_geom_id == -1:
+            raise ValueError("Geom 'object_geom' not found in the XML.")
 
 
 
@@ -273,7 +277,17 @@ class PandaEnv(gym.Env):
         self.dr_config.table_textures = [n for n in self.dr_config.table_textures if n in self._dr_mat_ids]
         self.dr_config.floor_textures = [n for n in self.dr_config.floor_textures if n in self._dr_mat_ids]
     # ---------- Photometric helpers (sRGB/linear, exposure, tone map) ----------
-
+    def set_object_size(self, size: np.ndarray):
+        """
+        Dynamically sets the size of the object geom for the current episode.
+        NOTE: MuJoCo geoms are defined by half-extents (half-widths).
+        """
+        size = np.asarray(size, dtype=float)
+        if size.shape != (3,):
+            raise ValueError(f"Size must be a 3-element array, but got shape {size.shape}")
+        
+        # We need to set the geom_size to half of the full dimension
+        self.model.geom_size[self.object_geom_id] = size / 2.0
     @staticmethod
     def _srgb_to_linear(img: np.ndarray) -> np.ndarray:
         """img in [0,1] sRGB -> linear RGB (float32)."""
@@ -992,99 +1006,77 @@ class PandaEnv(gym.Env):
 
         return cam_pos, R_wc, fx, fy, cx, cy, height, width
 
-
-# FILE: envs/panda_env.py
-
-# ... (all other methods remain the same) ...
-
     def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
-        """Applies an action and steps the simulation forward."""
         self.timestep += 1
-        
-        # --- Robust Action Application ---
         action = np.asarray(action, dtype=float).ravel()
-        expected_dim = self.action_space.shape[0]
-        if action.size != expected_dim:
-            raise ValueError(f"Action dimension mismatch: got {action.size}, expected {expected_dim}")
-        
-        if action.size == 8:
-            arm_action = action[:7]
-            gripper_action = action[7] # This is a normalized value [-1, 1]
-        else: # Failsafe if only arm action is provided
-            arm_action = action
-            gripper_action = -1.0 # Default to open
+        arm_action = action[:7]
+        gripper_action = action[7]
 
-        # Scale the arm action using its defined ctrlrange
         arm_ctrl_range = self.model.actuator_ctrlrange[:7]
         arm_lo, arm_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
         scaled_arm_action = arm_lo + 0.5 * (arm_action + 1.0) * (arm_hi - arm_lo)
-        # Correctly map normalized gripper action to actuator control range [0, 255]
-        scaled_gripper_action = 255.0 if gripper_action > 0 else 0.0
 
-        # Write the scaled actions to the control buffer
+        gripper_lo, gripper_hi = self.model.actuator_ctrlrange[7]
+        scaled_gripper_action = gripper_lo + 0.5 * (gripper_action + 1.0) * (gripper_hi - gripper_lo)        
         self.data.ctrl[:7] = scaled_arm_action
         self.data.ctrl[7] = scaled_gripper_action
         
-        # The kinematic grasp ("puppeteering") must be enforced BEFORE EVERY SUBSTEP.
         N_SUBSTEPS = 5
         for _ in range(N_SUBSTEPS):
-            # --- Grasp State Logic (Applied every substep) ---
             gripper_pose = self.get_ee_pose()
             R_world_gripper = R.from_quat(gripper_pose[3:])
             
             object_pos_world = self.data.body("object").xpos.copy()
-            object_quat_world_wxyz = self.data.body("object").xquat.copy()
-            object_quat_world_xyzw = self._mujoco_quat_to_scipy_xyzw(object_quat_world_wxyz)
-            R_world_object = R.from_quat(object_quat_world_xyzw)
-
             distance = np.linalg.norm(gripper_pose[:3] - object_pos_world)
             GRASP_THRESHOLD = 0.04
 
-            # --- Grasp Activation Logic ---
             if not self._is_kinematically_grasped and gripper_action > 0 and distance < GRASP_THRESHOLD:
                 self._is_kinematically_grasped = True
+                object_quat_world_wxyz = self.data.body("object").xquat.copy()
+                object_quat_world_xyzw = self._mujoco_quat_to_scipy_xyzw(object_quat_world_wxyz)
+                R_world_object = R.from_quat(object_quat_world_xyzw)
                 R_gripper_world = R_world_gripper.inv()
                 self._grasp_offset_pos = R_gripper_world.apply(object_pos_world - gripper_pose[:3])
                 self._grasp_offset_rot = R_gripper_world * R_world_object
-
-            # --- Grasp Release Logic ---
+            
             elif self._is_kinematically_grasped and gripper_action < 0:
                 self._is_kinematically_grasped = False
-                self._grasp_offset_pos = None
-                self._grasp_offset_rot = None
 
-            # --- Maintain Grasp (The "Puppeteer" Logic) ---
             if self._is_kinematically_grasped:
-                # Calculate the desired new world pose of the object
-                new_object_pos_world = gripper_pose[:3] + R_world_gripper.apply(self._grasp_offset_pos)
-                new_object_rot_world = R_world_gripper * self._grasp_offset_rot
+                target_pos = gripper_pose[:3] + R_world_gripper.apply(self._grasp_offset_pos)
+                target_rot = R_world_gripper * self._grasp_offset_rot
 
-                # Directly set the object's 7D joint qpos
                 qpos_addr = self.object_qpos_addr
-                self.data.qpos[qpos_addr : qpos_addr + 3] = new_object_pos_world
-                new_object_quat_mujoco = self._scipy_xyzw_to_mujoco_wxyz(new_object_rot_world.as_quat())
-                self.data.qpos[qpos_addr + 3 : qpos_addr + 7] = new_object_quat_mujoco
+                current_pos = self.data.qpos[qpos_addr : qpos_addr + 3]
+                current_rot = R.from_quat(self._mujoco_quat_to_scipy_xyzw(
+                    self.data.qpos[qpos_addr + 3 : qpos_addr + 7]
+                ))
+
+                smoothed_pos = current_pos + self.smoothing_factor * (target_pos - current_pos)
+                
+                # =====================================================================
+                # VVVVVV           THE DEFINITIVE, CORRECT SLERP SYNTAX          VVVVVV
+                # =====================================================================
+                # 1. Create a Rotation object containing the start and end rotations
+                key_rots = R.from_quat([current_rot.as_quat(), target_rot.as_quat()])
+                # 2. Define the "times" corresponding to these rotations (start=0, end=1)
+                key_times = [0, 1]
+                # 3. Create the Slerp interpolator object
+                slerp = Slerp(key_times, key_rots)
+                # 4. Call the interpolator with the desired fraction to get the result
+                smoothed_rot = slerp(self.smoothing_factor)
+                # --- END OF FIX ---
+                
+                self.data.qpos[qpos_addr : qpos_addr + 3] = smoothed_pos
+                self.data.qpos[qpos_addr + 3 : qpos_addr + 7] = self._scipy_xyzw_to_mujoco_wxyz(smoothed_rot.as_quat())
             
-            # Step Physics Forward (Single Substep)
             mujoco.mj_step(self.model, self.data)
         
-        # =========================================================================
-        # VVVVVV           THIS IS THE FINAL STATE SYNCHRONIZATION FIX         VVVVVV
-        # =========================================================================
-        # 1. After all physics substeps are complete, run ONE forward pass.
-        #    This synchronizes all kinematic-dependent calculations (like site_xpos
-        #    for the end-effector) with the final state of the simulation.
         mujoco.mj_forward(self.model, self.data)
-
-        # 2. Now that the state is fully synchronized, get the observation.
-        #    Both the expert's logic and the rendered video will now see the
-        #    TRUE, current state of the robot.
         obs = self.get_expert_obs()
-        
         reward = 0.0
         terminated = False
         truncated = (self.timestep >= self.max_episode_steps)
-        
         return obs, reward, terminated, truncated, {}
   
     def close(self):
