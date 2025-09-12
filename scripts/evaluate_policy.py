@@ -75,7 +75,7 @@ def load_checkpoint_for_evaluation(path: Path, model: torch.nn.Module) -> None:
 
     # Load the weights into the model
     try:
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
         log.info("Successfully loaded model weights.")
     except Exception as e:
         log.critical(f"Failed to load state_dict into the model. Error: {e}", exc_info=True)

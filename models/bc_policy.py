@@ -43,6 +43,7 @@ class BCNet(nn.Module):
         pooled_spatial: Tuple[int, int] = (8, 8),
         action_activation: Optional[str] = "tanh",  # "tanh" or None for linear
         normalize_mode: str = "-1,1",  # "-1,1" or "0,1" or "raw"
+        dropout_p: float = 0.3,
     ):
         super().__init__()
 
@@ -55,6 +56,7 @@ class BCNet(nn.Module):
         if normalize_mode not in ("-1,1", "0,1", "raw"):
             raise ValueError("normalize_mode must be one of ('-1,1','0,1','raw')")
         self.normalize_mode = normalize_mode
+        self.dropout_p = dropout_p
 
         # Convolutional feature extractor
         self.cnn = nn.Sequential(
@@ -78,8 +80,10 @@ class BCNet(nn.Module):
         self.proprio_mlp = nn.Sequential(
             nn.Linear(self.proprio_dim, 128),
             nn.ReLU(inplace=True),
+            nn.Dropout(self.dropout_p), # <-- ADD THIS
             nn.Linear(128, 128),
             nn.ReLU(inplace=True),
+            nn.Dropout(self.dropout_p), # <-- AND THIS
         )
         self.proprio_output_dim = 128
 
@@ -88,8 +92,10 @@ class BCNet(nn.Module):
         head_layers: List[nn.Module] = [
             nn.Linear(fusion_in, 512),
             nn.ReLU(inplace=True),
+            nn.Dropout(self.dropout_p), # <-- ADD THIS
             nn.Linear(512, 256),
             nn.ReLU(inplace=True),
+            nn.Dropout(self.dropout_p), # <-- AND THIS
             nn.Linear(256, self.n_actions),
         ]
         if self.action_activation == "tanh":

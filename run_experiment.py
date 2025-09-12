@@ -34,6 +34,7 @@ from utils.obs_adapters import OctoToSB3Adapter
 from pathlib import Path
 import sys
 import json
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 try:
     from utils.transfer_bc_to_ppo import transfer_bc_weights
 except Exception:
@@ -147,7 +148,8 @@ def setup_environment(
     vec_env = make_vec_env(lambda: make_env(), n_envs=n_envs, seed=seed)
     return vec_env
 
-def initialize_ppo_agent(env: gym.vector.VectorEnv, run_name: str, seed: int, device_str: str) -> PPO:
+# In run_experiment.py
+def initialize_ppo_agent(env: gym.vector.VectorEnv, run_dir: Path, seed: int, device_str: str) -> PPO:
     """
     Initializes a new PPO agent with a standard configuration.
     """
@@ -167,7 +169,7 @@ def initialize_ppo_agent(env: gym.vector.VectorEnv, run_name: str, seed: int, de
         "learning_rate": 3e-4,
         "clip_range": 0.2,
         "device": device_str,
-        "tensorboard_log": os.path.join("trained_models", run_name),
+        "tensorboard_log": str(run_dir / "logs"),
         "policy_kwargs": policy_kwargs,
         "seed": seed
     }
@@ -339,14 +341,14 @@ def run_experiment(
     else:
         logger.info("Starting a new training run.")
         logger.info(f"Initializing PPO agent on device {device_str}...")
-        ppo_agent = initialize_ppo_agent(env, run_name, seed, device_str)
+        ppo_agent = initialize_ppo_agent(env, run_dir, seed, device_str)
         logger.info("PPO agent ready")
 
         # Correctly handle weight transfer from BC if provided
         if bc_model_path:
-            logger.info(f"Attempting to load BC checkpoint from: {args.bc_model_path}")
+            logger.info(f"Attempting to load BC checkpoint from: {bc_model_path}")
             try:
-                state_dict = load_bc_checkpoint(args.bc_model_path, device)
+                state_dict = load_bc_checkpoint(bc_model_path, device)
                 action_dim = int(act_space.shape[0])
                 logger.info(f"Inferred action dimension from environment: {action_dim}")
 
@@ -387,8 +389,8 @@ def run_experiment(
     
     checkpoint_callback = CheckpointCallback(
         save_freq=save_freq_per_env,
-        save_path=save_dir,
-        name_prefix="dgpo_policy"
+        save_path=str(run_dir / "checkpoints"),
+        name_prefix="rl_policy"
     )
     # Start RL training (handle potential API differences)
     logger.info(f"Starting RL fine-tuning for {total_timesteps} timesteps...")
@@ -417,7 +419,7 @@ def run_experiment(
         raise e # Re-raise the exception after logging
 
     # Final save
-    final_model_path = os.path.join(save_dir, "final_policy.zip")
+    final_model_path = run_dir / "checkpoints" / "final_policy.zip"
     ppo_agent.save(final_model_path)
     logger.info(f"Training complete. Final policy saved to: {final_model_path}")
 
@@ -434,6 +436,8 @@ def _parse_hw(s: str) -> Tuple[int, int]:
         return (h, w)
     except Exception:
         raise argparse.ArgumentTypeError(f"Invalid HxW format: '{s}'. Use '128x128'.")
+    
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run DGPO-Foundation RL training")
     run_group = parser.add_mutually_exclusive_group(required=True)
@@ -470,7 +474,10 @@ if __name__ == "__main__":
     parser.add_argument("--div_clip", type=float, default=10.0,
                         help="Maximum value to clip the raw divergence score before weighting.")
     parser.add_argument("--output_dir", type=str, default="trained_models")
-
+    parser.add_argument(
+        "--bc-init-type", type=str, default="best", choices=["best", "final"],
+        help="Which BC model checkpoint to use for initialization from --bc_init_dir: 'best' (lowest val loss) or 'final' (last epoch)."
+    )
     args = parser.parse_args()
     if args.resume_dir and args.bc_init_dir:
         raise argparse.ArgumentTypeError("Cannot provide both --resume_dir and --bc_init_dir.")
@@ -502,12 +509,22 @@ if __name__ == "__main__":
         resume_from_for_func = None
 
         if args.bc_init_dir:
-            # Find the best BC model checkpoint to pass to the function
-            bc_checkpoint_path = Path(args.bc_init_dir) / "checkpoints" / "best_model.pth"
+            if args.bc_init_type == "best":
+                checkpoint_filename = "best_model.pth"
+            else: # "final"
+                checkpoint_filename = "final_model.pth"
+            
+            logger.info(f"Initializing from BC run. Will use '{checkpoint_filename}' from '{args.bc_init_dir}'.")
+            
+            bc_checkpoint_path = Path(args.bc_init_dir) / "checkpoints" / checkpoint_filename
             if not bc_checkpoint_path.is_file():
-                logger.error(f"BC checkpoint 'best_model.pth' not found in {bc_checkpoint_path.parent}")
+                logger.critical(
+                    f"BC checkpoint '{checkpoint_filename}' not found in {bc_checkpoint_path.parent}.\n"
+                    "Ensure that the BC training run completed and generated this artifact."
+                )
                 sys.exit(1)
             bc_model_path_for_func = str(bc_checkpoint_path)
+
         else:
             logger.warning("No --bc_init_dir provided for new run. Training from random initialization.")
             bc_model_path_for_func = None

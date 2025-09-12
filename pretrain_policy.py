@@ -194,6 +194,10 @@ def create_loss_aware_collate_fn(loss_type: str):
 
 def _build_dataloaders(
     *,
+    epoch: int,
+    object_size: Tuple[float, ...],
+    object_grasp_width: float,
+    use_octo: bool,
     # Keep all existing args
     urdf_path: str,
     instruction: str,
@@ -213,13 +217,17 @@ def _build_dataloaders(
     """
     if not (0.0 <= val_split_ratio < 1.0):
         raise ValueError(f"val_split_ratio must be between 0.0 and 1.0, but got {val_split_ratio}")
+    epoch_seed = base_seed + epoch
 
     ds = ExpertDataset(
+        object_size=object_size,
+        object_grasp_width=object_grasp_width,
+        use_octo=use_octo,
         urdf_path=urdf_path,
         instruction=instruction,
         octo_model_name=octo_model_name,
         env_xml_path=env_xml_path,
-        base_seed=base_seed,
+        base_seed=epoch_seed,
         max_samples_per_epoch=int(samples_per_epoch),
         skip_on_error=True,
         warmup=warmup,
@@ -240,11 +248,14 @@ def _build_dataloaders(
         
         # Create a new dataset instance for validation
         val_ds = ExpertDataset(
+            object_size=object_size,
+            object_grasp_width=object_grasp_width,
+            use_octo=use_octo,
             urdf_path=urdf_path,
             instruction=instruction,
             octo_model_name=octo_model_name,
             env_xml_path=env_xml_path,
-            base_seed=base_seed + 9999, # Use a different seed for validation data
+            base_seed=epoch_seed + 9999, # Use a different seed for validation data
             max_samples_per_epoch=num_val_samples,
             skip_on_error=True,
             warmup=warmup,
@@ -310,8 +321,14 @@ def _instantiate_bcnet(
         else:
             logger.info(f"Loading checkpoint to resume training from: {resume_from_path}")
             checkpoint = torch.load(resume_from_path, map_location=device)
-            model.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
-            logger.info("Successfully loaded model weights from checkpoint.")
+            state_dict = checkpoint.get("model_state_dict", checkpoint)
+
+            # 2. Now, load the extracted state_dict into the model,
+            #    passing strict=False to this function.
+            model.load_state_dict(state_dict, strict=False)
+            # --- END OF FIX ---
+
+            logger.info("Successfully loaded model weights from checkpoint (non-strict).")
             
     return model, checkpoint
 
@@ -661,6 +678,12 @@ def parse_args() -> argparse.Namespace:
                       help="Which logger to use for metrics.")
     p.add_argument("--debug_dump_batch", action="store_true",
                    help="If set, saves a visualization of the first training batch to 'debug_batch.png'.")
+    p.add_argument("--use-octo", action="store_true",
+                  help="If set, use the OCTO model as the expert. Defaults to the scripted expert.")
+    p.add_argument("--object-size", type=str, default="0.04,0.04,0.04",
+                  help="Size of the object (x,y,z) as a comma-separated string.")
+    p.add_argument("--object-grasp-width", type=float, default=0.6,
+                  help="Normalized gripper width for grasping the object (1.0 = fully closed).")
     return p.parse_args()
 
 
@@ -719,17 +742,24 @@ def main() -> None:
             sys.exit(1)
 
         # Load the ORIGINAL config, but override a few key values from the new command
-        with config_path.open("r") as f:
-            original_config = json.load(f)
-
-        # Re-parse the current command line arguments just to get new values
         current_cli_args = parse_args()
+        
+        # 2. Load the configuration from the saved JSON file.
+        with config_path.open("r") as f:
+            saved_config_dict = json.load(f)
+            
+        # 3. Update the current args Namespace with the saved values.
+        #    This preserves any new arguments from the current script version
+        #    while loading the old settings for existing arguments.
+        args_dict = vars(current_cli_args) # Get a dictionary of all current args and defaults
+        args_dict.update(saved_config_dict) # Update it with the saved values
+        args = argparse.Namespace(**args_dict) # Create the final, complete args object
 
-        # Create the final args object by loading the old config...
-        args = argparse.Namespace(**original_config)
-
-        # ... and then surgically overriding specific values from the new command
+        # 5. Surgically override any arguments that are *meant* to be changed on resume,
+        #    like the number of epochs. We get these from `current_cli_args`.
         args.epochs = current_cli_args.epochs
+        args.resume_dir = current_cli_args.resume_dir # Ensure resume_dir is correctly set
+        args.resume_from = current_cli_args.resume_from # And the resume_from keyword
         # You could add other overridable args here, e.g., args.lr = current_cli_args.lr
 
         # This tells the rest of the script which checkpoint file to load
@@ -771,6 +801,9 @@ def main() -> None:
         urdf_path=args.urdf_path,
         instruction=args.instruction,
         octo_model_name=args.octo_model_name,
+        object_size=[float(d) for d in args.object_size.split(',')],
+        object_grasp_width=args.object_grasp_width,
+        use_octo=args.use_octo,
         env_xml_path=args.env_xml_path,
         base_seed=args.base_seed,
         max_samples_per_epoch=args.batch_size, # Only need one batch
@@ -835,25 +868,27 @@ def main() -> None:
     # --- 4. PRE-FLIGHT CHECK: Sanity check the model's forward pass ---
     sanity_forward_shape(model, obs_small, action_dim)
 
-    # --- 5. DATA PIPELINE: Create the main dataloader for training ---
-    # Bug 2.3 Fix: Create dataloaders ONCE, here.
-    logger.info("Creating main dataloaders for training and validation...")
-    train_loader, val_loader = _build_dataloaders(
-        urdf_path=args.urdf_path,
-        instruction=args.instruction,
-        octo_model_name=args.octo_model_name,
-        env_xml_path=args.env_xml_path,
-        base_seed=args.base_seed,
-        warmup=args.warmup,
-        samples_per_epoch=args.samples_per_epoch,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
-        # Bug 2.4 Fix: Pass correct arguments
-        loss_type=args.loss_type,
-        val_split_ratio=args.val_split_ratio,
-    )
+    # --- 5. DATA PIPELINE: Create the main dataloader for 
+    logger.info("Preparing arguments for the dynamic dataloader factory...")
+    dataloader_args = {
+        "object_size": [float(d) for d in args.object_size.split(',')],
+        "object_grasp_width": args.object_grasp_width,
+        "use_octo": args.use_octo,
+        "urdf_path": args.urdf_path,
+        "instruction": args.instruction,
+        "octo_model_name": args.octo_model_name,
+        "env_xml_path": args.env_xml_path,
+        "base_seed": args.base_seed,
+        "warmup": args.warmup,
+        "samples_per_epoch": args.samples_per_epoch,
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+        "pin_memory": (device.type == "cuda"),
+        "loss_type": args.loss_type,
+        "val_split_ratio": args.val_split_ratio,
+    }
 
+# --- END OF NEW BLOCK ---
     # --- 6. ENGINE ASSEMBLY: Instantiate the BCTrainer ---
     logger.info("Instantiating BCTrainer engine...")
     trainer = BCTrainer(
@@ -873,10 +908,10 @@ def main() -> None:
         trainer.load_checkpoint(args.resume_from_path_internal)
     # --- 7. LAUNCH TRAINING ---
     trainer.fit(
-        train_loader=train_loader,
+        build_dataloaders_fn=_build_dataloaders,
+        dataloader_args=dataloader_args,
         epochs=args.epochs,
         run_dir=run_dir,
-        val_loader=val_loader,
     )
 
     best_model_path = run_dir / "checkpoints" / "best_model.pth"
@@ -888,7 +923,7 @@ def main() -> None:
         best_val_loss = best_ckpt.get("best_loss")
         
         # Load the state_dict into the model for SB3 export
-        model.load_state_dict(best_ckpt["model_state_dict"])
+        model.load_state_dict(best_ckpt["model_state_dict"], strict=False)
         
         # --- Create and save the final metadata.json file ---
         metadata = {
@@ -932,7 +967,7 @@ def main() -> None:
         logger.warning("No 'best_model.pth' found. Skipping metadata generation and SB3 export.")
 
     # --- 9. CLEANUP ---
-    del model, train_loader, trainer, val_loader
+    del model, trainer
     gc.collect()
     logger.info("Pretraining script finished.")
 

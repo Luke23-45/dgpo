@@ -266,34 +266,52 @@ class BCTrainer:
         logger.info(f"    avg_loss={avg_loss:.6f} | samples={total_samples} | time={elapsed:.2f}s | {sps:.1f} samples/s")
         return avg_loss
 
+# In your BCTrainer class, replace the old fit method with this one:
+
     def fit(
         self,
-        train_loader: DataLoader,
+        build_dataloaders_fn,
+        dataloader_args: dict,
         epochs: int,
-        run_dir: Path, 
-        val_loader: Optional[DataLoader] = None,
+        run_dir: Path,
     ):
         """
-        Main training loop. Saves artifacts to a standardized directory structure
-        within the provided run_dir.
+        Main training loop that dynamically generates fresh data for each epoch.
+        Saves artifacts to a standardized directory structure within the provided run_dir.
         """
         # --- 1. Create the standardized directory structure ---
         checkpoints_dir = run_dir / "checkpoints"
         checkpoints_dir.mkdir(parents=True, exist_ok=True)
         # Note: The logs/ directory is created automatically by the TensorBoardLogger.
-        
+
         # --- 2. Define artifact paths within the new structure ---
-        final_path = checkpoints_dir / "final_model.pth" # Renamed for clarity
+        final_path = checkpoints_dir / "final_model.pth"
         best_path = checkpoints_dir / "best_model.pth"
         resume_path = checkpoints_dir / "resume_checkpoint.pth"
+        error_ckpt_path = checkpoints_dir / "resume_on_error.pth"
 
         try:
+            # The loop correctly starts from the last completed epoch
             for epoch in range(self.start_epoch, epochs):
-                # --- Train Step ---
+                
+                # --- DYNAMIC DATALOADER CREATION FOR THIS EPOCH ---
+                # This is the core of the fix. New, fresh data is generated every epoch.
+                logger.info(f"--- Epoch {epoch + 1}/{epochs} ---")
+                logger.info("Building new dataloaders with fresh, randomized data...")
+                
+                # Create a copy of the base arguments and inject the current epoch number
+                # to ensure a unique seed for the ExpertDataset.
+                current_epoch_dataloader_args = dataloader_args.copy()
+                current_epoch_dataloader_args['epoch'] = epoch + 1
+                
+                # Call the provided function to build the dataloaders for this specific epoch
+                train_loader, val_loader = build_dataloaders_fn(**current_epoch_dataloader_args)
+                
+                # --- Train Step (using the new train_loader) ---
                 train_pbar_desc = f"Train Epoch {epoch + 1}/{epochs}"
                 train_loss = self._train_one_epoch(train_loader, train_pbar_desc)
 
-                # --- Validation Step ---
+                # --- Validation Step (using the new val_loader) ---
                 val_loss = None
                 if val_loader:
                     val_pbar_desc = f"Val Epoch   {epoch + 1}/{epochs}"
@@ -302,7 +320,7 @@ class BCTrainer:
                 # Use validation loss for saving best model if available, otherwise use train loss
                 current_metric = val_loss if val_loader else train_loss
                 
-                # --- Step the scheduler (NOW current_metric is defined) ---
+                # --- Step the scheduler ---
                 if self.scheduler:
                     if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                         self.scheduler.step(current_metric)
@@ -310,6 +328,7 @@ class BCTrainer:
                         self.scheduler.step()
 
                 # --- Checkpointing and Early Stopping ---
+                # This logic remains the same, but it's now acting on results from fresh data.
                 if np.isfinite(current_metric) and current_metric < self.best_loss:
                     self.best_loss = current_metric
                     self._epochs_since_improve = 0
@@ -317,32 +336,49 @@ class BCTrainer:
                     logger.info(f"  ✓ New best model saved (metric={self.best_loss:.6f})")
                 else:
                     self._epochs_since_improve += 1
+                
+                # The regular end-of-epoch resume checkpoint
+                self.save_checkpoint(resume_path, epoch_completed=epoch + 1, loss=self.best_loss)
 
                 if val_loader and self.early_stop_patience > 0 and self._epochs_since_improve >= self.early_stop_patience:
                     logger.info(f"Early stopping triggered after {self._epochs_since_improve} epochs with no validation improvement.")
                     break
+                
                 if self.metrics_logger:
                     metrics = {"train/loss": train_loss}
                     if val_loss is not None:
                         metrics["val/loss"] = val_loss
-                    self.metrics_logger .log_metrics(metrics, step=epoch)
+                    self.metrics_logger.log_metrics(metrics, step=epoch + 1) # Use epoch+1 for correct step
+        
         except KeyboardInterrupt:
-            logger.warning("Training interrupted by user. Saving resume checkpoint...")
+            logger.warning("Training interrupted by user. Saving emergency resume checkpoint...")
             if self.metrics_logger: 
                 self.metrics_logger.finish()
-            epochs_completed = epoch if 'epoch' in locals() and epoch >= self.start_epoch else self.start_epoch
-            self.save_checkpoint(resume_path, epoch_completed=epochs_completed, loss=self.best_loss)
+            
+            # Save state from the last FULLY completed epoch
+            epochs_completed = (epoch) if 'epoch' in locals() and epoch >= self.start_epoch else self.start_epoch
+            self.save_checkpoint(error_ckpt_path, epoch_completed=epochs_completed, loss=self.best_loss)
+            logger.info(f"Emergency checkpoint for epoch {epochs_completed} saved to {error_ckpt_path}.")
             raise
+
         except Exception:
-            logger.exception("Fatal error during training!")
+            logger.exception("Fatal error during training! Saving emergency checkpoint...")
             if self.metrics_logger: 
                 self.metrics_logger.finish()
-            err_path = checkpoints_dir / "resume_on_error.pth"
-            epochs_completed = epoch if 'epoch' in locals() and epoch >= self.start_epoch else self.start_epoch
-            try: self.save_checkpoint(err_path, epoch_completed=epochs_completed, loss=self.best_loss)
-            except Exception: logger.error("Failed to save checkpoint after error.")
+            
+            # Save state from the last FULLY completed epoch
+            epochs_completed = (epoch) if 'epoch' in locals() and epoch >= self.start_epoch else self.start_epoch
+            try:
+                self.save_checkpoint(error_ckpt_path, epoch_completed=epochs_completed, loss=self.best_loss)
+                logger.info(f"Emergency checkpoint for epoch {epochs_completed} saved to {error_ckpt_path}.")
+            except Exception:
+                logger.error("Failed to save checkpoint after fatal error.")
             raise
-        else: 
-            epochs_completed = (epoch + 1) if 'epoch' in locals() and epoch >= self.start_epoch else self.start_epoch
-            self.save_checkpoint(final_path, epoch_completed=epochs_completed, loss=self.best_loss)
-            logger.info(f"Training complete. Final model saved to {final_path}")
+        
+        else: # This block runs only if the loop completes without a break or exception
+            logger.info(f"Training complete. Final model state is from epoch {epochs}.")
+            # The 'final_model.pth' is just a copy of the last 'resume_checkpoint.pth'
+            if resume_path.is_file():
+                import shutil
+                shutil.copy(resume_path, final_path)
+                logger.info(f"Final model saved to {final_path}")

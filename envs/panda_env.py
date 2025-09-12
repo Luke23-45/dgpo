@@ -243,7 +243,10 @@ class PandaEnv(gym.Env):
         if self.object_geom_id == -1:
             raise ValueError("Geom 'object_geom' not found in the XML.")
 
-
+        self.left_finger_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_finger")
+        self.right_finger_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "right_finger")
+        if self.left_finger_id == -1 or self.right_finger_id == -1:
+            raise ValueError("Could not find 'left_finger' or 'right_finger' bodies in the XML.")
 
     def _cache_dr_element_ids(self):
         """Finds and caches the integer IDs of all elements used in DR."""
@@ -852,8 +855,10 @@ class PandaEnv(gym.Env):
         # This isolates the redundancy to the expert pipeline, which is a good design.
         obs["internal_full_proprio"] = obs["proprio"].copy()
         obs["is_grasped"] = np.array([self._is_kinematically_grasped], dtype=bool)
-
+        obs["object_orn_world"] = self.get_object_orientation_expert()
         return obs
+  
+  
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:
         super().reset(seed=seed)
         if seed is not None: self.np_random, _ = seeding.np_random(seed)
@@ -1005,7 +1010,13 @@ class PandaEnv(gym.Env):
         cy = 0.5 * height
 
         return cam_pos, R_wc, fx, fy, cx, cy, height, width
-
+    def get_object_orientation_expert(self) -> np.ndarray:
+        """Gets the ground-truth world orientation of the object for the expert as an xyzw quat."""
+        body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
+        if body_id == -1:
+            raise ValueError("Body 'object' not found for expert pipeline.")
+        quat_wxyz = self.data.xquat[body_id].copy()
+        return self._mujoco_quat_to_scipy_xyzw(quat_wxyz)
     def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
         self.timestep += 1
         action = np.asarray(action, dtype=float).ravel()
@@ -1032,11 +1043,26 @@ class PandaEnv(gym.Env):
 
             if not self._is_kinematically_grasped and gripper_action > 0 and distance < GRASP_THRESHOLD:
                 self._is_kinematically_grasped = True
+                
+                # --- START OF PATCH: Calculate grasp from finger midpoint ---
+                # 1. Get world poses of fingers and object
+                left_finger_pos = self.data.xpos[self.left_finger_id].copy()
+                right_finger_pos = self.data.xpos[self.right_finger_id].copy()
+                finger_midpoint = (left_finger_pos + right_finger_pos) / 2.0
+
                 object_quat_world_wxyz = self.data.body("object").xquat.copy()
                 object_quat_world_xyzw = self._mujoco_quat_to_scipy_xyzw(object_quat_world_wxyz)
                 R_world_object = R.from_quat(object_quat_world_xyzw)
+
+                # 2. Calculate offsets relative to the GRIPPER's main frame of reference (the hand)
                 R_gripper_world = R_world_gripper.inv()
-                self._grasp_offset_pos = R_gripper_world.apply(object_pos_world - gripper_pose[:3])
+                
+                # The object's position offset is now relative to the finger midpoint,
+                # but expressed in the main gripper's reference frame for stable puppeteering.
+                vec_gripper_to_midpoint = finger_midpoint - gripper_pose[:3]
+                vec_midpoint_to_object = object_pos_world - finger_midpoint
+                
+                self._grasp_offset_pos = R_gripper_world.apply(vec_gripper_to_midpoint + vec_midpoint_to_object)
                 self._grasp_offset_rot = R_gripper_world * R_world_object
             
             elif self._is_kinematically_grasped and gripper_action < 0:

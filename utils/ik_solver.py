@@ -119,108 +119,64 @@ class IKSolver:
             ],
             dtype=float,
         )  
+# FILE: utils/ik_solver.py
+#
+# REPLACE the entire _get_target_joint_angles method with this new version.
+
     def _get_target_joint_angles(
         self,
         target_pose_7d: np.ndarray,
         current_joint_angles: np.ndarray,
         solution_position_tolerance: float,
-        max_iter: int = 1000,
-        regularization_strength: float = 1e-4 # INCREASED: A more effective value for stability
+        max_iter: int = 100, # Reduced max_iter for speed
+        regularization_strength: float = 1e-4
     ) -> Optional[np.ndarray]:
-        """Solves the inverse kinematics problem with robust fallbacks."""
-        # This print block is excellent for debugging, so we'll keep it.
-        # print("\n" + "-"*70)
-        # print("--- INSIDE _get_target_joint_angles ---")
+        """
+        Solves the inverse kinematics problem with a robust, multi-attempt fallback strategy.
+        """
         current_joint_angles = self.clamp_to_limits(current_joint_angles)
         target_pos = target_pose_7d[:3]
         target_orient_matrix = R.from_quat(target_pose_7d[3:]).as_matrix()
-        # print(f"  [Input] Target Position: {np.round(target_pos, 4)}")
-        # print(f"  [Input] Current Joints:  {np.round(current_joint_angles, 4)}")
 
         initial_guess = [0.0] * len(self.chain.links)
         for i, joint_val in enumerate(current_joint_angles):
             initial_guess[self._active_idx[i]] = joint_val
 
-        initial_position_clamped = np.array(initial_guess)
-        for i, idx in enumerate(self._active_idx):
-            lo, hi = self._joint_limits[i]
-            initial_position_clamped[idx] = np.clip(initial_position_clamped[idx], lo, hi)
+        # --- START OF PATCH: Multi-Attempt IK Solving ---
         
-        # --- Attempt 1: Full position and orientation solve ---
-        # print("\n  [Attempt 1] Trying full position + orientation solve...")
-        try:
-            solved_joints_full = self.chain.inverse_kinematics(
-                target_position=target_pos,
-                target_orientation=target_orient_matrix,
-                orientation_mode="all",
-                initial_position=initial_guess,
-                max_iter=max_iter,
-                regularization_parameter=regularization_strength
-            )
-            print("  [Attempt 1] SUCCESS: ikpy returned a solution.")
-        except Exception as e:
-            print(f"  [Attempt 1] FAILED: ikpy raised an exception: {e}")
-            
-            # --- Attempt 2 (Fallback): Position and Z-axis orientation ---
-            # print("\n  [Attempt 2] Falling back to position + Z-axis orientation solve...")
+        # Define our attempts, from most to least constrained
+        orientation_modes = ["all", "Z", None]
+        
+        for i, mode in enumerate(orientation_modes):
+            solved_joints_full = None # Reset solution for this attempt
             try:
                 solved_joints_full = self.chain.inverse_kinematics(
                     target_position=target_pos,
-                    orientation_mode="Z",
+                    target_orientation=target_orient_matrix if mode is not None else None,
+                    orientation_mode=mode,
                     initial_position=initial_guess,
                     max_iter=max_iter,
                     regularization_parameter=regularization_strength
                 )
-                # print("  [Attempt 2] SUCCESS: ikpy fallback returned a solution.")
-            except Exception as e2:
-                # print(f"  [Attempt 2] FAILED: ikpy fallback also raised an exception: {e2}")
-                # logger.warning("Internal ikpy solver failed on all attempts.")
-                # print("--- EXITING: Returning None ---")
-                # print("-" * 70)
-                return None
-        
-        # --- Post-verification (Your existing logic is perfect) ---
-        # print("\n  [Post-Verification] Checking the quality of the ikpy solution...")
-        if solved_joints_full is None:
-            # print("  [Check 1] FAILED: Solution is None.")
-            # print("--- EXITING: Returning None ---")
-            # print("-" * 70)
-            return None
-        
-        if not np.all(np.isfinite(solved_joints_full)):
-            # print("  [Check 2] FAILED: Solution contains non-finite values (NaN/inf).")
-            # print(f"            Problematic solution: {solved_joints_full}")
-            # print("--- EXITING: Returning None ---")
-            # print("-" * 70)
-            return None
-        
-        # print("  [Check 1 & 2] PASSED: Solution is a valid, finite numpy array.")
-        
-        fk_frame = self.chain.forward_kinematics(solved_joints_full)
-        result_pos = fk_frame[:3, 3]
-        position_error = np.linalg.norm(result_pos - target_pos)
-        
-        # print(f"  [Check 3] Verifying position error...")
-        # print(f"            Target Position:    {np.round(target_pos, 4)}")
-        # print(f"            Resulting Position: {np.round(result_pos, 4)}")
-        # print(f"            Position Error:   {position_error:.6f} meters")
-        # print(f"            Tolerance:        {solution_position_tolerance:.6f} meters")
+            except Exception:
+                # This attempt failed entirely, continue to the next one
+                continue
 
-        if position_error > solution_position_tolerance:
-            # print("  [Check 3] FAILED: Position error is larger than tolerance.")
-            # logger.warning(f"IK solution error ({position_error:.4f}m) exceeds tolerance.")
-            # print("--- EXITING: Returning None ---")
-            # print("-" * 70)
-            return None
+            # If a solution was found, verify its quality
+            if solved_joints_full is not None and np.all(np.isfinite(solved_joints_full)):
+                fk_frame = self.chain.forward_kinematics(solved_joints_full)
+                result_pos = fk_frame[:3, 3]
+                position_error = np.linalg.norm(result_pos - target_pos)
 
-        # print("  [Check 3] PASSED: Position error is within tolerance.")
+                # If the solution is accurate enough, we are done!
+                if position_error <= solution_position_tolerance:
+                    active_solved_joints = [solved_joints_full[i] for i in self._active_idx]
+                    return np.array(active_solved_joints, dtype=np.float32)
         
-        active_solved_joints = [solved_joints_full[i] for i in self._active_idx]
-        # print("  [Success] Extracted active joints from full solution.")
-        # print(f"--- EXITING: Returning valid joint angles ---")
-        # print("-" * 70)
-        return np.array(active_solved_joints, dtype=np.float32)
-        
+        # If all attempts failed to produce an accurate solution, return None
+        logger.warning(f"IK solver failed on all attempts to reach {np.round(target_pos, 2)}.")
+        return None
+        # --- END OF PATCH ---
 
     def compute_action(
         self,

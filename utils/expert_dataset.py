@@ -31,8 +31,7 @@ import mujoco
 from octo.model.octo_model import OctoModel
 from envs.panda_env import PandaEnv
 from utils.ik_solver import IKSolver
-from utils.scripted_expert import ScriptedExpert, ExpertConfig
-from utils.controls import gripper_action_to_ctrl
+from utils.scripted_expert import ScriptedExpert, ExpertConfig,ObjectProfile
 from utils.obs_adapters import build_octo_observation
 
 logger = logging.getLogger(__name__)
@@ -61,6 +60,8 @@ class ExpertDataset(IterableDataset):
         urdf_path: str,
         instruction: str = "pick up the red block",
         *,
+        object_size: Tuple[float, float, float] = (0.04, 0.04, 0.04),
+        object_grasp_width: float = 0.6,
         octo_model_name: str = "hf://rail-berkeley/octo-small-1.5",
         env_xml_path: Optional[str] = None,
         base_seed: Optional[int] = None,
@@ -69,6 +70,7 @@ class ExpertDataset(IterableDataset):
         warmup: bool = False,
         use_octo: bool = True, # Flag to enable/disable OCTO
         scripted_cfg: ExpertConfig = ExpertConfig(), # Config for our fallback expert
+        yield_full_obs: bool = False
     ) -> None:
         """
         Args:
@@ -93,7 +95,10 @@ class ExpertDataset(IterableDataset):
         self.max_samples_per_epoch = int(max_samples_per_epoch) if max_samples_per_epoch is not None else None
         self.skip_on_error = bool(skip_on_error)
         self.warmup = bool(warmup)
-
+        self.object_profile = ObjectProfile(
+            size=np.array(object_size, dtype=np.float32),
+            grasp_width_normalized=object_grasp_width
+        )
         # Worker-local attributes (initialized in __iter__)
         self._worker_state_initialized = False
         self.use_octo = bool(use_octo)
@@ -106,6 +111,7 @@ class ExpertDataset(IterableDataset):
         self.scripted_cfg = scripted_cfg
         self._scripted_expert: Optional[ScriptedExpert] = None # Add placeholder
         self._episode_buffer: list = []
+        self.yield_full_obs = yield_full_obs
         logger.info("ExpertDataset created (lazy initialization).")
 
     # ----------------------------
@@ -126,10 +132,12 @@ class ExpertDataset(IterableDataset):
             self._jax_key = jax.random.PRNGKey(worker_seed)
         
         self._env = PandaEnv(xml_path=self.env_xml_path)
+        self._env.set_object_size(self.object_profile.size)
         self._env.reset(seed=worker_seed)
         
         self._ik_solver = IKSolver(urdf_path=self.urdf_path)
-        self._scripted_expert = ScriptedExpert(self.scripted_cfg)
+        self._scripted_expert = ScriptedExpert(object_profile=self.object_profile, cfg=self.scripted_cfg)
+
         
         if self.warmup and self.use_octo:
             logger.info(f"[worker {worker_id}] Performing OCTO model warmup...")
@@ -245,9 +253,11 @@ class ExpertDataset(IterableDataset):
             pose_world, gripper_action = self._scripted_expert.get_target_pose(
                 obs["ee_pose_world"],
                 obs["object_pos_world"],
+                obs["object_orn_world"],
                 obs["goal_pos_world"],
+                obs["is_grasped"][0],
             )
-        
+                
         # 4. Convert the final valid world pose to a joint action via IK
         # (This part is the same for both experts)
         base_pos, base_quat = self._env.get_base_pose()
@@ -268,76 +278,116 @@ class ExpertDataset(IterableDataset):
             )
 
         # 5. Combine the computed 7D arm action with the 1D gripper action
-        gripper_ctrl = gripper_action_to_ctrl(gripper_action)
-        final_action = np.concatenate([arm_action, [gripper_ctrl]])
+        final_action = np.concatenate([arm_action, [gripper_action]])
+
         
         # Add metadata to the observation if you want to track the source
         obs["expert_source"] = 1 if expert_source == "octo" else 0
         
         return obs, self._align_action_dim(final_action)
   
-  
-    # ----------------------------
-    # IterableDataset API
-    # ----------------------------
-    # In ExpertDataset class, REPLACE the body of the __iter__ method
-
-# In utils/expert_dataset.py -> ExpertDataset class
-
-# In ExpertDataset class, REPLACE the body of the __iter__ method
 
     def __iter__(self) -> Iterator[Tuple[Dict, np.ndarray]]:
         self._init_worker_state()
         self._episode_buffer.clear()
         samples_this_epoch = 0
+        
+        # --- START OF IMPROVEMENT ---
+        consecutive_failures = 0
+        MAX_CONSECUTIVE_FAILURES = 20 # Raise an error after this many failed attempts
+        # --- END OF IMPROVEMENT ---
 
         while True:
             if self.max_samples_per_epoch is not None and samples_this_epoch >= self.max_samples_per_epoch:
                 return
 
-            # --- Producer: Generate a full trajectory if the buffer is empty ---
             if not self._episode_buffer:
                 try:
+                    temp_trajectory = []
                     self._scripted_expert.reset()
                     obs, _ = self._env.reset()
-                    temp_trajectory = []
-                    
-                    # Run one full episode
+
+# In ExpertDataset.__iter__()
                     for _ in range(self._env.max_episode_steps):
-                        logger.info(f"[Heartbeat] Generating step {+1}/{self._env.max_episode_steps} in trajectory. Expert state: {self._scripted_expert.get_state()}")
+                        # The call to _generate_one is now correct
                         policy_obs, final_action = self._generate_one(obs)
-                        temp_trajectory.append((policy_obs, final_action))
+
+                        # --- START OF DATA BALANCING FIX ---
+                        # Get the expert's state to decide if this sample is important.
+                        current_state = self._scripted_expert.get_state()
+                        policy_obs["expert_fsm_state"] = current_state
+
+                        # Define the "important" states where we interact with the object.
+                        important_states = {
+                            "DESCEND_TO_GRASP", "GRASP", "WAIT_FOR_GRASP",
+                            "LIFT", "PLACE", "RELEASE", "WAIT_FOR_RELEASE"
+                        }
+                        
+                        keep_sample = False
+                        if current_state in important_states:
+                            # Always keep samples from the critical interaction phases.
+                            keep_sample = True
+                        else:
+                            # For "boring" move phases, only keep a fraction of the samples.
+                            # Let's keep 1 in every 4 samples to reduce their dominance.
+                            if np.random.uniform() < 0.25:
+                                keep_sample = True
+
+                        if keep_sample:
+                            temp_trajectory.append((policy_obs, final_action))
+                        # --- END OF DATA BALANCING FIX ---
+                        
                         obs, _, terminated, truncated, _ = self._env.step(final_action)
                         
-                        # Break if the task is done or the episode is otherwise over
-                        if self._scripted_expert.done or terminated or truncated:
+                        if self._scripted_expert.is_done() or terminated or truncated:
                             break
                     
-                    # CRITICAL: Only add the trajectory to the buffer IF it was successful
-                    if self._scripted_expert.done:
+                    if self._scripted_expert.was_successful():
                         self._episode_buffer.extend(temp_trajectory)
+                        consecutive_failures = 0
                     else:
-                        logger.debug("Expert did not complete trajectory within time limit, discarding.")
+                        logger.debug(f"Expert did not complete trajectory successfully (state={self._scripted_expert.get_state()}), discarding.")
+                        consecutive_failures += 1
+                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                            raise RuntimeError(
+                                f"ExpertDataset failed to generate a successful trajectory {MAX_CONSECUTIVE_FAILURES} "
+                                f"times in a row. There might be a fundamental issue with the environment "
+                                f"or the scripted expert. Last expert state: {self._scripted_expert.get_state()}"
+                            )
+                        # --- END OF IMPROVEMENT ---
 
                 except Exception as exc:
                     if self.skip_on_error:
                         logger.warning(f"Skipped trajectory generation due to error: {exc}", exc_info=True)
-                        continue # Try to generate a new episode
+                        self._episode_buffer.clear()
+                        # --- START OF IMPROVEMENT ---
+                        consecutive_failures += 1 
+                        # Also check here in case of repeated crashes
+                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                             raise RuntimeError(
+                                f"ExpertDataset crashed {MAX_CONSECUTIVE_FAILURES} times in a row. "
+                                f"Please check the error logs above for the root cause."
+                            ) from exc
+                        # --- END OF IMPROVEMENT ---
+                        continue
                     else:
                         raise
 
-            # --- Consumer: Yield one sample from the buffer ---
-            # If generation failed, the buffer is empty, and we loop to try again
             if not self._episode_buffer:
                 continue
 
-            obs_to_yield, action_to_yield = self._episode_buffer.pop(0)
-            yield obs_to_yield, action_to_yield
+            obs_from_buffer, action_to_yield = self._episode_buffer.pop(0)
+            
+            if self.yield_full_obs:
+                yield obs_from_buffer, action_to_yield
+            else:
+                obs_for_policy = {
+                    "image_primary": obs_from_buffer["image_primary"],
+                    "proprio": obs_from_buffer["proprio"],
+                }
+                yield obs_for_policy, action_to_yield
             samples_this_epoch += 1
-  
-    # ----------------------------
-    # Optional helpers
-    # ----------------------------
+
     def get_stats(self) -> Dict:
         """Return simple stats about the dataset/worker (samples yielded so far)."""
         return {"samples_yielded": int(self._samples_yielded)}

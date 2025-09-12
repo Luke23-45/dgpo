@@ -104,6 +104,7 @@ def main(args: argparse.Namespace):
             target_pose, gripper_action = expert.get_target_pose(
                 expert_obs["ee_pose_world"],
                 expert_obs["object_pos_world"],
+                expert_obs["object_orn_world"],
                 expert_obs["goal_pos_world"],
                 expert_obs["is_grasped"],
             )
