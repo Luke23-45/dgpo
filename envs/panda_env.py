@@ -169,6 +169,7 @@ class PandaEnv(gym.Env):
     CAM_MIN_FOVY = 25.0      # Min zoom
     CAM_MAX_FOVY = 90.0      # Max zoom (wide-angle)
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+    ACTION_SCALING_FACTOR = 0.05
 
     def __init__(
             self,
@@ -177,11 +178,15 @@ class PandaEnv(gym.Env):
             dr_config: DomainRandomizationConfig = None,
             enable_domain_randomization: bool = True,
             post_config: RenderPostConfig = None,
+            control_mode: str = "absolute",
         ):
         super().__init__()
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
-        # --- Load model and data ---
+        assert control_mode in ["absolute", "delta"], "control_mode must be 'absolute' or 'delta'"
+        self.control_mode = control_mode
+        self.ACTION_SCALING_FACTOR = self.ACTION_SCALING_FACTOR
+
         try:
             self.model = mujoco.MjModel.from_xml_path(xml_path)
             self.data = mujoco.MjData(self.model)
@@ -197,7 +202,7 @@ class PandaEnv(gym.Env):
             self.renderer = None
         self.post = post_config or RenderPostConfig()
         # --- Episode bookkeeping ---
-        self.max_episode_steps = 250
+        self.max_episode_steps = 400
         self.timestep = 0
 
         # --- Define Observation and Action Spaces (CRITICAL SECTION) ---
@@ -1017,19 +1022,38 @@ class PandaEnv(gym.Env):
             raise ValueError("Body 'object' not found for expert pipeline.")
         quat_wxyz = self.data.xquat[body_id].copy()
         return self._mujoco_quat_to_scipy_xyzw(quat_wxyz)
+  
     def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
         self.timestep += 1
         action = np.asarray(action, dtype=float).ravel()
         arm_action = action[:7]
         gripper_action = action[7]
 
-        arm_ctrl_range = self.model.actuator_ctrlrange[:7]
-        arm_lo, arm_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
-        scaled_arm_action = arm_lo + 0.5 * (arm_action + 1.0) * (arm_hi - arm_lo)
+
+
+        if self.control_mode == 'absolute':
+            # --- This is your ORIGINAL logic, used by the expert ---
+            # The action is an absolute, normalized target joint position [-1, 1].
+            arm_ctrl_range = self.model.actuator_ctrlrange[:7]
+            arm_lo, arm_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
+            scaled_arm_action = arm_lo + 0.5 * (arm_action + 1.0) * (arm_hi - arm_lo)
+            self.data.ctrl[:7] = scaled_arm_action
+
+        elif self.control_mode == 'delta':
+            # --- This is the NEW logic for the RL agent ---
+            # The action is a delta to be added to the current joint position.
+            current_qpos = self.data.qpos[:7].copy()
+            target_qpos = current_qpos + arm_action * self.ACTION_SCALING_FACTOR
+            
+            # Clip to joint limits for safety
+            
+            joint_limits = self.model.jnt_range[:7]
+            target_qpos = np.clip(target_qpos, joint_limits[:, 0], joint_limits[:, 1])
+            self.data.ctrl[:7] = target_qpos
+
 
         gripper_lo, gripper_hi = self.model.actuator_ctrlrange[7]
-        scaled_gripper_action = gripper_lo + 0.5 * (gripper_action + 1.0) * (gripper_hi - gripper_lo)        
-        self.data.ctrl[:7] = scaled_arm_action
+        scaled_gripper_action = gripper_lo + 0.5 * (gripper_action + 1.0) * (gripper_hi - gripper_lo)
         self.data.ctrl[7] = scaled_gripper_action
         
         N_SUBSTEPS = 5
@@ -1104,6 +1128,8 @@ class PandaEnv(gym.Env):
         terminated = False
         truncated = (self.timestep >= self.max_episode_steps)
         return obs, reward, terminated, truncated, {}
+  
+  
   
     def close(self):
         """Cleans up resources, primarily the renderer."""

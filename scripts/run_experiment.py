@@ -34,8 +34,6 @@ from utils.obs_adapters import OctoToSB3Adapter
 from pathlib import Path
 import sys
 import json
-from utils.scripted_expert import ScriptedExpert,ObjectProfile 
-
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 try:
     from utils.transfer_bc_to_ppo import transfer_bc_weights
@@ -55,28 +53,7 @@ logging.basicConfig(
 logger = logging.getLogger("dgpo.run_experiment")
 
 # In run_experiment.py, add this new wrapper class
-class SingleFileBackupCallback(CheckpointCallback):
-    """
-    A CheckpointCallback that saves to a single file, overwriting it each time.
-    This provides a constantly updated backup without consuming disk space.
-    """
-    def __init__(self, save_freq: int, save_path: str, name_prefix: str = "backup_rl_policy"):
-        # We call the parent constructor with verbose=0 to suppress its default log messages
-        super().__init__(save_freq=save_freq, save_path=save_path, name_prefix=name_prefix, verbose=0)
 
-    def _on_step(self) -> bool:
-        # This is the core method called by SB3 at each step
-        if self.n_calls % self.save_freq == 0:
-            # Define the single, constant filename for the backup
-            backup_path = os.path.join(self.save_path, f"{self.name_prefix}.zip")
-            
-            # Save the model, overwriting any existing file at that path
-            self.model.save(backup_path)
-            
-            # Log our custom message
-            logger.info(f"💾 Saving latest backup to {backup_path}")
-            
-        return True
 
 def _resize_hwc(img_hwc: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
     """
@@ -136,10 +113,6 @@ def setup_environment(
     pos_scale: float = 0.05,
     rot_scale: float = 1.0,
     div_clip: float = 10.0,
-    scripted_expert: Optional[ScriptedExpert] = None,
-    w_guidance: float = 0.0,
-    w_guidance_dense: float = 5.0,
-    guidance_clip: float = 1.0,
     enable_downsample: bool = False,
     primary_res: Tuple[int, int] = (128, 128),
     wrist_res: Tuple[int, int] = (96, 96),
@@ -150,15 +123,11 @@ def setup_environment(
     """
     def make_env():
         # 1. Create the base environment. It produces nested OCTO-style observations.
-        env = PandaEnv(xml_path=xml_path, control_mode='delta')
+        env = PandaEnv(xml_path=xml_path)
 
         # 2. Apply the reward wrapper. It receives the correct nested obs and can use the OCTO model.
         env = RLRewardWrapper(env, octo_model=octo_model,
                               w_plausibility=w_plausibility,
-                              scripted_expert=scripted_expert,
-                              w_guidance=w_guidance,
-                              w_guidance_dense=w_guidance_dense, 
-                              guidance_clip=guidance_clip,
                               pos_scale=pos_scale, rot_scale=rot_scale, div_clip=div_clip)
 
         # 3. Apply the SB3 adapter LAST. It handles key filtering, image transposition,
@@ -197,7 +166,6 @@ def initialize_ppo_agent(env: gym.vector.VectorEnv, run_dir: Path, seed: int, de
         "batch_size": 128,
         "n_epochs": 10,
         "gamma": 0.99,
-        "ent_coef": 0.01, 
         "learning_rate": 3e-4,
         "clip_range": 0.2,
         "device": device_str,
@@ -251,9 +219,6 @@ def run_experiment(
     pos_scale: float = 0.05,
     rot_scale: float = 1.0,
     div_clip: float = 10.0,
-    w_guidance: float = 0.0,     
-    w_guidance_dense: float = 5.0,       
-    guidance_clip: float = 1.0,  
     enable_downsample: bool = False,
     primary_res: Tuple[int, int] = (128, 128),
     wrist_res: Tuple[int, int] = (96, 96),
@@ -272,7 +237,7 @@ def run_experiment(
         
         # Overwrite key parameters for the resumed run
         xml_path = original_args.get("xml_path", xml_path)
-        seed = int(original_args.get("seed", seed)) # Convert the loaded string back to an int
+        seed = original_args.get("seed", seed)
         run_name = original_args.get("run_name") # Use the original name
         # Find the latest checkpoint
         checkpoints = sorted(list((run_dir / "checkpoints").glob("*.zip")))
@@ -284,15 +249,13 @@ def run_experiment(
         run_name = run_name or time.strftime("%Y%m%d-%H%M%S")
         run_dir = Path(output_dir) / run_name
         checkpoints_dir = run_dir / "checkpoints"
-        backups_dir = run_dir / "backups"
         logs_dir = run_dir / "logs"
         checkpoints_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
-        backups_dir.mkdir(parents=True, exist_ok=True)
         # Save the config
         config_to_save = {k: v for k, v in locals().items() if not k == 'octo_model'}
         with (run_dir / "config.json").open("w") as f:
-            json.dump(config_to_save, f, indent=4)
+            json.dump({k: str(v) for k, v in config_to_save.items()}, f, indent=4)
     logger.info("🚀 Starting DGPO-Foundation experiment")
     device_str = resolve_device(device_arg)
     device = torch.device(device_str)
@@ -319,12 +282,6 @@ def run_experiment(
         except Exception as e:
             logger.error(f"Could not load OCTO model, divergence reward will be disabled. Error: {e}")
 
-    scripted_expert = None
-    if w_guidance > 0.0:  # Use the w_guidance from the function arguments
-        logger.info("Initializing ScriptedExpert for terminal guidance reward.")
-        object_profile = ObjectProfile(size=np.array([0.04, 0.04, 0.04]), grasp_width_normalized=0.6)
-        scripted_expert = ScriptedExpert(object_profile)
-
     logger.info("Creating vectorized environment...")
     env = setup_environment(
         xml_path=xml_path,
@@ -335,10 +292,6 @@ def run_experiment(
         pos_scale=pos_scale,
         rot_scale=rot_scale,
         div_clip=div_clip,
-        scripted_expert=scripted_expert,
-        w_guidance=w_guidance,
-        w_guidance_dense=w_guidance_dense,
-        guidance_clip=guidance_clip,
         enable_downsample=enable_downsample,
         primary_res=primary_res,
         wrist_res=wrist_res,
@@ -439,21 +392,6 @@ def run_experiment(
         save_path=str(run_dir / "checkpoints"),
         name_prefix="rl_policy"
     )
-    backup_save_freq = 5000
-    backup_save_freq_per_env = max(1, backup_save_freq // n_envs)
-    logger.info(f"Backup callback configured to save every {backup_save_freq} total timesteps "
-                f"({backup_save_freq_per_env} steps per environment).")
-
-    # 2. Create the backup callback instance
-    backup_callback = SingleFileBackupCallback(
-        save_freq=backup_save_freq_per_env,
-        save_path=str(run_dir / "backups"), # Still saves to the "backups" directory
-        name_prefix="latest_backup"        # A clearer name for the single file
-    )
-
-    # 3. Combine both callbacks into a list
-    #    This is the standard way to use multiple callbacks in SB3
-    callback_list = [checkpoint_callback, backup_callback]
     # Start RL training (handle potential API differences)
     logger.info(f"Starting RL fine-tuning for {total_timesteps} timesteps...")
     try:
@@ -464,15 +402,15 @@ def run_experiment(
         if "progress_bar" in learn_signature.parameters:
             logger.info(f"Starting training (resuming={not reset_timesteps}) for {total_timesteps} timesteps...")
             ppo_agent.learn(
-                total_timesteps= total_timesteps,
-                callback=callback_list,
+                total_timesteps=args.total_timesteps,
+                callback=checkpoint_callback,
                 reset_num_timesteps=reset_timesteps,
                 progress_bar=True,
             )
         else:
             ppo_agent.learn(
-                total_timesteps= total_timesteps,
-                callback=callback_list,
+                total_timesteps=args.total_timesteps,
+                callback=checkpoint_callback,
                 reset_num_timesteps=reset_timesteps
             )
             
@@ -536,13 +474,6 @@ if __name__ == "__main__":
     parser.add_argument("--div_clip", type=float, default=10.0,
                         help="Maximum value to clip the raw divergence score before weighting.")
     parser.add_argument("--output_dir", type=str, default="trained_models")
-    parser.add_argument("--w_guidance", type=float, default=0.0,
-                        help="Weight for the ScriptedExpert guidance terminal reward. Set > 0 to enable.")
-    parser.add_argument("--w_guidance_dense", type=float, default=5.0, # <<< ADDED
-                        help="Weight for the DENSE ScriptedExpert guidance reward. Set > 0 to enable.")
-
-    parser.add_argument("--guidance_clip", type=float, default=1.0,
-                        help="Maximum value to clip the raw guidance divergence score before weighting.")
     parser.add_argument(
         "--bc-init-type", type=str, default="best", choices=["best", "final"],
         help="Which BC model checkpoint to use for initialization from --bc_init_dir: 'best' (lowest val loss) or 'final' (last epoch)."
@@ -617,9 +548,6 @@ if __name__ == "__main__":
         pos_scale=args.pos_scale,
         rot_scale=args.rot_scale,
         div_clip=args.div_clip,
-        w_guidance=args.w_guidance,            # <-- ADD THIS LINE
-        w_guidance_dense=args.w_guidance_dense,
-        guidance_clip=args.guidance_clip,      # <-- ADD THIS LINE
         enable_downsample=args.enable_downsample,
         primary_res=primary_res,
         wrist_res=wrist_res,

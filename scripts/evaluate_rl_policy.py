@@ -17,7 +17,7 @@ import random
 import time
 from pathlib import Path
 import sys
-
+from utils.scripted_expert import ScriptedExpert,ObjectProfile 
 import cv2
 import numpy as np
 import torch
@@ -81,11 +81,12 @@ def main(args: argparse.Namespace):
 
     log.info("Initializing environment with full wrapper stack...")
     # The environment MUST have the same wrapper stack as used in training
-    env = PandaEnv(xml_path=args.xml_path)
+    env = PandaEnv(xml_path=args.xml_path, control_mode='delta')
     env = RLRewardWrapper(
         env,
-        octo_model=octo_model,
-        w_plausibility=args.w_plausibility,
+        w_plausibility=0.0,
+        scripted_expert=ScriptedExpert(ObjectProfile(size=np.array([0.04, 0.04, 0.04]), grasp_width_normalized=0.6)),
+        w_guidance_dense=5.0 # Use the same weight as in training
     )
     env = OctoToSB3Adapter(env)
 
@@ -124,7 +125,13 @@ def main(args: argparse.Namespace):
             
             # Log the detailed reward components from the wrapper's info dict
             reward_info = {k: v for k, v in info.items() if k.startswith("R_")}
-            log.info(f"Step {t+1} | Action: {np.round(action, 2)} | Reward: {reward:.3f} | Total Reward: {total_reward:.3f} | Details: {reward_info}")
+            guidance_error = info.get('guidance_pos_error', 'N/A') # Get the error if it exists
+            if isinstance(guidance_error, float):
+                guidance_error_str = f"{guidance_error:.4f}"
+            else:
+                guidance_error_str = guidance_error
+
+            log.info(f"Step {t+1} | Reward: {reward:.3f} | Expert_Error: {guidance_error_str} | Details: {reward_info}")
 
             frame_rgb = env.unwrapped.render()
             frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
@@ -185,7 +192,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     main(args)
 
+
 """
-python scripts/evaluate_rl_policy.py --checkpoint_path "trained_models_rl/rl_finetune_from_BEST_bc_v1/checkpoints/rl_policy_80000_steps.zip" --seed 777
+python -m run_experiment --run_name "rl_finetune_w_scripted_expert_v2" --bc_init_dir "artifacts/bc_sep_v2" --bc-init-type final --w_guidance 0.1 --w_plausibility 0.0 --total_timesteps 1000000
+
+"""
+
+"""
+python -m scripts.evaluate_rl_policy --checkpoint_path "trained_models\rl_finetune_w_scripted_expert_v2\backups\latest_backup.zip" --seed 777
 
 """

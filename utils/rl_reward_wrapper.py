@@ -28,6 +28,8 @@ import numpy as np
 import torch 
 from utils.obs_adapters import build_octo_batch_from_list
 import jax
+from utils.scripted_expert import ScriptedExpert
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,14 +84,18 @@ class RLRewardWrapper(gym.Wrapper):
         self,
         env: gym.Env,
         *,
+        scripted_expert: Optional[ScriptedExpert] = None,
+        w_guidance: float = 0.1,
+        w_guidance_dense: float = 5.0, 
+        guidance_clip: float = 1.0,
         ee_site_name: str = "attachment_site",
         object_geom_name: str = "object_geom",
         goal_body_name: str = "goal",
         gripper_action_index: int = 7,
         reach_scale: float = 10.0,
         place_scale: float = 20.0,
-        grasp_reward: float = 2.0,
-        lift_reward: float = 5.0,
+        grasp_reward: float = 10.0,
+        lift_reward: float = 15.0,
         success_reward: float = 100.0,
         lift_z_threshold: float = 0.45,
         grasp_distance_threshold: float = 0.04,
@@ -136,7 +142,11 @@ class RLRewardWrapper(gym.Wrapper):
         # Cache for one-time warnings to avoid log spam
         self._warned = {"ee": False, "geom": False, "goal": False, "gripper": False}
         self.octo_model = octo_model
+        self.scripted_expert = scripted_expert
         self.w_plausibility = w_plausibility
+        self.w_guidance = w_guidance     
+        self.w_guidance_dense = w_guidance_dense    
+        self.guidance_clip = guidance_clip   
         self.div_clip = div_clip
         self.quat_format = quat_format
         self.pos_weight = 1.0 / (pos_scale**2) if pos_scale > 1e-6 else 1.0
@@ -233,7 +243,7 @@ class RLRewardWrapper(gym.Wrapper):
         return obs, info
 
     def _calculate_rewards_and_info(
-        self, action: np.ndarray, base_reward: float, terminated: bool, info: Dict[str, Any]
+        self, obs: Dict[str, Any], action: np.ndarray, base_reward: float, terminated: bool, info: Dict[str, Any]
     ) -> Tuple[float, bool, Dict[str, Any]]:
         """
         Calculates all reward components based on the current simulation state.
@@ -307,10 +317,33 @@ class RLRewardWrapper(gym.Wrapper):
 
         # -- R_penalty: Penalty for large actions --
         R_penalty = -self.action_penalty * float(np.sum(np.square(a_np)))
+        R_guidance_dense = 0.0
+        if self.scripted_expert and self.w_guidance_dense > 0.0:
+            try:
+                # Get the ideal pose from the expert for the current state
+                ideal_pose, _ = self.scripted_expert.get_target_pose(
+                    obs['ee_pose_world'],
+                    obs['object_pos_world'],
+                    obs['object_orn_world'],
+                    obs['goal_pos_world'],
+                    obs['is_grasped'][0]
+                )
+                
+                agent_pos = ee_pos # Current EE position
+                ideal_pos = ideal_pose[:3]
 
+                # Use an exponential reward based on distance error
+                # This rewards being close and has a max value of w_guidance_dense
+                pos_error = _safe_norm(agent_pos - ideal_pos)
+                R_guidance_dense = np.exp(-20.0 * pos_error) * self.w_guidance_dense
+                info['guidance_pos_error'] = float(pos_error)
+
+            except Exception as e:
+                logger.warning(f"Could not compute dense guidance reward: {e}")
         # -- Total Reward --
         reward_total = (
             R_reach + R_grasp + R_lift + R_place + R_success + R_penalty +
+            R_guidance_dense + 
             self.base_reward_weight * float(base_reward)
         )
         reward_total = float(np.nan_to_num(reward_total))
@@ -344,15 +377,17 @@ class RLRewardWrapper(gym.Wrapper):
         # 1. Run the physics simulation in the underlying environment
         obs, base_reward, terminated, truncated, info = self.env.step(action)
         if self.octo_model and hasattr(self.env.unwrapped, 'get_ee_pose'):
-            current_ee_pose = self.env.unwrapped.get_ee_pose()
-            self._episode_trajectory.append({
-                "obs": obs,
-                "ee_pose": current_ee_pose
-            })
+            # Collect data for OCTO
+            self._episode_trajectory.append({"obs": obs, "ee_pose": self.env.unwrapped.get_ee_pose()})
+        elif self.scripted_expert and hasattr(self.env.unwrapped, 'get_expert_obs'):
+            # Collect rich data for ScriptedExpert
+            self._episode_trajectory.append(self.env.unwrapped.get_expert_obs())
         # 2. Calculate our custom rewards on the new state
         reward_total, terminated, info = self._calculate_rewards_and_info(
+            obs=obs,  # Pass the new obs dictionary
             action=action, base_reward=base_reward, terminated=terminated, info=info
         )
+
         if self.octo_model and (terminated or truncated):
             divergence_mse = self._calculate_divergence()
             # Clip the raw divergence score before applying weight
@@ -365,7 +400,17 @@ class RLRewardWrapper(gym.Wrapper):
             info['divergence_clipped'] = float(clipped_divergence) # Telemetry
             info['divergence_enabled'] = True
             info['divergence_steps'] = len(self._episode_trajectory)
-                
+
+        if self.scripted_expert and (terminated or truncated):
+            divergence = self._calculate_scripted_divergence()
+            clipped_divergence = np.clip(divergence, 0.0, self.guidance_clip)
+            R_T_guidance = -self.w_guidance * clipped_divergence
+            reward_total += R_T_guidance
+            info['R_T_guidance'] = R_T_guidance
+            info['guidance_divergence_raw'] = divergence          
+      
+      
+      
         reward_total = float(np.nan_to_num(reward_total))
         return obs, reward_total, terminated, truncated, info
     def _print_dict_structure(self, d, indent=0):
@@ -404,7 +449,32 @@ class RLRewardWrapper(gym.Wrapper):
                     out[k] = arr
         return out
 
+    def _calculate_scripted_divergence(self) -> float:
+        """
+        Calculates the divergence between the agent's trajectory and the ideal path
+        of the stateless ScriptedExpert. Returns Mean Squared Positional Error.
+        """
+        if not self._episode_trajectory:
+            return 0.0
 
+        temp_expert = ScriptedExpert(self.scripted_expert.object)
+        temp_expert.reset()
+        
+        total_sq_error = 0.0
+        for expert_obs_at_step in self._episode_trajectory:
+            agent_pose = expert_obs_at_step['ee_pose_world']
+            
+            ideal_pose, _ = temp_expert.get_target_pose(
+                expert_obs_at_step['ee_pose_world'],
+                expert_obs_at_step['object_pos_world'],
+                expert_obs_at_step['object_orn_world'],
+                expert_obs_at_step['goal_pos_world'],
+                expert_obs_at_step['is_grasped']
+            )
+            
+            total_sq_error += np.sum(np.square(agent_pose[:3] - ideal_pose[:3]))
+
+        return total_sq_error / len(self._episode_trajectory) if self._episode_trajectory else 0.0
     @torch.inference_mode()
     def _calculate_divergence(self) -> float:
         """
