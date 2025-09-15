@@ -11,7 +11,6 @@
     <global azimuth="120" elevation="-20" />
     <!-- <rgba haze="0.15 0.25 0.35 1"/> -->
   </visual>
-
 <asset>
 
     <texture name="tex_checker_blue" type="2d" builtin="checker" rgb1="0.1 0.2 0.3" rgb2="0.2 0.3 0.4" width="300" height="300"/>
