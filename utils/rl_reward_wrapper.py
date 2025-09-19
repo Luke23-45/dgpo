@@ -115,7 +115,15 @@ class RLRewardWrapper(gym.Wrapper):
         div_frame_stride: int = 1,
     ):
         super().__init__(env)
-
+        self._agent_obs_keys = [
+            "image_primary", "image_wrist", "proprio",
+            "task_completed", "timestep"
+        ]
+        if isinstance(self.env.observation_space, gym.spaces.Dict):
+            self.observation_space = gym.spaces.Dict({
+                k: self.env.observation_space[k] for k in self._agent_obs_keys
+                if k in self.env.observation_space.spaces
+            })
         # Names for MuJoCo elements
         self.ee_site_name = ee_site_name
         self.object_geom_name = object_geom_name
@@ -161,7 +169,10 @@ class RLRewardWrapper(gym.Wrapper):
         self.div_frame_stride = max(1, div_frame_stride)
         self._rng = jax.random.PRNGKey(0)
 
-
+    def _filter_obs(self, obs: Dict[str, Any]) -> Dict[str, Any]:
+        """Strips out all expert/ground-truth keys from the observation dictionary."""
+        return {k: obs[k] for k in self._agent_obs_keys if k in obs}
+    
     def _safe_site_pos(self, name: str) -> Optional[np.ndarray]:
         """Safely get a site's position using the core MuJoCo API."""
         try:
@@ -243,7 +254,7 @@ class RLRewardWrapper(gym.Wrapper):
         else:
             self._last_dist_cube_to_goal = 0.0
         self._episode_trajectory = []
-        return obs, info
+        return self._filter_obs(obs), info
 
     def _calculate_rewards_and_info(
         self, obs: Dict[str, Any], action: np.ndarray, base_reward: float, terminated: bool, info: Dict[str, Any]
@@ -415,7 +426,7 @@ class RLRewardWrapper(gym.Wrapper):
       
       
         reward_total = float(np.nan_to_num(reward_total))
-        return obs, reward_total, terminated, truncated, info
+        return self._filter_obs(obs), reward_total, terminated, truncated, info
     def _print_dict_structure(self, d, indent=0):
         """Helper to recursively print the structure of a dictionary for debugging."""
         for key, value in d.items():

@@ -4,6 +4,8 @@ from typing import Dict, Any, List
 from gymnasium import spaces 
 import gymnasium as gym
 from typing import Tuple
+from stable_baselines3.common.vec_env import VecEnv, VecEnvWrapper
+
 def build_octo_observation(
     env_obs: Dict[str, Any],
     history_len: int = 2
@@ -101,43 +103,132 @@ class OctoToSB3Adapter(gym.ObservationWrapper):
     """
     def __init__(self, env, keys_to_drop: Tuple[str, ...] = ("pad_mask_dict", "internal_full_proprio")):
         super().__init__(env)
-        self.keys_to_drop = keys_to_drop
+        self.keys_to_drop = set(keys_to_drop) # Use a set for faster lookups
 
-        # Define the final, flattened observation space for SB3
-        flat_spaces = {}
-        original_space = self.env.observation_space.spaces
+        # Define the final, flattened observation space for SB3 with correct dtypes.
+        new_obs_space = {}
+        for key, space in self.env.observation_space.spaces.items():
+            if key in self.keys_to_drop:
+                continue
+            
+            # Case 1: The space is an image (3D Box, uint8).
+            # We transpose its shape and explicitly keep its dtype as uint8.
+            # This is the PRIMARY FIX for the numpy memory allocation error.
+            if isinstance(space, spaces.Box) and len(space.shape) == 3 and space.dtype == np.uint8:
+                new_shape = (space.shape[2], space.shape[0], space.shape[1])
+                new_obs_space[key] = spaces.Box(
+                    low=0, high=255, shape=new_shape, dtype=np.uint8
+                )
+            
+            # Case 2: The space is anything else.
+            # We trust the original environment's definition and pass it through,
+            # ensuring maximum robustness and compatibility. We just handle the
+            # case of scalar values, which we reshape to (1,).
+            else:
+                shape = space.shape if space.shape != () else (1,)
+                new_obs_space[key] = spaces.Box(
+                    low=space.low, high=space.high, shape=shape, dtype=space.dtype
+                )
+        
+        self.observation_space = spaces.Dict(new_obs_space)
+
+    def observation(self, obs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        """
+        Transforms the observation to match the declared observation_space.
+        """
+        new_obs = {}
+        for key, value in obs.items():
+            # Skip any keys that are meant to be dropped.
+            if key in self.keys_to_drop:
+                continue
+
+            # Check if the key is actually in our target space. This is a safety check.
+            if key not in self.observation_space.spaces:
+                continue
+
+            space = self.observation_space.spaces[key]
+            
+            # Case 1: The space is an image. Transpose from HWC to CHW.
+            if isinstance(space, spaces.Box) and len(space.shape) == 3 and space.dtype == np.uint8:
+                new_obs[key] = np.transpose(value, (2, 0, 1))
+            
+            # Case 2: It's a scalar that needs reshaping.
+            elif isinstance(space, spaces.Box) and space.shape == (1,):
+                 # Ensure it's a numpy array and has the correct shape.
+                new_obs[key] = np.asarray(value, dtype=space.dtype).reshape(1)
+            
+            # Case 3: Any other array. Just ensure it has the correct dtype.
+            else:
+                new_obs[key] = np.asarray(value, dtype=space.dtype)
+                
+        return new_obs
+
+
+class VecOctoToSB3Adapter(VecEnvWrapper):
+    """
+    A vectorized observation wrapper that correctly adapts observations from a
+    `VecEnv` for use with a Stable Baselines 3 MultiInputPolicy.
+
+    This is the vectorized equivalent of the `OctoToSB3Adapter`. It correctly
+    handles batched observations from multiple parallel environments.
+    """
+    def __init__(self, venv: VecEnv, keys_to_drop: Tuple[str, ...] = ("pad_mask_dict", "internal_full_proprio", "expert_fsm_state", "expert_source")):
+        super().__init__(venv)
+        self.keys_to_drop = set(keys_to_drop)
+        
+        # Modify the observation space of the vectorized environment.
+        new_obs_space = {}
+        original_space = self.venv.observation_space.spaces
         
         for key, space in original_space.items():
             if key in self.keys_to_drop:
                 continue
-            
-            # Handle image transposition (HWC -> CHW)
+                
+            # Image transposition (HWC -> CHW)
             if isinstance(space, spaces.Box) and len(space.shape) == 3 and space.dtype == np.uint8:
                 new_shape = (space.shape[2], space.shape[0], space.shape[1])
-                flat_spaces[key] = spaces.Box(low=0, high=255, shape=new_shape, dtype=np.uint8)
-            # Handle other Box spaces (proprio, timestep)
-            elif isinstance(space, spaces.Box):
-                shape = space.shape if space.shape != () else (1,)
-                flat_spaces[key] = spaces.Box(low=-np.inf, high=np.inf, shape=shape, dtype=np.float32)
+                new_obs_space[key] = spaces.Box(
+                    low=0, high=255, shape=new_shape, dtype=np.uint8
+                )
+            # Preserve other spaces
             else:
-                flat_spaces[key] = space
+                shape = space.shape if space.shape != () else (1,)
+                new_obs_space[key] = spaces.Box(
+                    low=space.low, high=space.high, shape=shape, dtype=space.dtype
+                )
+                
+        self.observation_space = spaces.Dict(new_obs_space)
 
-        self.observation_space = spaces.Dict(flat_spaces)
+    def reset(self):
+        # The base `venv` reset returns a dict of (n_envs, H, W, C) arrays
+        obs = self.venv.reset()
+        return self._process_obs(obs)
 
-    def observation(self, obs):
+    def step_wait(self):
+        # `step_wait` returns obs, rewards, dones, infos
+        obs, rewards, dones, infos = self.venv.step_wait()
+        return self._process_obs(obs), rewards, dones, infos
+
+    def _process_obs(self, obs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         new_obs = {}
         for key, value in obs.items():
             if key in self.keys_to_drop:
                 continue
 
-            # Transpose images
-            if key in self.observation_space.spaces and isinstance(self.observation_space.spaces[key], spaces.Box) and len(value.shape) == 3:
-                new_obs[key] = np.transpose(value, (2, 0, 1)).astype(np.uint8)
-            # Sanitize other values
-            elif key in self.observation_space.spaces:
-                arr = np.asarray(value)
-                if arr.shape == ():
-                    arr = arr.reshape(1)
-                new_obs[key] = arr.astype(np.float32)
-
+            if key not in self.observation_space.spaces:
+                continue
+                
+            space = self.observation_space.spaces[key]
+            
+            # Image transposition: now handles a batch of images (N, H, W, C) -> (N, C, H, W)
+            if isinstance(space, spaces.Box) and len(space.shape) == 3 and space.dtype == np.uint8:
+                new_obs[key] = np.transpose(value, (0, 3, 1, 2))
+            
+            # Scalar reshaping: now handles a batch (N,) -> (N, 1)
+            elif isinstance(space, spaces.Box) and space.shape == (1,):
+                new_obs[key] = np.asarray(value, dtype=space.dtype).reshape(self.num_envs, 1)
+                
+            else:
+                new_obs[key] = np.asarray(value, dtype=space.dtype)
+                
         return new_obs

@@ -92,19 +92,27 @@ def transfer_bc_weights(
     # prefix_map: common BC module prefixes -> PPO policy prefixes
     prefix_map = {
         "cnn.": "features_extractor.cnn.",
-        "proprio_mlp.": "features_extractor.proprio_mlp.",
-        # common alternate BC naming can be added here if needed
     }
 
     # explicit head mapping (BCNet head indexing -> likely PPO names)
     # We'll attempt several plausible PPO targets and only pick one that exists in ppo_sd.
-    head_candidates = {
-        "head.0.weight": ["mlp_extractor.policy_net.0.weight", "policy_net.0.weight"],
-        "head.0.bias": ["mlp_extractor.policy_net.0.bias", "policy_net.0.bias"],
-        "head.2.weight": ["mlp_extractor.policy_net.2.weight", "policy_net.2.weight"],
-        "head.2.bias": ["mlp_extractor.policy_net.2.bias", "policy_net.2.bias"],
-        "head.4.weight": ["action_net.weight", "action_net.0.weight", "action_net.weight_orig"],
-        "head.4.bias": ["action_net.bias", "action_net.0.bias", "action_net.bias_orig"],
+    explicit_map = {
+        # Proprio MLP: BCNet's Linear layers are now at indices 0 and 3.
+        "proprio_mlp.0.weight": ["features_extractor.proprio_mlp.0.weight"],
+        "proprio_mlp.0.bias":   ["features_extractor.proprio_mlp.0.bias"],
+        "proprio_mlp.3.weight": ["features_extractor.proprio_mlp.2.weight"], # Map BC idx 3 -> PPO idx 2
+        "proprio_mlp.3.bias":   ["features_extractor.proprio_mlp.2.bias"],
+
+        # Head MLP: BCNet's Linear layers are now at indices 0, 3, and 6.
+        # Shared layers are correctly mapped to BOTH actor (policy_net) and critic (value_net).
+        "head.0.weight": ["mlp_extractor.policy_net.0.weight", "mlp_extractor.value_net.0.weight"],
+        "head.0.bias":   ["mlp_extractor.policy_net.0.bias", "mlp_extractor.value_net.0.bias"],
+        "head.3.weight": ["mlp_extractor.policy_net.2.weight", "mlp_extractor.value_net.2.weight"],
+        "head.3.bias":   ["mlp_extractor.policy_net.2.bias", "mlp_extractor.value_net.2.bias"],
+
+        # Final action layer is mapped ONLY to the actor's action_net.
+        "head.6.weight": ["action_net.weight"],
+        "head.6.bias":   ["action_net.bias"],
     }
 
     report = {
@@ -117,11 +125,9 @@ def transfer_bc_weights(
     }
 
     # Helper: find first existing candidate name from list
-    def _first_existing(candidates: List[str]) -> Optional[str]:
-        for c in candidates:
-            if c in ppo_sd:
-                return c
-        return None
+    def _first_existing(candidates: List[str]) -> List[str]:
+        """ Helper: find ALL existing candidate names from a list. """
+        return [c for c in candidates if c in ppo_sd]
 
     # --- Strategy 1: Prefix mapping ---
     handled_bc_keys = set()
@@ -145,22 +151,27 @@ def transfer_bc_weights(
         if matched:
             handled_bc_keys.add(bc_key)
 
+
     # --- Strategy 2: Explicit head mapping ---
-    for bc_key, ppo_candidates in head_candidates.items():
-        if bc_key not in bc_sd:
-            continue
+    for bc_key, ppo_candidates in explicit_map.items():
+        if bc_key in handled_bc_keys: continue
+        if bc_key not in bc_sd: continue
+        
         bc_tensor = bc_sd[bc_key]
-        chosen = _first_existing(ppo_candidates)
-        if chosen is None:
+        chosen_targets = _first_existing(ppo_candidates)
+
+        if not chosen_targets:
             report["not_found"].append(bc_key)
-            handled_bc_keys.add(bc_key)
-            continue
-        tgt_tensor = ppo_sd[chosen]
-        if tgt_tensor.shape == bc_tensor.shape:
-            new_ppo_sd[chosen] = _maybe_move_and_cast(bc_tensor.clone(), policy_device, policy_dtype)
-            report["transferred"].append((bc_key, chosen))
         else:
-            report["skipped_shape_mismatch"].append((bc_key, chosen, _shape_str(bc_tensor), _shape_str(tgt_tensor)))
+            for target_key in chosen_targets:
+                # This logic is correct for copying the tensor to one or more targets
+                tgt_tensor = ppo_sd[target_key]
+                if tgt_tensor.shape == bc_tensor.shape:
+                    new_ppo_sd[target_key] = _maybe_move_and_cast(bc_tensor.clone(), policy_device, policy_dtype)
+                    report["transferred"].append((bc_key, target_key))
+                else:
+                    report["skipped_shape_mismatch"].append((bc_key, target_key, _shape_str(bc_tensor), _shape_str(tgt_tensor)))
+        
         handled_bc_keys.add(bc_key)
 
     # --- Strategy 3: Suffix-based unambiguous mapping for remaining keys ---

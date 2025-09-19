@@ -35,6 +35,7 @@ from pathlib import Path
 import sys
 import json
 from utils.scripted_expert import ScriptedExpert,ObjectProfile 
+from stable_baselines3.common.vec_env import VecNormalize
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 try:
@@ -153,7 +154,7 @@ def setup_environment(
     """
     def make_env():
         # 1. Create the base environment. It produces nested OCTO-style observations.
-        env = PandaEnv(xml_path=xml_path, control_mode='absolute')
+        env = PandaEnv(xml_path=xml_path, control_mode='delta')
 
         # 2. Apply the reward wrapper. It receives the correct nested obs and can use the OCTO model.
         env = RLRewardWrapper(env, octo_model=octo_model,
@@ -184,37 +185,54 @@ def setup_environment(
         return env
 
 
-    vec_env = make_vec_env(lambda: make_env(), n_envs=n_envs, seed=seed)
+    vec_env = make_vec_env(make_env, n_envs=n_envs, seed=seed)
+
+    logger.info("Applying VecNormalize wrapper for observation and reward normalization.")
+    vec_env = VecNormalize(
+        vec_env, 
+        norm_obs=True, 
+        norm_reward=True, 
+        clip_obs=10.0,
+        # Only normalize vector inputs, not images
+        norm_obs_keys=["proprio"] 
+    )
     return vec_env
 
 # In run_experiment.py
+# FILE: scripts/run_experiment.py
+
 def initialize_ppo_agent(env: gym.vector.VectorEnv, run_dir: Path, seed: int, device_str: str) -> PPO:
     """
-    Initializes a new PPO agent with a standard configuration.
+    Initializes a new PPO agent with a CONSERVATIVE configuration for STABLE fine-tuning.
     """
     policy_kwargs = {
         "features_extractor_class": BCFeaturesExtractor,
         "net_arch": {"pi": [512, 256], "vf": [512, 256]}
     }
-    
-    # Define the PPO hyperparameters here.
-    # In the future, these could be exposed as CLI arguments in `args`.
+
+    # --- START OF PATCH 2 ---
+    # Replace the old aggressive hyperparameters with our new, stable ones.
     ppo_config = {
         "verbose": 1,
-        "n_steps": 2048,
-        "batch_size": 128,
+        "n_steps": 1024,              # Shorter rollouts -> lower variance
+        "batch_size": 64,             # Smaller batch size for fine-tuning
         "n_epochs": 10,
-        "gamma": 0.99,
-        "ent_coef": 0.01, 
-        "learning_rate": 3e-4,
+        "gamma": 0.995,               # Slightly higher gamma for sparse rewards
+        "gae_lambda": 0.95,
+        "learning_rate": 3e-5,        # CRITICAL: Very low learning rate
         "clip_range": 0.2,
+        "max_grad_norm": 0.5,         # Gradient clipping for stability
+        "vf_coef": 0.5,
+        "ent_coef": 0.001,            # Small entropy bonus for exploration
         "device": device_str,
         "tensorboard_log": str(run_dir / "logs"),
         "policy_kwargs": policy_kwargs,
-        "seed": seed
+        "seed": seed,
+        "target_kl": 0.03,            # CRITICAL: Emergency brake for large updates
     }
-    
-    logger.info("Initializing new PPO agent with config:")
+    # --- END OF PATCH 2 ---
+
+    logger.info("Initializing new PPO agent with CONSERVATIVE config for fine-tuning:")
     for key, val in ppo_config.items():
         logger.info(f"  {key}: {val}")
 
@@ -269,6 +287,7 @@ def run_experiment(
     primary_res: Tuple[int, int] = (128, 128),
     wrist_res: Tuple[int, int] = (96, 96),
     resume_dir: Optional[str] = None,
+    freeze_features: bool = False, 
 
 ):
     if resume_dir:
@@ -446,11 +465,17 @@ def run_experiment(
                     logger.warning("Continuing RL training from scratch (random initialization).")
         else:
             logger.info("No BC model provided — starting RL")
+    if freeze_features:
+        logger.info("--- FEATURE FREEZING ENABLED ---")
+        logger.info("Freezing feature extractor weights for stable fine-tuning.")
+        frozen_params = 0
+        for name, param in ppo_agent.policy.named_parameters():
+            if 'features_extractor' in name:
+                param.requires_grad = False
+                frozen_params += 1
+        logger.info(f"Froze {frozen_params} parameters in the feature extractor.")
 
-    logger.info("PILOT MODE: Freezing feature extractor weights for initial fine-tuning.")
-    for name, param in ppo_agent.policy.named_parameters():
-        if 'features_extractor' in name:
-            param.requires_grad = False
+
 
     save_freq_per_env = max(1, save_freq // n_envs)
     logger.info(f"Checkpoint callback configured to save every {save_freq} total timesteps "
@@ -565,12 +590,15 @@ if __name__ == "__main__":
     parser.add_argument("--grasp_reward", type=float, default=50.0, help="Sparse reward for grasping.")
     parser.add_argument("--lift_reward", type=float, default=100.0, help="Sparse reward for lifting.")
     parser.add_argument("--success_reward", type=float, default=250.0, help="Sparse reward for success.")
+    
     parser.add_argument("--guidance_clip", type=float, default=1.0,
                         help="Maximum value to clip the raw guidance divergence score before weighting.")
     parser.add_argument(
         "--bc-init-type", type=str, default="best", choices=["best", "final"],
         help="Which BC model checkpoint to use for initialization from --bc_init_dir: 'best' (lowest val loss) or 'final' (last epoch)."
     )
+    parser.add_argument("--freeze_features", action="store_true",
+                        help="If set, freeze the feature extractor layers for the entire run (recommended for initial pilots).")
     args = parser.parse_args()
     if args.resume_dir and args.bc_init_dir:
         raise argparse.ArgumentTypeError("Cannot provide both --resume_dir and --bc_init_dir.")
@@ -650,4 +678,5 @@ if __name__ == "__main__":
         enable_downsample=args.enable_downsample,
         primary_res=primary_res,
         wrist_res=wrist_res,
+        freeze_features=args.freeze_features,
     )
