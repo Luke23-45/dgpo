@@ -314,6 +314,7 @@ class ExpertDataset(IterableDataset):
 
                         # --- START OF DATA BALANCING FIX ---
                         # Get the expert's state to decide if this sample is important.
+
                         current_state = self._scripted_expert.get_state()
                         policy_obs["expert_fsm_state"] = current_state
 

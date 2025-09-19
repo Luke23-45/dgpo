@@ -92,11 +92,14 @@ class RLRewardWrapper(gym.Wrapper):
         object_geom_name: str = "object_geom",
         goal_body_name: str = "goal",
         gripper_action_index: int = 7,
-        reach_scale: float = 10.0,
-        place_scale: float = 20.0,
-        grasp_reward: float = 10.0,
-        lift_reward: float = 15.0,
-        success_reward: float = 100.0,
+
+        reach_scale: float = 2.0,       # DECREASED
+        place_scale: float = 10.0,      # DECREASED
+        grasp_reward: float = 50.0,     # INCREASED
+        lift_reward: float = 100.0,     # INCREASED
+        success_reward: float = 250.0,  # INCREASED
+
+
         lift_z_threshold: float = 0.45,
         grasp_distance_threshold: float = 0.04,
         success_distance_threshold: float = 0.05,

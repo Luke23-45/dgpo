@@ -140,6 +140,9 @@ def setup_environment(
     w_guidance: float = 0.0,
     w_guidance_dense: float = 5.0,
     guidance_clip: float = 1.0,
+    grasp_reward: float = 50.0,
+    lift_reward: float = 100.0,
+    success_reward: float = 250.0,
     enable_downsample: bool = False,
     primary_res: Tuple[int, int] = (128, 128),
     wrist_res: Tuple[int, int] = (96, 96),
@@ -150,7 +153,7 @@ def setup_environment(
     """
     def make_env():
         # 1. Create the base environment. It produces nested OCTO-style observations.
-        env = PandaEnv(xml_path=xml_path, control_mode='delta')
+        env = PandaEnv(xml_path=xml_path, control_mode='absolute')
 
         # 2. Apply the reward wrapper. It receives the correct nested obs and can use the OCTO model.
         env = RLRewardWrapper(env, octo_model=octo_model,
@@ -159,7 +162,12 @@ def setup_environment(
                               w_guidance=w_guidance,
                               w_guidance_dense=w_guidance_dense, 
                               guidance_clip=guidance_clip,
-                              pos_scale=pos_scale, rot_scale=rot_scale, div_clip=div_clip)
+                              grasp_reward=grasp_reward,
+                              lift_reward=lift_reward,
+                              success_reward=success_reward,
+                              pos_scale=pos_scale, 
+                              rot_scale=rot_scale, 
+                              div_clip=div_clip)
 
         # 3. Apply the SB3 adapter LAST. It handles key filtering, image transposition,
         #    and flattening, preparing the observation perfectly for the PPO agent.
@@ -254,6 +262,9 @@ def run_experiment(
     w_guidance: float = 0.0,     
     w_guidance_dense: float = 5.0,       
     guidance_clip: float = 1.0,  
+    grasp_reward: float = 50.0,
+    lift_reward: float = 100.0,
+    success_reward: float = 250.0,
     enable_downsample: bool = False,
     primary_res: Tuple[int, int] = (128, 128),
     wrist_res: Tuple[int, int] = (96, 96),
@@ -291,6 +302,9 @@ def run_experiment(
         backups_dir.mkdir(parents=True, exist_ok=True)
         # Save the config
         config_to_save = {k: v for k, v in locals().items() if not k == 'octo_model'}
+        for key, value in config_to_save.items():
+            if isinstance(value, Path):
+                config_to_save[key] = str(value)
         with (run_dir / "config.json").open("w") as f:
             json.dump(config_to_save, f, indent=4)
     logger.info("🚀 Starting DGPO-Foundation experiment")
@@ -339,6 +353,9 @@ def run_experiment(
         w_guidance=w_guidance,
         w_guidance_dense=w_guidance_dense,
         guidance_clip=guidance_clip,
+        grasp_reward=grasp_reward,
+        lift_reward=lift_reward,
+        success_reward=success_reward,
         enable_downsample=enable_downsample,
         primary_res=primary_res,
         wrist_res=wrist_res,
@@ -429,6 +446,11 @@ def run_experiment(
                     logger.warning("Continuing RL training from scratch (random initialization).")
         else:
             logger.info("No BC model provided — starting RL")
+
+    logger.info("PILOT MODE: Freezing feature extractor weights for initial fine-tuning.")
+    for name, param in ppo_agent.policy.named_parameters():
+        if 'features_extractor' in name:
+            param.requires_grad = False
 
     save_freq_per_env = max(1, save_freq // n_envs)
     logger.info(f"Checkpoint callback configured to save every {save_freq} total timesteps "
@@ -540,7 +562,9 @@ if __name__ == "__main__":
                         help="Weight for the ScriptedExpert guidance terminal reward. Set > 0 to enable.")
     parser.add_argument("--w_guidance_dense", type=float, default=5.0, # <<< ADDED
                         help="Weight for the DENSE ScriptedExpert guidance reward. Set > 0 to enable.")
-
+    parser.add_argument("--grasp_reward", type=float, default=50.0, help="Sparse reward for grasping.")
+    parser.add_argument("--lift_reward", type=float, default=100.0, help="Sparse reward for lifting.")
+    parser.add_argument("--success_reward", type=float, default=250.0, help="Sparse reward for success.")
     parser.add_argument("--guidance_clip", type=float, default=1.0,
                         help="Maximum value to clip the raw guidance divergence score before weighting.")
     parser.add_argument(
@@ -620,6 +644,9 @@ if __name__ == "__main__":
         w_guidance=args.w_guidance,            # <-- ADD THIS LINE
         w_guidance_dense=args.w_guidance_dense,
         guidance_clip=args.guidance_clip,      # <-- ADD THIS LINE
+        grasp_reward=args.grasp_reward,
+        lift_reward=args.lift_reward,
+        success_reward=args.success_reward,
         enable_downsample=args.enable_downsample,
         primary_res=primary_res,
         wrist_res=wrist_res,

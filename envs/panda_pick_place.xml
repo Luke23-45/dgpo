@@ -178,9 +178,9 @@
     <!-- THIS IS THE FIX: Prevent the main hand from sticking to the table -->
     <exclude body1="hand" body2="table"/>
 
-    <exclude body1="left_finger" body2="object"/>
+    <!-- <exclude body1="left_finger" body2="object"/>
     <exclude body1="right_finger" body2="object"/>
-    <exclude body1="hand" body2="object"/>
+    <exclude body1="hand" body2="object"/> -->
 </contact>
 </mujoco>
 

@@ -890,7 +890,13 @@ class PandaEnv(gym.Env):
         
         object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT, camera_name="fixed_camera", check_visibility=False)
         goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT, camera_name="fixed_camera", check_visibility=False)
-
+        if self.np_random.uniform() < 0.30:
+            initial_ee_pose = self.get_ee_pose()
+            # Place the object slightly in front of and below the gripper
+            easy_object_pos = initial_ee_pose[:3] + np.array([0.05, 0.0, -0.08])
+            # Ensure it's on the table by clamping the z-height
+            easy_object_pos[2] = self.OBJECT_Z_HEIGHT
+            object_pos = easy_object_pos
         # === STAGE 2: ADAPTIVE CAMERA PLACEMENT & DOMAIN RANDOMIZATION ===
         # 2a. Get key positions to inform the camera logic.
         gripper_pos = self.get_ee_pose()[:3]
