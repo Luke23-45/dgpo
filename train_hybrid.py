@@ -43,7 +43,7 @@ sys.path.append(str(project_root))
 
 from envs.panda_env import PandaEnv
 from models.bc_policy import BCNet
-from scripts.run_experiment import (
+from run_experiment import (
     initialize_ppo_agent,
     load_bc_checkpoint,
     transfer_bc_weights,
@@ -216,7 +216,7 @@ def run_hybrid_training(args: argparse.Namespace):
     checkpoints_dir = run_dir / "checkpoints"
     backups_dir = run_dir / "backups"
     
-    # Create directories for artifacts
+    # Create directories for artifactsf
     run_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(exist_ok=True)
     backups_dir.mkdir(exist_ok=True)
@@ -235,14 +235,17 @@ def run_hybrid_training(args: argparse.Namespace):
 
 
   
-
+    pos_scale = getattr(args, 'pos_scale', 0.05)
     env = setup_environment(
         xml_path=args.xml_path,
         seed=args.seed,
         n_envs=args.n_envs,
         octo_model=None,          # Hybrid mode doesn't use the Octo model
         w_plausibility=0.0,
-        scripted_expert=None,     # The function will create this internally based on w_guidance
+        pos_scale=pos_scale,
+        rot_scale=getattr(args, 'rot_scale', 1.0),
+        div_clip=getattr(args, 'div_clip', 10.0),
+        scripted_expert=None,    
         w_guidance=args.w_guidance,
         w_guidance_dense=args.w_guidance_dense,
         guidance_clip=args.guidance_clip,
@@ -314,6 +317,7 @@ def run_hybrid_training(args: argparse.Namespace):
     expert_dataset = ExpertDataset(
         urdf_path=args.urdf_path,
         base_seed=args.seed + 1000,
+        env_xml_path=args.xml_path, 
         max_samples_per_epoch=None,
         yield_full_obs=False
     )
@@ -378,7 +382,8 @@ def run_hybrid_training(args: argparse.Namespace):
               total_timesteps=rl_steps_per_iteration,
               callback=callback_list,
               reset_num_timesteps=False,
-              log_interval=1
+              log_interval=1,
+              progress_bar=True
           )
           
           # --- PHASE B: Imitation Learning (BC Regularization) ---
@@ -496,6 +501,8 @@ if __name__ == "__main__":
     
     parser.add_argument("--guidance_clip", type=float, default=1.0,
                         help="Maximum value to clip the raw guidance divergence score before weighting.")
+    parser.add_argument("--pos_scale", type=float, default=0.05,
+                        help="Action scaling factor for the delta controller.") 
     args = parser.parse_args()
     
     try:
@@ -517,7 +524,7 @@ python -m scripts.train_hybrid --run_name "final_hybrid_run_v1" \
     --total_timesteps 3000000 \
     --freeze_features
 
-python -m train_hybrid --run_name "hybrid_stage0_no_guidance" --bc_init_dir "artifacts/bc_final_balanced_v1" --n_envs 1 --total_timesteps 200000 --device "cpu" --w_guidance 0.0 --w_guidance_dense 0.0 --bc_updates 4 --bc_lr 1e-5 --bc_lambda_initial 1.0
+python -m train_hybrid --run_name "hybrid_stage0_no_guidance" --bc_init_dir "artifacts/bc_final_balanced_v1" --n_envs 1 --total_timesteps 200000 --device "cpu" --w_guidance 0.0 --w_guidance_dense 0.0 --bc_updates 4 --bc_lr 1e-5 --bc_lambda_initial 1.0 --freeze_features
 
 
 """

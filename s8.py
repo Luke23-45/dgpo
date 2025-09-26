@@ -185,7 +185,7 @@ class PandaEnv(gym.Env):
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         assert control_mode in ["absolute", "delta"], "control_mode must be 'absolute' or 'delta'"
         self.control_mode = control_mode
-
+        self.ACTION_SCALING_FACTOR = self.ACTION_SCALING_FACTOR
 
         try:
             self.model = mujoco.MjModel.from_xml_path(xml_path)
@@ -641,6 +641,7 @@ class PandaEnv(gym.Env):
         act_dim = 8 # We are defining a consistent 8D action space for the agent.
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
         
     def _randomize_photometrics(self, light_target: np.ndarray):
             """
@@ -801,10 +802,11 @@ class PandaEnv(gym.Env):
         
         return np.concatenate([pos, quat_xyzw]).astype(np.float32)
 
-
+    # envs/panda_env.py --> _get_obs()
     def _get_obs(self) -> Dict[str, np.ndarray]:
         """
         Returns a clean observation dictionary that matches the observation_space.
+        This version includes rendering for both primary and wrist cameras.
         """
         # Get base proprioceptive state (joint positions and velocities)
         qpos = np.asarray(self.data.qpos, dtype=np.float32)
@@ -860,9 +862,8 @@ class PandaEnv(gym.Env):
         obs["is_grasped"] = np.array([self._is_kinematically_grasped], dtype=bool)
         obs["object_orn_world"] = self.get_object_orientation_expert()
         return obs
-      
-
-    # Replace your entire reset method with this one.
+  
+  
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:
         super().reset(seed=seed)
         if seed is not None: self.np_random, _ = seeding.np_random(seed)
@@ -870,38 +871,60 @@ class PandaEnv(gym.Env):
         self.timestep = 0
         mujoco.mj_resetData(self.model, self.data)
         
+        # Reset the kinematic grasp state for the new episode
         self._is_kinematically_grasped = False
         self._grasp_offset_pos = None
         self._grasp_offset_rot = None
-
+        # === STAGE 1: UNBIASED TASK GENERATION ===
+        # 1a. Reset robot to a jittered home position.
         home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
         qpos_jitter = self.np_random.uniform(-0.03, 0.03, size=home_qpos.shape)
         self.data.qpos[:7] = home_qpos + qpos_jitter
+        self.data.qpos[:7] = home_qpos + qpos_jitter
         mujoco.mj_forward(self.model, self.data)
-        
-        initial_ee_pos = self.get_ee_pose()[:3]
-        
+
+        # 1b. Perform BLIND placement of goal and object to get candidate positions.
+        #     This ensures a truly random and unbiased task distribution.
         obj_zone_key, goal_zone_key = self.np_random.choice(list(self.PLACEMENT_ZONES.keys()), 2, replace=True)
         obj_zone, goal_zone = self.PLACEMENT_ZONES[obj_zone_key], self.PLACEMENT_ZONES[goal_zone_key]
-        object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT,camera_name="camera_primary", check_visibility=False)
-        goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT,camera_name="camera_primary", check_visibility=False)
+        
+        object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT, camera_name="fixed_camera", check_visibility=False)
+        goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT, camera_name="fixed_camera", check_visibility=False)
 
-        self._apply_domain_randomization(initial_ee_pos, goal_pos)
+        # === STAGE 2: ADAPTIVE CAMERA PLACEMENT & DOMAIN RANDOMIZATION ===
+        # 2a. Get key positions to inform the camera logic.
+        gripper_pos = self.get_ee_pose()[:3]
+        
+        # 2b. Delegate all camera and DR logic to the refactored helper function.
+        self._apply_domain_randomization(gripper_pos, goal_pos)
 
+        # === STAGE 3: COMMIT SCENE & FINALIZE ===
+        # 3a. Now that the camera is set, commit the object and goal positions to the simulation state.
         if np.linalg.norm(goal_pos[:2] - object_pos[:2]) < 0.05:
-            goal_pos[0] += 0.05 
+            goal_pos[0] += 0.05 # Ensure a small separation if they spawn too close.
         
+        # --- Start of Patched Code ---
+        # PATCH 1: Use the robust, ID-based method to set the object's position.
         joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
-        qpos_adr = int(self.model.jnt_qposadr[joint_id])
-        self.data.qpos[qpos_adr:qpos_adr + 3] = object_pos
+        if joint_id != -1 and hasattr(self.model, "jnt_qposadr"):
+            qpos_adr = int(self.model.jnt_qposadr[joint_id])
+            self.data.qpos[qpos_adr:qpos_adr + 3] = object_pos
+        else:
+            # Fallback if the object doesn't have a joint
+            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
+            if body_id != -1:
+                self.data.xpos[body_id] = object_pos
 
+        # PATCH 2: Write to `self.data`, not `self.model`, to set the goal's position.
         goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "goal")
-        self.data.xpos[goal_body_id] = goal_pos
+        if goal_body_id != -1:
+            self.data.xpos[goal_body_id] = goal_pos
+        # --- End of Patched Code ---
         
+        # 3b. Final forward pass to ensure all changes (camera, objects) are reflected.
         mujoco.mj_forward(self.model, self.data)
 
         return self.get_expert_obs(), {}
-
 
     def _place_object_in_zone(
         self,
@@ -1016,59 +1039,17 @@ class PandaEnv(gym.Env):
             scaled_arm_action = arm_lo + 0.5 * (arm_action + 1.0) * (arm_hi - arm_lo)
             self.data.ctrl[:7] = scaled_arm_action
 
-
         elif self.control_mode == 'delta':
-            # This block now handles both realistic physics and a deterministic "teleport" for testing.
-            
-            # 1. Convert the incoming normalized delta back to a physical delta
-            physical_delta = arm_action * self.ACTION_SCALING_FACTOR
-
-            # 2. Compute the desired final joint positions
+            # --- This is the NEW logic for the RL agent ---
+            # The action is a delta to be added to the current joint position.
             current_qpos = self.data.qpos[:7].copy()
-            target_qpos = current_qpos + physical_delta
-
-            # 3. Clip the target to the physical joint limits
+            target_qpos = current_qpos + arm_action * self.ACTION_SCALING_FACTOR
+            
+            # Clip to joint limits for safety
+            
             joint_limits = self.model.jnt_range[:7]
-            jnt_lo, jnt_hi = joint_limits[:, 0], joint_limits[:, 1]
-            target_qpos = np.clip(target_qpos, jnt_lo, jnt_hi)
-
-            # 4. Check if we are in "teleport" mode for testing
-            # Check if we are in "teleport" mode for testing
-            if getattr(self, 'debug_instant_move', False):
-                # --- START OF FINAL FIX ---
-                # 1. Teleport the joint to the target position
-                self.data.qpos[:7] = target_qpos
-                
-                # 2. CRITICAL: Also update the controller's target to match.
-                #    This prevents the controller from fighting the teleport in the subsequent mj_step loop.
-                #    We use the same robust mapping logic from the "else" branch.
-                jmin = joint_limits[:, 0]
-                jmax = joint_limits[:, 1]
-                denom = np.where(np.abs(jmax - jmin) > 1e-9, (jmax - jmin), 1.0)
-                norm = 2.0 * (target_qpos - jmin) / denom - 1.0
-                
-                arm_ctrl_range = np.asarray(self.model.actuator_ctrlrange[:7], dtype=float)
-                act_lo = arm_ctrl_range[:, 0]
-                act_hi = arm_ctrl_range[:, 1]
-                scaled_ctrl = act_lo + 0.5 * (norm + 1.0) * (act_hi - act_lo)
-                self.data.ctrl[:7] = scaled_ctrl
-
-                # 3. Update the physics state
-                mujoco.mj_forward(self.model, self.data)
-                # --- END OF FINAL FIX ---
-            else:
-                # For real training: Use the physically realistic controller
-                jmin = joint_limits[:, 0]
-                jmax = joint_limits[:, 1]
-                denom = np.where(np.abs(jmax - jmin) > 1e-9, (jmax - jmin), 1.0)
-                norm = 2.0 * (target_qpos - jmin) / denom - 1.0
-                
-                arm_ctrl_range = np.asarray(self.model.actuator_ctrlrange[:7], dtype=float)
-                act_lo = arm_ctrl_range[:, 0]
-                act_hi = arm_ctrl_range[:, 1]
-                scaled_ctrl = act_lo + 0.5 * (norm + 1.0) * (act_hi - act_lo)
-                self.data.ctrl[:7] = scaled_ctrl
-
+            target_qpos = np.clip(target_qpos, joint_limits[:, 0], joint_limits[:, 1])
+            self.data.ctrl[:7] = target_qpos
 
 
         gripper_lo, gripper_hi = self.model.actuator_ctrlrange[7]
@@ -1176,6 +1157,3 @@ class PandaEnv(gym.Env):
         quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float32)
         
         return pos, quat_xyzw
-    
-
-
