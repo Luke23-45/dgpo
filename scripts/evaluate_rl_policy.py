@@ -199,6 +199,6 @@ python -m run_experiment --run_name "rl_finetune_w_scripted_expert_v2" --bc_init
 """
 
 """
-python -m scripts.evaluate_rl_policy --checkpoint_path "trained_models\rl_finetune_w_scripted_expert_v2\backups\latest_backup.zip" --seed 777
+python -m scripts.evaluate_rl_policy --checkpoint_path "trained_models\hybrid_stage0_no_guidance\backups\latest_backup.zip" --seed 777
 
 """

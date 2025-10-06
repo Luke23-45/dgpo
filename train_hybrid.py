@@ -239,6 +239,7 @@ def run_hybrid_training(args: argparse.Namespace):
     env = setup_environment(
         xml_path=args.xml_path,
         seed=args.seed,
+        control_mode='absolute', 
         n_envs=args.n_envs,
         octo_model=None,          # Hybrid mode doesn't use the Octo model
         w_plausibility=0.0,
@@ -319,7 +320,8 @@ def run_hybrid_training(args: argparse.Namespace):
         base_seed=args.seed + 1000,
         env_xml_path=args.xml_path, 
         max_samples_per_epoch=None,
-        yield_full_obs=False
+        yield_full_obs=False,
+        use_octo=False
     )
     
     expert_loader = DataLoader(
@@ -348,7 +350,10 @@ def run_hybrid_training(args: argparse.Namespace):
 
     # --- 3. HYBRID TRAINING LOOP ---
     logger.info("\n--- Starting Hybrid Training Loop ---")
-
+    new_lr = 1e-5
+    logger.info(f"Reducing PPO learning rate to {new_lr} for initial stability.")
+    for param_group in ppo_agent.policy.optimizer.param_groups:
+        param_group['lr'] = new_lr
     # 3.1: Define Training Parameters
     rl_steps_per_iteration = args.n_steps * args.n_envs
     bc_updates_per_iteration = args.bc_updates
@@ -392,20 +397,33 @@ def run_hybrid_training(args: argparse.Namespace):
 
           total_bc_loss = 0.0
           if current_bc_lambda > 0:
-              for _ in range(bc_updates_per_iteration):
-                  try:
-                      obs_expert, act_expert = next(expert_iterator)
-                  except StopIteration:
-                      expert_iterator = iter(expert_loader)
-                      obs_expert, act_expert = next(expert_iterator)
+              for _ in range(args.bc_updates):
+                  try: obs_expert_raw, act_expert = next(expert_iterator)
+                  except StopIteration: expert_iterator = iter(expert_loader); obs_expert_raw, act_expert = next(expert_iterator)
                   
-                  act_expert = act_expert.to(ppo_agent.policy.device)
-                  obs_expert_device = {k: v.to(ppo_agent.policy.device) for k, v in obs_expert.items()}
+                  # --- START OF DEFINITIVE PATCH ---
+                  # The ExpertDataset yields (B, H, W, C) uint8 images.
+                  # The PPO policy's internal PyTorch model expects (B, C, H, W) float images.
+                  # We must perform both the transposition and the type/range conversion.
                   
-                  # Get policy's predicted action distribution
-                  # For PPO, the policy outputs a distribution, not a raw action
-                  # Robust BC update using helper that tries public SB3 APIs for differentiable actions
-                  predicted_actions = get_policy_predicted_actions(ppo_agent.policy, obs_expert_device)
+                  # 1. Transpose the image dimensions from HWC to CHW
+                  img_hwc = obs_expert_raw["image_primary"]
+                  img_chw = img_hwc.permute(0, 3, 1, 2)
+
+                  # 2. Convert to float and normalize to [0, 1] range
+                  img_chw_float = img_chw.to(torch.float32) / 255.0
+
+                  # 3. Assemble the final observation dictionary for the policy
+                  obs_for_policy = {
+                      "image_primary": img_chw_float,
+                      "proprio": obs_expert_raw["proprio"] 
+                  }
+                  # Note: We don't normalize proprio here because VecNormalize is not
+                  # used in the absolute control mode setup for this script.
+                  # --- END OF DEFINITIVE PATCH ---
+
+                  predicted_actions = get_policy_predicted_actions(ppo_agent.policy, obs_for_policy)
+                  bc_loss = bc_loss_fn(predicted_actions, act_expert.to(device))
 
                   # If predicted_actions came from the detached fallback, it won't require grad.
                   if not predicted_actions.requires_grad:
@@ -527,4 +545,6 @@ python -m scripts.train_hybrid --run_name "final_hybrid_run_v1" \
 python -m train_hybrid --run_name "hybrid_stage0_no_guidance" --bc_init_dir "artifacts/bc_final_balanced_v1" --n_envs 1 --total_timesteps 200000 --device "cpu" --w_guidance 0.0 --w_guidance_dense 0.0 --bc_updates 4 --bc_lr 1e-5 --bc_lambda_initial 1.0 --freeze_features
 
 
+
+python train_hybrid.py --run_name "hybrid_stage0_no_guidance" --bc_init_dir "artifacts/bc_final_balanced_v1" --n_envs 1 --total_timesteps 200000 --device "cpu" --w_guidance 0.0 --w_guidance_dense 0.0 --bc_updates 4 --bc_lr 1e-5 --bc_lambda_initial 1.0 --freeze_features
 """

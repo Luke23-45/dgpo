@@ -1,154 +1,143 @@
-import torch as th
-import numpy as np
+# FILE: debug_scripts/verify_reward_wrapper.py (DEFINITIVE VERSION)
+
+import argparse
 import logging
-from stable_baselines3 import PPO
-from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import VecNormalize
-
-# --- Add project root to path to find local modules ---
-import sys
 from pathlib import Path
-project_root = Path(__file__).resolve().parent
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+
+# --- Project Imports ---
+import sys
+project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
-# ---
 
-from models.bc_policy import BCNet
-from models.custom_sb3_extractor import BCFeaturesExtractor
-from utils.transfer_bc_to_ppo import transfer_bc_weights
 from envs.panda_env import PandaEnv
+from utils.rl_reward_wrapper import RLRewardWrapper
+from utils.scripted_expert import ScriptedExpert, ObjectProfile
+from utils.ik_solver import IKSolver
 
-# --- Basic logger for clean output ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-logger = logging.getLogger("diagnostic_test")
-
-
-# ---- CONFIG ----
-# Use a valid checkpoint from your successful pretraining run
-BC_CKPT_PATH = "artifacts/bc_final_balanced_v1/checkpoints/best_model.pth"
-ENV_XML_PATH = "envs/panda_pick_place.xml"
-ACTION_DIM = 8 # The PandaEnv has 7 arm joints + 1 gripper = 8
+# --- Setup Logging ---
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s | [%(name)s] | %(message)s"
+)
+log = logging.getLogger("VERIFY_REWARD_WRAPPER")
 
 
-def make_env():
-    """Factory function for the environment."""
-    env = PandaEnv(
-        xml_path=ENV_XML_PATH,
-        control_mode="absolute" # Match the BC model's training mode
-    )
-    return env
-
-
-def get_policy_predicted_actions(policy, obs_dict):
-    """
-    Minimal, safe, and self-contained helper to get differentiable actions.
-    This is the core logic from SB3's forward pass for the actor.
-    """
-    # Ensure observations are on the same device as the policy
-    obs_tensor = policy.obs_to_tensor(obs_dict)[0]
+def print_step_diagnostics(step_name: str, obs: dict, info: dict, reward: float):
+    """Helper to print a clean, detailed log for each test step."""
+    log.info("-" * 80)
+    log.info(f"--- VERIFYING SCENARIO: {step_name} ---")
     
-    # Enable gradients for this part of the computation
-    with th.set_grad_enabled(True):
-        features = policy.extract_features(obs_tensor)
-        latent_pi, _ = policy.mlp_extractor(features)
-        distribution = policy._get_action_dist_from_latent(latent_pi)
-        # Return the mean of the distribution, which is differentiable
-        actions = distribution.get_actions(deterministic=True)
-    return actions
+    is_grasped_obs = obs.get("is_grasped", np.array([-1.0]))[0]
+    log.info(f"Agent Observation['is_grasped']: {is_grasped_obs:.1f}")
+
+    dist_ee = info.get('dist_ee_to_cube', -1)
+    dist_goal = info.get('dist_cube_to_goal', -1)
+    log.info(f"Distances | EE->Cube: {dist_ee:.4f} | Cube->Goal: {dist_goal:.4f}")
+
+    r_total = reward
+    r_reach = info.get('R_reach', 0)
+    r_timing = info.get('R_gripper_timing', 0)
+    r_grasp = info.get('R_grasp', 0)
+    r_lift = info.get('R_lift', 0)
+    r_place = info.get('R_place', 0)
+    r_success = info.get('R_success', 0)
+    log.info(f"Total Reward: {r_total:+.4f}")
+    log.info(f"  Breakdown | Reach: {r_reach:+.4f} | Timing: {r_timing:+.4f} | Grasp: {r_grasp:+.1f} | "
+             f"Lift: {r_lift:+.1f} | Place: {r_place:+.4f} | Success: {r_success:+.1f}")
+    log.info("-" * 80)
+
+
+def get_expert_action(env, expert, ik_solver):
+    """Helper to generate a single expert action for the current state."""
+    expert_obs = env.unwrapped.get_expert_obs() # Get rich obs from base env
+
+    target_pose, gripper_action = expert.get_target_pose(
+        expert_obs["ee_pose_world"], expert_obs["object_pos_world"],
+        expert_obs["object_orn_world"], expert_obs["goal_pos_world"],
+        expert_obs["is_grasped"]
+    )
+    
+    base_pos, base_quat = env.unwrapped.get_base_pose()
+    R_world_base = R.from_quat(base_quat)
+    R_base_world = R_world_base.inv()
+    pos_in_base = R_base_world.apply(target_pose[:3] - base_pos)
+    rot_in_base = R_base_world * R.from_quat(target_pose[3:7])
+    target_pose_base = np.concatenate([pos_in_base, rot_in_base.as_quat()]).astype(np.float32)
+
+    current_joints = expert_obs["internal_full_proprio"][:7]
+    arm_action = ik_solver.compute_action(target_pose_base, current_joints)
+    
+    return np.concatenate([arm_action, [gripper_action]])
+
+
+def main(args: argparse.Namespace):
+    log.info("--- Starting RLRewardWrapper Verification Script (v2) ---")
+    
+    # 1. CONSTRUCT ALL COMPONENTS
+    base_env = PandaEnv(xml_path=args.xml_path, control_mode='absolute')
+    env = RLRewardWrapper(base_env) # Wrap it
+    object_profile = ObjectProfile(size=np.array([0.04, 0.04, 0.04]), grasp_width_normalized=0.6)
+    expert = ScriptedExpert(object_profile)
+    ik_solver = IKSolver(urdf_path=args.urdf_path)
+
+    obs, info = env.reset(seed=args.seed)
+    expert.reset()
+    
+    # 2. RUN EPISODE UNTIL GRASP ATTEMPT
+    log.info("\n>>> Running expert policy until GRASP state to test reach and timing rewards...")
+    last_info, last_reward = {}, 0.0
+    for _ in range(50): # Give it 50 steps to reach the cube
+        action = get_expert_action(env, expert, ik_solver)
+        obs, last_reward, _, _, last_info = env.step(action)
+        
+        # We stop right when the expert enters the GRASP state, which is the perfect
+        # moment to test the R_gripper_timing and R_grasp rewards.
+        if expert.get_state() == "GRASP":
+            break
+            
+    print_step_diagnostics("GRASP ATTEMPT", obs, last_info, last_reward)
+    log.info("VERIFICATION: R_reach should be positive. R_gripper_timing should be > 0. R_grasp should be > 0.")
+    log.info("VERIFICATION: Agent obs['is_grasped'] should be 1.0.")
+
+    # --- VERIFY ONE-TIME BONUSES ---
+    log.info("\n>>> Taking one more step to verify one-time bonuses...")
+    action = get_expert_action(env, expert, ik_solver) # Will be another grasp action
+    obs, last_reward, _, _, last_info = env.step(action)
+    print_step_diagnostics("GRASP AGAIN", obs, last_info, last_reward)
+    log.info("VERIFICATION: R_gripper_timing and R_grasp should BOTH now be 0.0.")
+
+    # --- VERIFY LIFT ---
+    log.info("\n>>> Running expert policy until lift occurs...")
+    for _ in range(20): # Give it 20 steps to lift
+        action = get_expert_action(env, expert, ik_solver)
+        obs, last_reward, _, _, last_info = env.step(action)
+        # Use is_lifted from the info dict for verification
+        if last_info.get("is_lifted", False):
+            break
+            
+    print_step_diagnostics("LIFT", obs, last_info, last_reward)
+    log.info("VERIFICATION: R_lift should be > 0.")
+
+    # --- VERIFY SUCCESS ---
+    log.info("\n>>> Running expert until end of episode to test SUCCESS condition...")
+    terminated = False
+    while not expert.is_done() and not terminated:
+        action = get_expert_action(env, expert, ik_solver)
+        obs, last_reward, terminated, _, last_info = env.step(action)
+        
+    print_step_diagnostics("RELEASE AT GOAL", obs, last_info, last_reward)
+    log.info("VERIFICATION: R_success should be > 0.")
+    log.info(f"Final episode status: Terminated = {terminated} (should be True)")
+
+    env.close()
+    log.info("--- Verification script finished. Analyze the logs above. ---")
 
 
 if __name__ == "__main__":
-    # 1. Load the BC model state dictionary correctly
-    logger.info(f"Loading BC checkpoint from: {BC_CKPT_PATH}")
-    checkpoint = th.load(BC_CKPT_PATH, map_location='cpu')
-    # The state_dict is often nested inside the checkpoint dictionary
-    bc_state_dict = checkpoint.get("model_state_dict", checkpoint)
-
-    # We need to instantiate a BCNet object to load the state_dict into
-    bc_net = BCNet(n_actions=ACTION_DIM)
-    bc_net.load_state_dict(bc_state_dict, strict=False)
-    logger.info("Successfully loaded BC state_dict into a BCNet instance.")
-
-
-    # 2. Build the PPO agent
-    policy_kwargs = dict(
-        features_extractor_class=BCFeaturesExtractor,
-        # The BCFeaturesExtractor does not need a `latent_dim` argument
-        # net_arch is what defines the MLP layers after the extractor
-        net_arch=dict(pi=[512, 256], vf=[512, 256])
-    )
-
-    env = make_vec_env(make_env, n_envs=1)
-    # Correctly apply VecNormalize for Dict spaces
-    env = VecNormalize(
-        env,
-        norm_obs=True,
-        norm_reward=False,     # Disable reward norm for cleaner debugging
-        clip_obs=10.0,
-        norm_obs_keys=["proprio"],
-    )
-
-    ppo = PPO(
-        "MultiInputPolicy",
-        env,
-        verbose=1,
-        policy_kwargs=policy_kwargs,
-        n_steps=128,
-        batch_size=64,
-        learning_rate=3e-5,
-        target_kl=1.0,   # Loosen target_kl for this test to prevent it from stopping early
-    )
-
-    # 3. Transfer weights and show a detailed report
-    report = transfer_bc_weights(bc_net, ppo, allow_shape_only_fallback=False, verbose=False)
-    print("\n" + "="*80)
-    print("--- DIAGNOSTIC TEST 1: Weight Transfer Report ---")
-    print(f"  - Transfer loaded_ok: {report.get('loaded_ok')}")
-    print(f"  - Transferred Pairs Count: {len(report.get('transferred', []))}")
-    print(f"  - Skipped (Shape Mismatch): {len(report.get('skipped_shape_mismatch', []))}")
-    print(f"  - Not Found in PPO (first 5): {report.get('not_found', [])[:5]}")
-    print(f"  - Ambiguous in PPO (first 5): {report.get('ambiguous', [])[:5]}")
-    print("="*80)
-
-    # 4. Prepare a sample observation batch
-    obs_np = env.reset()
-    
-    # 5. Check predicted actions differentiability
-    # The helper needs a dictionary of tensors
-    obs_tensor_dict = {k: th.as_tensor(v) for k, v in obs_np.items()}
-    actions_t = get_policy_predicted_actions(ppo.policy, obs_tensor_dict)
-    print("\n" + "="*80)
-    print("--- DIAGNOSTIC TEST 2: Action Differentiability ---")
-    print(f"  - Action `requires_grad`: {getattr(actions_t, 'requires_grad', None)}")
-    print("="*80)
-
-    # 6. Inspect action distribution and log_std
-    means = actions_t.detach().cpu().numpy()
-    print("\n" + "="*80)
-    print("--- DIAGNOSTIC TEST 3: Initial Action Distribution ---")
-    print(f"  - Action Mean (Sample from Batch): {np.array2string(means.mean(axis=0), precision=4)}")
-    if hasattr(ppo.policy, "log_std"):
-        action_std = th.exp(ppo.policy.log_std).detach().cpu().numpy()
-        print(f"  - Action `log_std` parameter: {np.array2string(ppo.policy.log_std.detach().cpu().numpy(), precision=4)}")
-        print(f"  - Inferred Action Std Dev: {np.array2string(action_std, precision=4)}")
-    else:
-        print("  - `log_std` parameter not found on policy object.")
-    print("="*80)
-
-    # 7. Check value predictions
-    with th.no_grad():
-        # predict_values expects a dictionary of tensors
-        values = ppo.policy.predict_values(obs_tensor_dict)
-    print("\n" + "="*80)
-    print("--- DIAGNOSTIC TEST 4: Critic (Value Head) Stats ---")
-    print(f"  - Critic/Value Head Output (Sample): mean={values.mean().item():.4f}, std={values.std().item():.4f}")
-    print("="*80)
-
-    # 8. One mini learn iteration to test KL stability
-    print("\n" + "="*80)
-    print("--- DIAGNOSTIC TEST 5: One-Iteration PPO Learn Test ---")
-    try:
-        ppo.learn(total_timesteps=256, reset_num_timesteps=False)
-        print("\n[SUCCESS] Finished one PPO learn iteration without early stopping.")
-    except Exception as e:
-        print(f"\n[FAILURE] PPO learn step failed with error: {e}")
-    print("="*80)
+    parser = argparse.ArgumentParser(description="Verify the RLRewardWrapper logic.")
+    parser.add_argument("--xml_path", type=str, default="envs/panda_pick_place.xml")
+    parser.add_argument("--urdf_path", type=str, default="urdf/panda_mujoco_kinematics.urdf")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+    main(args)

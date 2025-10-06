@@ -95,24 +95,26 @@ def transfer_bc_weights(
     }
 
     # explicit head mapping (BCNet head indexing -> likely PPO names)
+# FILE: utils/transfer_bc_weights.py
+# REPLACE the explicit_map dictionary
+
     explicit_map = {
-        # OLD Proprio MLP (no dropout): Linear layers are at indices 0 and 2.
-        # PPO extractor's MLP also has Linear layers at 0 and 2.
+        # Proprio MLP: BCNet's Linear layers are now at indices 0 and 3.
         "proprio_mlp.0.weight": ["features_extractor.proprio_mlp.0.weight"],
         "proprio_mlp.0.bias":   ["features_extractor.proprio_mlp.0.bias"],
-        "proprio_mlp.2.weight": ["features_extractor.proprio_mlp.2.weight"],
-        "proprio_mlp.2.bias":   ["features_extractor.proprio_mlp.2.bias"],
+        "proprio_mlp.3.weight": ["features_extractor.proprio_mlp.2.weight"], # Map BC idx 3 -> PPO idx 2
+        "proprio_mlp.3.bias":   ["features_extractor.proprio_mlp.2.bias"],
 
-        # OLD Head MLP (no dropout): Linear layers are at indices 0, 2, and 4.
-        # PPO MLP also has Linear layers at 0 and 2.
+        # Head MLP: BCNet's Linear layers are now at indices 0, 3, and 6.
+        # Shared layers are correctly mapped to BOTH actor (policy_net) and critic (value_net).
         "head.0.weight": ["mlp_extractor.policy_net.0.weight", "mlp_extractor.value_net.0.weight"],
         "head.0.bias":   ["mlp_extractor.policy_net.0.bias", "mlp_extractor.value_net.0.bias"],
-        "head.2.weight": ["mlp_extractor.policy_net.2.weight", "mlp_extractor.value_net.2.weight"],
-        "head.2.bias":   ["mlp_extractor.policy_net.2.bias", "mlp_extractor.value_net.2.bias"],
+        "head.3.weight": ["mlp_extractor.policy_net.2.weight", "mlp_extractor.value_net.2.weight"],
+        "head.3.bias":   ["mlp_extractor.policy_net.2.bias", "mlp_extractor.value_net.2.bias"],
 
-        # Final action layer in the OLD architecture was at index 4.
-        "head.4.weight": ["action_net.weight"],
-        "head.4.bias":   ["action_net.bias"],
+        # Final action layer is mapped ONLY to the actor's action_net.
+        "head.6.weight": ["action_net.weight"],
+        "head.6.bias":   ["action_net.bias"],
     }
 
     report = {

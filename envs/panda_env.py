@@ -628,6 +628,7 @@ class PandaEnv(gym.Env):
             # --- Proprioceptive State ---
             # The primary 14D proprio state (7 joint pos + 7 joint vel)
             "proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
+            "is_grasped": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
             
             # --- Additional State Information for Expert ---
             # A scalar indicating if the task is complete (0.0 or 1.0)
@@ -816,6 +817,7 @@ class PandaEnv(gym.Env):
             "image_primary": self.render(camera_name="fixed_camera"),
             "image_wrist": self.render(camera_name="wrist_camera"),
             "proprio": proprio,
+            "is_grasped": np.array([self._is_kinematically_grasped], dtype=np.float32),
             "task_completed": np.array([0.0], dtype=np.float32),
             "timestep": np.array([self.timestep], dtype=np.int32),
         }
@@ -1005,9 +1007,6 @@ class PandaEnv(gym.Env):
         action = np.asarray(action, dtype=float).ravel()
         arm_action = action[:7]
         gripper_action = action[7]
-
-
-
         if self.control_mode == 'absolute':
             # --- This is your ORIGINAL logic, used by the expert ---
             # The action is an absolute, normalized target joint position [-1, 1].
@@ -1018,54 +1017,39 @@ class PandaEnv(gym.Env):
 
 
         elif self.control_mode == 'delta':
-            # This block now handles both realistic physics and a deterministic "teleport" for testing.
-            
-            # 1. Convert the incoming normalized delta back to a physical delta
+            # This is the physically corrected delta mode.
             physical_delta = arm_action * self.ACTION_SCALING_FACTOR
-
-            # 2. Compute the desired final joint positions
             current_qpos = self.data.qpos[:7].copy()
             target_qpos = current_qpos + physical_delta
 
-            # 3. Clip the target to the physical joint limits
             joint_limits = self.model.jnt_range[:7]
             jnt_lo, jnt_hi = joint_limits[:, 0], joint_limits[:, 1]
             target_qpos = np.clip(target_qpos, jnt_lo, jnt_hi)
 
-            # 4. Check if we are in "teleport" mode for testing
-            # Check if we are in "teleport" mode for testing
             if getattr(self, 'debug_instant_move', False):
                 # --- START OF FINAL FIX ---
                 # 1. Teleport the joint to the target position
                 self.data.qpos[:7] = target_qpos
                 
                 # 2. CRITICAL: Also update the controller's target to match.
-                #    This prevents the controller from fighting the teleport in the subsequent mj_step loop.
-                #    We use the same robust mapping logic from the "else" branch.
-                jmin = joint_limits[:, 0]
-                jmax = joint_limits[:, 1]
-                denom = np.where(np.abs(jmax - jmin) > 1e-9, (jmax - jmin), 1.0)
-                norm = 2.0 * (target_qpos - jmin) / denom - 1.0
+                #    This prevents the controller from fighting the teleport.
+                denom = np.where(np.abs(jnt_hi - jnt_lo) > 1e-9, (jnt_hi - jnt_lo), 1.0)
+                norm = 2.0 * (target_qpos - jnt_lo) / denom - 1.0
                 
                 arm_ctrl_range = np.asarray(self.model.actuator_ctrlrange[:7], dtype=float)
-                act_lo = arm_ctrl_range[:, 0]
-                act_hi = arm_ctrl_range[:, 1]
+                act_lo, act_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
                 scaled_ctrl = act_lo + 0.5 * (norm + 1.0) * (act_hi - act_lo)
                 self.data.ctrl[:7] = scaled_ctrl
 
-                # 3. Update the physics state
                 mujoco.mj_forward(self.model, self.data)
                 # --- END OF FINAL FIX ---
             else:
                 # For real training: Use the physically realistic controller
-                jmin = joint_limits[:, 0]
-                jmax = joint_limits[:, 1]
-                denom = np.where(np.abs(jmax - jmin) > 1e-9, (jmax - jmin), 1.0)
-                norm = 2.0 * (target_qpos - jmin) / denom - 1.0
+                denom = np.where(np.abs(jnt_hi - jnt_lo) > 1e-9, (jnt_hi - jnt_lo), 1.0)
+                norm = 2.0 * (target_qpos - jnt_lo) / denom - 1.0
                 
                 arm_ctrl_range = np.asarray(self.model.actuator_ctrlrange[:7], dtype=float)
-                act_lo = arm_ctrl_range[:, 0]
-                act_hi = arm_ctrl_range[:, 1]
+                act_lo, act_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
                 scaled_ctrl = act_lo + 0.5 * (norm + 1.0) * (act_hi - act_lo)
                 self.data.ctrl[:7] = scaled_ctrl
 
@@ -1082,8 +1066,9 @@ class PandaEnv(gym.Env):
             
             object_pos_world = self.data.body("object").xpos.copy()
             distance = np.linalg.norm(gripper_pose[:3] - object_pos_world)
-            GRASP_THRESHOLD = 0.04
-
+            GRASP_THRESHOLD = 0.055
+            # if gripper_action > 0 and not self._is_kinematically_grasped:
+            #     print(f"[PandaEnv DEBUG] Grasp Check | Distance: {distance:.4f} | Threshold: {GRASP_THRESHOLD:.4f} | Condition Met: {distance < GRASP_THRESHOLD}")
             if not self._is_kinematically_grasped and gripper_action > 0 and distance < GRASP_THRESHOLD:
                 self._is_kinematically_grasped = True
                 
@@ -1096,12 +1081,9 @@ class PandaEnv(gym.Env):
                 object_quat_world_wxyz = self.data.body("object").xquat.copy()
                 object_quat_world_xyzw = self._mujoco_quat_to_scipy_xyzw(object_quat_world_wxyz)
                 R_world_object = R.from_quat(object_quat_world_xyzw)
-
-                # 2. Calculate offsets relative to the GRIPPER's main frame of reference (the hand)
+                
                 R_gripper_world = R_world_gripper.inv()
                 
-                # The object's position offset is now relative to the finger midpoint,
-                # but expressed in the main gripper's reference frame for stable puppeteering.
                 vec_gripper_to_midpoint = finger_midpoint - gripper_pose[:3]
                 vec_midpoint_to_object = object_pos_world - finger_midpoint
                 

@@ -249,3 +249,7 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     main(args)
+
+"""
+python -m scripts.evaluate_policy --checkpoint_path "artifacts\bc_final_balanced_v1\checkpoints\best_model.pth" --seed 777
+"""

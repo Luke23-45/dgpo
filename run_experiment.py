@@ -131,6 +131,7 @@ class DownsampleImageWrapper(gym.ObservationWrapper):
 def setup_environment(
     xml_path: str,
     seed: int,
+    control_mode: str ="absolute",
     n_envs: int = 1,
     octo_model: Optional[Any] = None,
     w_plausibility: float = 0.1,
@@ -154,7 +155,7 @@ def setup_environment(
     """
     def make_env():
         # 1. Create the base environment. It produces nested OCTO-style observations.
-        env = PandaEnv(xml_path=xml_path)
+        env = PandaEnv(xml_path=xml_path, control_mode=control_mode)
         #env = PandaEnv(xml_path=xml_path, control_mode='delta')
 
         # 2. Apply the reward wrapper. It receives the correct nested obs and can use the OCTO model.
@@ -188,26 +189,16 @@ def setup_environment(
     vec_env = make_vec_env(make_env, n_envs=n_envs, seed=seed)
 
     logger.info("Applying VecNormalize wrapper for observation and reward normalization.")
-    vec_env = VecNormalize(
-        vec_env,
-        norm_obs=False,             # <-- CHANGE THIS TO FALSE
-        norm_reward=True,           # <-- Keep this TRUE
-        clip_obs=10.0,
-        # norm_obs_keys is now irrelevant
-    )
     
-    # vec_env = VecNormalize(
-    #     vec_env,
-    #     norm_obs=True,            # Keep this True to enable normalization
-    #     norm_reward=True,
-    #     clip_obs=10.0,
-    #     norm_obs_keys=["proprio"]
-    # )
-    # Make the Absolute->Delta translation the outer wrapper (so it can read get_original_obs() etc.)
-    # vec_env = AbsoluteJointToDeltaJointWrapper(
-    #     vec_env,
-    #     action_scaling=pos_scale
-    # )
+    vec_env = VecNormalize(
+        vec_env, 
+        norm_obs=False, 
+        norm_reward=True  
+    )
+
+    if control_mode == 'delta':
+        from utils.obs_adapters import AbsoluteJointToDeltaJointWrapper
+        vec_env = AbsoluteJointToDeltaJointWrapper(vec_env, action_scaling=pos_scale)
 
     return vec_env
 

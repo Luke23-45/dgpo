@@ -93,11 +93,13 @@ class RLRewardWrapper(gym.Wrapper):
         goal_body_name: str = "goal",
         gripper_action_index: int = 7,
 
-        reach_scale: float = 2.0,       # DECREASED
-        place_scale: float = 10.0,      # DECREASED
-        grasp_reward: float = 50.0,     # INCREASED
-        lift_reward: float = 100.0,     # INCREASED
-        success_reward: float = 250.0,  # INCREASED
+        reach_scale_3d: float = 5.0,
+        reach_scale_z: float = 10.0,
+        gripper_timing_bonus: float = 2.5,
+        grasp_reward: float = 50.0,
+        lift_reward: float = 100.0,
+        success_reward: float = 250.0,
+        place_scale: float = 10.0, 
 
 
         lift_z_threshold: float = 0.45,
@@ -115,15 +117,7 @@ class RLRewardWrapper(gym.Wrapper):
         div_frame_stride: int = 1,
     ):
         super().__init__(env)
-        self._agent_obs_keys = [
-            "image_primary", "image_wrist", "proprio",
-            "task_completed", "timestep"
-        ]
-        if isinstance(self.env.observation_space, gym.spaces.Dict):
-            self.observation_space = gym.spaces.Dict({
-                k: self.env.observation_space[k] for k in self._agent_obs_keys
-                if k in self.env.observation_space.spaces
-            })
+
         # Names for MuJoCo elements
         self.ee_site_name = ee_site_name
         self.object_geom_name = object_geom_name
@@ -132,23 +126,33 @@ class RLRewardWrapper(gym.Wrapper):
         self.gripper_action_index = int(gripper_action_index)
 
         # Reward parameters
-        self.reach_scale = float(reach_scale)
-        self.place_scale = float(place_scale)
-        self.grasp_reward = float(grasp_reward)
-        self.lift_reward = float(lift_reward)
-        self.success_reward = float(success_reward)
         self.lift_z_threshold = float(lift_z_threshold)
         self.grasp_distance_threshold = float(grasp_distance_threshold)
         self.success_distance_threshold = float(success_distance_threshold)
         self.gripper_threshold = float(gripper_threshold)
         self.action_penalty = float(action_penalty)
         self.base_reward_weight = float(base_reward_weight)
+        self.reach_scale_3d = float(reach_scale_3d)
+        self.reach_scale_z = float(reach_scale_z)
+        self.gripper_timing_bonus = float(gripper_timing_bonus)
+        
+        # This line was missing from the original file, we re-add it.
+        self.place_scale = float(place_scale)
 
+        # Keep these lines:
+        self.grasp_reward = float(grasp_reward)
+        self.lift_reward = float(lift_reward)
+        self.success_reward = float(success_reward)
+
+        # INSERT these new lines for state tracking:
+        self.z_reach_threshold = 0.05
+        self._gripper_timing_bonus_achieved = False
         # Internal state tracking for one-time rewards and dense shaping
         self._last_dist_ee_to_cube: float = 0.0
         self._last_dist_cube_to_goal: float = 0.0
         self._grasp_achieved: bool = False
         self._lift_achieved: bool = False
+        self._last_dist_ee_to_cube_z: float = 0.0
 
         # Cache for one-time warnings to avoid log spam
         self._warned = {"ee": False, "geom": False, "goal": False, "gripper": False}
@@ -169,9 +173,7 @@ class RLRewardWrapper(gym.Wrapper):
         self.div_frame_stride = max(1, div_frame_stride)
         self._rng = jax.random.PRNGKey(0)
 
-    def _filter_obs(self, obs: Dict[str, Any]) -> Dict[str, Any]:
-        """Strips out all expert/ground-truth keys from the observation dictionary."""
-        return {k: obs[k] for k in self._agent_obs_keys if k in obs}
+
     
     def _safe_site_pos(self, name: str) -> Optional[np.ndarray]:
         """Safely get a site's position using the core MuJoCo API."""
@@ -238,7 +240,7 @@ class RLRewardWrapper(gym.Wrapper):
         # Reset internal state flags
         self._grasp_achieved = False
         self._lift_achieved = False
-
+        self._gripper_timing_bonus_achieved = False
         # Recalculate initial distances for dense reward shaping
         ee_pos = self._safe_site_pos(self.ee_site_name)
         cube_pos = self._safe_geom_pos(self.object_geom_name)
@@ -246,6 +248,7 @@ class RLRewardWrapper(gym.Wrapper):
 
         if ee_pos is not None and cube_pos is not None:
             self._last_dist_ee_to_cube = _safe_norm(ee_pos - cube_pos)
+            self._last_dist_ee_to_cube_z = abs(ee_pos[2] - cube_pos[2])
         else:
             self._last_dist_ee_to_cube = 0.0
 
@@ -254,7 +257,7 @@ class RLRewardWrapper(gym.Wrapper):
         else:
             self._last_dist_cube_to_goal = 0.0
         self._episode_trajectory = []
-        return self._filter_obs(obs), info
+        return obs, info
 
     def _calculate_rewards_and_info(
         self, obs: Dict[str, Any], action: np.ndarray, base_reward: float, terminated: bool, info: Dict[str, Any]
@@ -284,57 +287,71 @@ class RLRewardWrapper(gym.Wrapper):
                 "R_success": 0.0, "R_penalty": R_penalty, "warning": "degraded_reward"
             })
             return reward_total, terminated, info
-
+        #--------------------
         # -- R_reach: Dense reward for moving EE to the cube --
         dist_ee_to_cube = _safe_norm(ee_pos - cube_pos)
-        R_reach = (self._last_dist_ee_to_cube - dist_ee_to_cube) * self.reach_scale
-        self._last_dist_ee_to_cube = dist_ee_to_cube
+        dist_ee_to_cube_z = abs(ee_pos[2] - cube_pos[2])
+        gripper_action_command = a_np[self.gripper_action_index]
+        # Ensure is_grasped is a boolean for clean logic
+        is_grasped = obs.get("is_grasped", np.array([0.0]))[0] > 0.5
 
-        # -- Gripper state --
-        if a_np.size > self.gripper_action_index:
-            gripper_value = a_np[self.gripper_action_index]
+        # --- 1. Two-Stage Reach Reward (R_reach) ---
+        R_reach = 0.0
+        if dist_ee_to_cube < self.z_reach_threshold:
+            # Stage 2: Very close. Reward descending onto the cube (Z-axis only).
+            R_reach = (self._last_dist_ee_to_cube_z - dist_ee_to_cube_z) * self.reach_scale_z
         else:
-            gripper_value = a_np[-1]
-            if not self._warned["gripper"]:
-                logger.warning(
-                    f"[RewardWrapper] gripper_action_index={self.gripper_action_index} "
-                    f"out of bounds for action size {a_np.size}; using last element."
-                )
-                self._warned["gripper"] = True
-        is_gripping = float(gripper_value) > self.gripper_threshold
+            # Stage 1: Far away. Reward reducing the 3D distance.
+            R_reach = (self._last_dist_ee_to_cube - dist_ee_to_cube) * self.reach_scale_3d
+            self._gripper_timing_bonus_achieved = False
+        
+        # Update distance trackers for the next step
+        self._last_dist_ee_to_cube = dist_ee_to_cube
+        self._last_dist_ee_to_cube_z = dist_ee_to_cube_z
 
-        # -- R_grasp: Sparse reward for grasping the cube --
+        # --- 2. One-Time Gripper Timing Bonus (R_gripper_timing) ---
+        R_gripper_timing = 0.0
+        is_closing = gripper_action_command > self.gripper_threshold
+        if not self._gripper_timing_bonus_achieved and is_closing and dist_ee_to_cube < self.grasp_distance_threshold:
+            R_gripper_timing = self.gripper_timing_bonus
+            self._gripper_timing_bonus_achieved = True
+
+        # --- 3. Milestone Grasp Reward (R_grasp) ---
         R_grasp = 0.0
-        if is_gripping and dist_ee_to_cube < self.grasp_distance_threshold and not self._grasp_achieved:
+        if is_grasped and not self._grasp_achieved:
             R_grasp = self.grasp_reward
             self._grasp_achieved = True
 
-        # -- R_lift: Sparse reward for lifting the cube --
+        # --- 4. Milestone Lift Reward (R_lift) ---
         is_lifted = cube_pos[2] > self.lift_z_threshold
         R_lift = 0.0
         if self._grasp_achieved and is_lifted and not self._lift_achieved:
             R_lift = self.lift_reward
             self._lift_achieved = True
-
-        # -- R_place: Dense reward for moving cube to the goal --
+        
+        # --- 5. Place Reward (R_place) ---
         dist_cube_to_goal = _safe_norm(cube_pos[:2] - goal_pos[:2])
         R_place = 0.0
-        if self._grasp_achieved and is_lifted:
+        if self._lift_achieved: # Start giving this reward only after lifting is confirmed
             R_place = (self._last_dist_cube_to_goal - dist_cube_to_goal) * self.place_scale
-            self._last_dist_cube_to_goal = dist_cube_to_goal
-
-        # -- R_success: Sparse reward for task completion --
+        self._last_dist_cube_to_goal = dist_cube_to_goal
+        
+        # --- 6. Final Success Reward (R_success) ---
         R_success = 0.0
-        if self._grasp_achieved and dist_cube_to_goal < self.success_distance_threshold:
+        is_opening = gripper_action_command < -self.gripper_threshold
+        # Success is: having lifted, being near the goal, and commanding the gripper to open.
+        if self._lift_achieved and dist_cube_to_goal < self.success_distance_threshold and is_opening:
             R_success = self.success_reward
-            terminated = True  # Terminate episode on success
+            terminated = True
+            info["is_success"] = True
 
-        # -- R_penalty: Penalty for large actions --
+        # --- 7. Action Penalty (R_penalty) ---
         R_penalty = -self.action_penalty * float(np.sum(np.square(a_np)))
+        
+
         R_guidance_dense = 0.0
         if self.scripted_expert and self.w_guidance_dense > 0.0:
             try:
-                # Get the ideal pose from the expert for the current state
                 ideal_pose, _ = self.scripted_expert.get_target_pose(
                     obs['ee_pose_world'],
                     obs['object_pos_world'],
@@ -355,8 +372,11 @@ class RLRewardWrapper(gym.Wrapper):
             except Exception as e:
                 logger.warning(f"Could not compute dense guidance reward: {e}")
         # -- Total Reward --
+        R_proximity = 0.0      
+        R_proximity = 10.0 * np.exp(-20.0 * dist_ee_to_cube)
+
         reward_total = (
-            R_reach + R_grasp + R_lift + R_place + R_success + R_penalty +
+            R_proximity + R_reach + R_gripper_timing + R_grasp + R_lift + R_place + R_success + R_penalty + 
             R_guidance_dense + 
             self.base_reward_weight * float(base_reward)
         )
@@ -364,17 +384,19 @@ class RLRewardWrapper(gym.Wrapper):
 
         # -- Update info dictionary for logging/debugging --
         info.update({
+            "R_proximity": float(R_proximity),
+            "R_reach": float(R_reach),
             "R_reach": float(R_reach),
             "R_grasp": float(R_grasp),
+            "R_gripper_timing": float(R_gripper_timing),
             "R_lift": float(R_lift),
             "R_place": float(R_place),
             "R_success": float(R_success),
             "R_penalty": float(R_penalty),
             "dist_ee_to_cube": float(dist_ee_to_cube),
             "dist_cube_to_goal": float(dist_cube_to_goal),
-            "is_gripping": bool(is_gripping),
             "is_lifted": bool(is_lifted),
-            "gripper_value": float(gripper_value),
+            "gripper_value": float(gripper_action_command),
         })
 
         return reward_total, terminated, info
@@ -426,7 +448,7 @@ class RLRewardWrapper(gym.Wrapper):
       
       
         reward_total = float(np.nan_to_num(reward_total))
-        return self._filter_obs(obs), reward_total, terminated, truncated, info
+        return obs, reward_total, terminated, truncated, info
     def _print_dict_structure(self, d, indent=0):
         """Helper to recursively print the structure of a dictionary for debugging."""
         for key, value in d.items():

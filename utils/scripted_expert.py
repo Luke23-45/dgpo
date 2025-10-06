@@ -17,7 +17,7 @@ class ExpertConfig:
     pos_tolerance: float = 0.015
     workspace: dict = None
     grasp_offset_z: float = 0.005  # Small downward offset for precise top-grasp alignment (accounts for attachment site or finger clearance)
-    descent_xy_offset: np.ndarray = np.array([0.015, 0.0, 0.0])  # Lateral shift during descent to reduce finger-cube interpenetration (tune based on finger width)
+    descent_xy_offset: np.ndarray = np.array([0.0, 0.0, 0.0])  # Lateral shift during descent to reduce finger-cube interpenetration (tune based on finger width)
     max_grasp_retries: int = 2      # Number of retry attempts if grasp fails
     lift_duration_steps: int = 40   # Increased for smoother, more stable lift
     move_duration_steps: int = 60   # Ensure ample time for horizontal moves
