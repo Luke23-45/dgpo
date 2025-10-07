@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 import torch
 from stable_baselines3 import PPO
-
+from run_experiment import setup_environment
 # --- Project Imports ---
 # This makes imports work reliably when running as a script
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -79,16 +79,29 @@ def main(args: argparse.Namespace):
             log.error(f"Could not load OCTO model, divergence reward will be disabled. Error: {e}")
             args.w_plausibility = 0.0
 
-    log.info("Initializing environment with full wrapper stack...")
-    # The environment MUST have the same wrapper stack as used in training
-    env = PandaEnv(xml_path=args.xml_path, control_mode='delta')
-    env = RLRewardWrapper(
-        env,
-        w_plausibility=0.0,
-        scripted_expert=ScriptedExpert(ObjectProfile(size=np.array([0.04, 0.04, 0.04]), grasp_width_normalized=0.6)),
-        w_guidance_dense=5.0 # Use the same weight as in training
+
+
+    # --- START OF NEW, CORRECTED BLOCK ---
+    log.info("Initializing environment using the centralized setup_environment function...")
+
+    # We create a single, non-vectorized environment for evaluation.
+    # We explicitly set control_mode to 'absolute' to match training.
+    # We also disable the Monitor wrapper, as it's not needed for evaluation rollouts.
+    env = setup_environment(
+        xml_path=args.xml_path,
+        seed=args.seed,
+        control_mode='absolute',  # <-- THE CRITICAL FIX
+        n_envs=1,
+        add_monitor_wrapper=False, # We don't need episode logging for a single rollout
+        # The reward weights here are just placeholders for the wrapper,
+        # since we log the info dict directly. Setting them to zero is fine.
+        w_guidance=0.0,
+        w_guidance_dense=0.0,
+        grasp_reward=0.0,
+        lift_reward=0.0,
+        success_reward=0.0,
     )
-    env = OctoToSB3Adapter(env)
+
 
     # --- 3. Load Trained PPO Agent ---
     log.info(f"Loading trained PPO agent from: {checkpoint_path}")
@@ -107,25 +120,31 @@ def main(args: argparse.Namespace):
 
     # --- 4. Setup Video Writer ---
     # We get the frame by calling the render method of the *base* environment
-    frame = env.unwrapped.render() 
+    frame = env.render()
     h, w, _ = frame.shape
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     video_writer = cv2.VideoWriter(str(video_path), fourcc, 30, (w, h))
 
     # --- 5. Main Evaluation Loop ---
-    obs, _ = env.reset(seed=args.seed)
+    obs = env.reset()
     total_reward = 0.0
     try:
         for t in range(args.max_steps):
             # Use deterministic=True for evaluation to get the policy's best action
             action, _states = agent.predict(obs, deterministic=True)
+
             
-            obs, reward, terminated, truncated, info = env.step(action)
-            total_reward += reward
-            
+            obs, rewards, dones, infos = env.step(action)
+
+            # Since we are evaluating with n_envs=1, we need to extract the
+            # single element from the returned arrays.
+            reward = rewards[0]
+            done = dones[0]
+            info = infos[0]
+
             # Log the detailed reward components from the wrapper's info dict
             reward_info = {k: v for k, v in info.items() if k.startswith("R_")}
-            guidance_error = info.get('guidance_pos_error', 'N/A') # Get the error if it exists
+            guidance_error = info.get('guidance_pos_error', 'N/A')
             if isinstance(guidance_error, float):
                 guidance_error_str = f"{guidance_error:.4f}"
             else:
@@ -133,11 +152,11 @@ def main(args: argparse.Namespace):
 
             log.info(f"Step {t+1} | Reward: {reward:.3f} | Expert_Error: {guidance_error_str} | Details: {reward_info}")
 
-            frame_rgb = env.unwrapped.render()
+            frame_rgb = env.render()
             frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
             video_writer.write(frame_bgr)
 
-            if terminated or truncated:
+            if done:
                 log.info(f"Episode finished after {t+1} steps. Final total reward: {total_reward:.3f}")
                 break
         
@@ -185,7 +204,7 @@ if __name__ == "__main__":
         help="Maximum number of steps for the evaluation episode."
     )
     parser.add_argument(
-        "--w_plausibility", type=float, default=0.1,
+        "--w_plausibility", type=float, default=0.0,
         help="Weight for the OCTO divergence reward. Should match the training config."
     )
     
@@ -199,6 +218,6 @@ python -m run_experiment --run_name "rl_finetune_w_scripted_expert_v2" --bc_init
 """
 
 """
-python -m scripts.evaluate_rl_policy --checkpoint_path "trained_models\hybrid_stage0_no_guidance\backups\latest_backup.zip" --seed 777
+python -m scripts.evaluate_rl_policy --checkpoint_path "trained_models\advised_stage0_no_guidance_v1\backups\latest_backup.zip" --seed 777
 
 """

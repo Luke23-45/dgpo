@@ -36,7 +36,7 @@ import sys
 import json
 from utils.scripted_expert import ScriptedExpert,ObjectProfile 
 from stable_baselines3.common.vec_env import VecNormalize
-
+from stable_baselines3.common.monitor import Monitor
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 try:
     from utils.transfer_bc_to_ppo import transfer_bc_weights
@@ -148,6 +148,7 @@ def setup_environment(
     enable_downsample: bool = False,
     primary_res: Tuple[int, int] = (128, 128),
     wrist_res: Tuple[int, int] = (96, 96),
+    add_monitor_wrapper: bool = True 
 ):
     """
     Create a vectorized environment with the correct wrapper order, using the
@@ -185,15 +186,15 @@ def setup_environment(
             env = DownsampleImageWrapper(env, res_map)
 
         return env
-
-    vec_env = make_vec_env(make_env, n_envs=n_envs, seed=seed)
+    wrapper = Monitor if add_monitor_wrapper else None
+    vec_env = make_vec_env(make_env, n_envs=n_envs, seed=seed, wrapper_class=wrapper)
 
     logger.info("Applying VecNormalize wrapper for observation and reward normalization.")
     
     vec_env = VecNormalize(
         vec_env, 
         norm_obs=False, 
-        norm_reward=True  
+        norm_reward=True
     )
 
     if control_mode == 'delta':

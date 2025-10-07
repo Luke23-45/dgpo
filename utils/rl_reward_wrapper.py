@@ -145,6 +145,7 @@ class RLRewardWrapper(gym.Wrapper):
         self.success_reward = float(success_reward)
 
         # INSERT these new lines for state tracking:
+        self.proximity_gate_threshold = 0.1 
         self.z_reach_threshold = 0.05
         self._gripper_timing_bonus_achieved = False
         # Internal state tracking for one-time rewards and dense shaping
@@ -289,67 +290,59 @@ class RLRewardWrapper(gym.Wrapper):
             return reward_total, terminated, info
         #--------------------
         # -- R_reach: Dense reward for moving EE to the cube --
+
         dist_ee_to_cube = _safe_norm(ee_pos - cube_pos)
         dist_ee_to_cube_z = abs(ee_pos[2] - cube_pos[2])
         gripper_action_command = a_np[self.gripper_action_index]
-        # Ensure is_grasped is a boolean for clean logic
         is_grasped = obs.get("is_grasped", np.array([0.0]))[0] > 0.5
 
-        # --- 1. Two-Stage Reach Reward (R_reach) ---
-        R_reach = 0.0
-        if dist_ee_to_cube < self.z_reach_threshold:
-            # Stage 2: Very close. Reward descending onto the cube (Z-axis only).
-            R_reach = (self._last_dist_ee_to_cube_z - dist_ee_to_cube_z) * self.reach_scale_z
-        else:
-            # Stage 1: Far away. Reward reducing the 3D distance.
-            R_reach = (self._last_dist_ee_to_cube - dist_ee_to_cube) * self.reach_scale_3d
-            self._gripper_timing_bonus_achieved = False
-        
-        # Update distance trackers for the next step
-        self._last_dist_ee_to_cube = dist_ee_to_cube
-        self._last_dist_ee_to_cube_z = dist_ee_to_cube_z
-
-        # --- 2. One-Time Gripper Timing Bonus (R_gripper_timing) ---
-        R_gripper_timing = 0.0
-        is_closing = gripper_action_command > self.gripper_threshold
-        if not self._gripper_timing_bonus_achieved and is_closing and dist_ee_to_cube < self.grasp_distance_threshold:
-            R_gripper_timing = self.gripper_timing_bonus
-            self._gripper_timing_bonus_achieved = True
-
-        # --- 3. Milestone Grasp Reward (R_grasp) ---
+        # Initialize all reward components to zero
+        R_reach_far = 0.0
+        R_align_grasp = 0.0
         R_grasp = 0.0
+        R_lift = 0.0
+        R_place = 0.0
+        R_success = 0.0
+        R_guidance_dense = 0.0
+        R_proximity = 10.0 * np.exp(-20.0 * dist_ee_to_cube)
+
+        # --- STAGED REWARD LOGIC ---
+        if not self._grasp_achieved:
+            if dist_ee_to_cube > self.proximity_gate_threshold:
+                # STAGE 1: APPROACH PHASE (Far from cube)
+                R_reach_far = (self._last_dist_ee_to_cube - dist_ee_to_cube) * self.reach_scale_3d
+                self._gripper_timing_bonus_achieved = False # Reset bonus if we move away
+            else:
+                # STAGE 2: GRASP ALIGNMENT PHASE (Close to cube)
+                z_dist_reward = (self._last_dist_ee_to_cube_z - dist_ee_to_cube_z) * self.reach_scale_z
+                
+                gripper_timing_bonus = 0.0
+                is_closing = gripper_action_command > self.gripper_threshold
+                if not self._gripper_timing_bonus_achieved and is_closing and dist_ee_to_cube < self.grasp_distance_threshold:
+                    gripper_timing_bonus = self.gripper_timing_bonus  # CORRECTED: Assign value, not self to self
+                    self._gripper_timing_bonus_achieved = True
+                
+                R_align_grasp = z_dist_reward + gripper_timing_bonus
+        
+        # --- MILESTONE & LATER-STAGE REWARDS ---
         if is_grasped and not self._grasp_achieved:
             R_grasp = self.grasp_reward
             self._grasp_achieved = True
 
-        # --- 4. Milestone Lift Reward (R_lift) ---
         is_lifted = cube_pos[2] > self.lift_z_threshold
-        R_lift = 0.0
         if self._grasp_achieved and is_lifted and not self._lift_achieved:
             R_lift = self.lift_reward
             self._lift_achieved = True
         
-        # --- 5. Place Reward (R_place) ---
         dist_cube_to_goal = _safe_norm(cube_pos[:2] - goal_pos[:2])
-        R_place = 0.0
-        if self._lift_achieved: # Start giving this reward only after lifting is confirmed
+        if self._lift_achieved:
             R_place = (self._last_dist_cube_to_goal - dist_cube_to_goal) * self.place_scale
-        self._last_dist_cube_to_goal = dist_cube_to_goal
         
-        # --- 6. Final Success Reward (R_success) ---
-        R_success = 0.0
-        is_opening = gripper_action_command < -self.gripper_threshold
-        # Success is: having lifted, being near the goal, and commanding the gripper to open.
-        if self._lift_achieved and dist_cube_to_goal < self.success_distance_threshold and is_opening:
+        if self._lift_achieved and dist_cube_to_goal < self.success_distance_threshold and not is_grasped:
             R_success = self.success_reward
             terminated = True
             info["is_success"] = True
-
-        # --- 7. Action Penalty (R_penalty) ---
-        R_penalty = -self.action_penalty * float(np.sum(np.square(a_np)))
-        
-
-        R_guidance_dense = 0.0
+            
         if self.scripted_expert and self.w_guidance_dense > 0.0:
             try:
                 ideal_pose, _ = self.scripted_expert.get_target_pose(
@@ -371,28 +364,29 @@ class RLRewardWrapper(gym.Wrapper):
 
             except Exception as e:
                 logger.warning(f"Could not compute dense guidance reward: {e}")
-        # -- Total Reward --
-        R_proximity = 0.0      
-        R_proximity = 10.0 * np.exp(-20.0 * dist_ee_to_cube)
+        # --- Update trackers and Final Composition ---
+        self._last_dist_ee_to_cube = dist_ee_to_cube
+        self._last_dist_ee_to_cube_z = dist_ee_to_cube_z
+        self._last_dist_cube_to_goal = dist_cube_to_goal
+        
+        R_penalty = -self.action_penalty * float(np.sum(np.square(a_np)))
 
-        reward_total = (
-            R_proximity + R_reach + R_gripper_timing + R_grasp + R_lift + R_place + R_success + R_penalty + 
-            R_guidance_dense + 
+        reward_total = float(np.nan_to_num(R_proximity +
+            R_reach_far + R_align_grasp + R_grasp + R_lift + R_place + 
+            R_success + R_penalty + R_guidance_dense +
             self.base_reward_weight * float(base_reward)
-        )
-        reward_total = float(np.nan_to_num(reward_total))
+        ))
 
-        # -- Update info dictionary for logging/debugging --
         info.update({
             "R_proximity": float(R_proximity),
-            "R_reach": float(R_reach),
-            "R_reach": float(R_reach),
+            "R_reach_far": float(R_reach_far),
+            "R_align_grasp": float(R_align_grasp),
             "R_grasp": float(R_grasp),
-            "R_gripper_timing": float(R_gripper_timing),
             "R_lift": float(R_lift),
             "R_place": float(R_place),
             "R_success": float(R_success),
             "R_penalty": float(R_penalty),
+            "R_guidance_dense": float(R_guidance_dense),
             "dist_ee_to_cube": float(dist_ee_to_cube),
             "dist_cube_to_goal": float(dist_cube_to_goal),
             "is_lifted": bool(is_lifted),
