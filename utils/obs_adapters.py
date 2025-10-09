@@ -236,95 +236,89 @@ class VecOctoToSB3Adapter(VecEnvWrapper):
         return new_obs
 
 
-# In utils/obs_adapters.py
 
 class AbsoluteJointToDeltaJointWrapper(VecEnvWrapper):
     """
-    Robust VecEnv wrapper that translates policy absolute-joint outputs
-    into delta joint commands expected by a 'delta' PandaEnv.
+    Converts policy absolute-joint outputs (normalized [-1,1])
+    into delta joint commands expected by a delta-controlled PandaEnv.
+    THIS IS THE FINAL, DEFINITIVELY CORRECTED VERSION.
     """
-    def __init__(self,
-                 venv: VecEnv,
-                 action_scaling: float,
-                 safety_clip: float = 1.0,
-                 debug: bool = False):
+
+    # REPLACE the entire __init__ method with this one.
+    def __init__(self, venv: VecEnv, action_scaling: float, safety_clip: float = 1.0, debug: bool = False):
         super().__init__(venv)
         self.action_scaling = float(action_scaling)
         self.safety_clip = float(safety_clip)
-        self.debug = bool(debug)
-        self._last_obs = None
+        self.debug = debug
+        self.expected_joints = 7
 
+        # --- Definitive logic to access Mujoco joint limits robustly ---
         try:
-            action_dim = int(self.action_space.shape[-1])
-            self.expected_joints = action_dim - 1
-        except Exception:
-            self.expected_joints = 7
-            logger.warning("Could not infer action_dim; defaulting expected_joints=7")
-
-        self.joint_slice = slice(0, self.expected_joints)
-        self._is_normalized = isinstance(self.venv, VecNormalize)
-
-    def _find_get_original_obs_handle(self):
-        curr = self.venv
-        while curr is not None:
-            if hasattr(curr, "get_original_obs"):
-                return curr
-            if hasattr(curr, "venv"):
-                curr = getattr(curr, "venv")
-            elif hasattr(curr, "env"):
-                curr = getattr(curr, "env")
+            # Start with the outermost VecEnv
+            current_env = self.venv
+            
+            # 1. First, unwrap all VecEnvWrappers (like VecNormalize)
+            while hasattr(current_env, 'venv'):
+                current_env = current_env.venv
+                
+            # 2. Now we should have a base VecEnv (like DummyVecEnv).
+            #    Get the first underlying gym environment.
+            if hasattr(current_env, 'envs'):
+                env = current_env.envs[0]
             else:
-                curr = None
-        return None
+                # Should not happen in SB3, but as a fallback
+                env = current_env
 
-    def _get_latest_physical_obs(self):
-        getter_obj = self._find_get_original_obs_handle()
-        if getter_obj is not None:
-            return getter_obj.get_original_obs()
-        
-        if self._last_obs is not None:
-            return self._last_obs
-        
-        raise RuntimeError("AbsoluteJointToDeltaJointWrapper: no physical observation available.")
+            # 3. Finally, unwrap all gym.Wrappers (like Monitor)
+            while hasattr(env, 'env'):
+                env = env.env
+            
+            # 4. We now have the true base PandaEnv instance.
+            model = env.model
+            self.joint_limits = np.array(model.jnt_range[:self.expected_joints])
+            self.jnt_lo, self.jnt_hi = self.joint_limits[:, 0], self.joint_limits[:, 1]
+            logger.info("Successfully loaded joint limits from MuJoCo model.")
+        except Exception as e:
+            logger.warning(f"Could not access joint limits from env model: {e}. Using fallback.")
+            self.jnt_lo = np.full(self.expected_joints, -1.0)
+            self.jnt_hi = np.full(self.expected_joints, 1.0)
+
+        # Calling reset is good practice for initialization.
+        self.venv.reset()
+
+    def _get_current_physical_qpos(self) -> np.ndarray:
+        """
+        Gets the ground-truth joint positions for all environments directly
+        from their simulation `data` objects. This is the only guaranteed
+        up-to-date source of the physical state.
+        """
+        qpos_list = [env.unwrapped.data.qpos[:self.expected_joints].copy() for env in self.venv.envs]
+        return np.stack(qpos_list, axis=0)
 
     def reset(self):
-        self._last_obs = self.venv.reset()
-        return self._last_obs
-
+        return self.venv.reset()
 
     def step_async(self, actions: np.ndarray):
         actions = np.asarray(actions, dtype=np.float32)
         if actions.ndim == 1:
-            actions = np.expand_dims(actions, 0)
+            actions = actions[None, :]
 
-        # Correctly get the un-normalized "physical" observation.
-        if self._is_normalized:
-            obs_phys = self.venv.get_original_obs()
-        else:
-            obs_phys = self._last_obs
-        
-        current_proprio = np.asarray(obs_phys["proprio"], dtype=np.float32)
-        if current_proprio.ndim == 1:
-            current_proprio = np.expand_dims(current_proprio, 0)
-
-        current_qpos = current_proprio[:, self.joint_slice]
-
-        arm_targets_actual = actions[:, :self.expected_joints]
+        normalized_target_qpos = actions[:, :self.expected_joints]
         gripper_targets = actions[:, self.expected_joints:]
 
-        # Calculate the required physical delta (in radians)
-        required_physical_delta = arm_targets_actual - current_qpos
+        physical_target_qpos = self.jnt_lo + 0.5 * (np.clip(normalized_target_qpos, -1.0, 1.0) + 1.0) * (self.jnt_hi - self.jnt_lo)
+        
+        # This helper now correctly returns shape (num_envs, 7)
+        current_physical_qpos = self._get_current_physical_qpos()
 
-        # Convert the physical delta to a normalized delta using the scaling factor
-        normalized_delta = required_physical_delta / self.action_scaling
-
-        # Form the final action with the normalized delta
-        final_actions = np.concatenate([normalized_delta, gripper_targets], axis=1)
+        # The subtraction is now correctly (num_envs, 7) - (num_envs, 7)
+        required_physical_delta = physical_target_qpos - current_physical_qpos
+        
+        final_delta_action = required_physical_delta / self.action_scaling
+        final_actions = np.concatenate([final_delta_action, gripper_targets], axis=1)
         final_actions = np.clip(final_actions, -self.safety_clip, self.safety_clip)
 
         self.venv.step_async(final_actions)
 
     def step_wait(self):
-        obs, rewards, dones, infos = self.venv.step_wait()
-        self._last_obs = obs
-        return obs, rewards, dones, infos
+        return self.venv.step_wait()

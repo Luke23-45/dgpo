@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation as R
 import cv2
 from dataclasses import dataclass, field 
 from typing import Optional
-
+from scipy.spatial.transform import Rotation, Slerp
 @dataclass
 class RenderPostConfig:
     """
@@ -168,7 +168,10 @@ class PandaEnv(gym.Env):
     CAM_MIN_FOVY = 25.0      # Min zoom
     CAM_MAX_FOVY = 90.0      # Max zoom (wide-angle)
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+    ACTION_SCALING_FACTOR = 0.05
 
+
+    # REPLACE THE ENTIRE __init__ METHOD WITH THIS
     def __init__(
             self,
             xml_path: str = "envs/panda_pick_place.xml",
@@ -176,18 +179,22 @@ class PandaEnv(gym.Env):
             dr_config: DomainRandomizationConfig = None,
             enable_domain_randomization: bool = True,
             post_config: RenderPostConfig = None,
+            control_mode: str = "absolute",
         ):
         super().__init__()
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
-        # --- Load model and data ---
+        assert control_mode in ["absolute", "delta"], "control_mode must be 'absolute' or 'delta'"
+        self.control_mode = control_mode
+
+        # 1. Load Model (Must be first)
         try:
             self.model = mujoco.MjModel.from_xml_path(xml_path)
             self.data = mujoco.MjData(self.model)
         except Exception as e:
             raise FileNotFoundError(f"Could not load MuJoCo XML from '{xml_path}'. Error: {e}")
 
-        # --- Renderer ---
+        # 2. Initialize Renderer and Configs
         self.render_mode = render_mode
         try:
             self.renderer = mujoco.Renderer(self.model, height=256, width=256)
@@ -195,30 +202,55 @@ class PandaEnv(gym.Env):
             warnings.warn("mujoco.Renderer not available — running headless.")
             self.renderer = None
         self.post = post_config or RenderPostConfig()
-        # --- Episode bookkeeping ---
-        self.max_episode_steps = 250
+        
+        # 3. Initialize Episode Bookkeeping and RNG
+        self.max_episode_steps = 400
         self.timestep = 0
-
-        # --- Define Observation and Action Spaces (CRITICAL SECTION) ---
-        self._define_spaces()
-
-        # --- Random Number Generator ---
         self.np_random, _ = seeding.np_random(None)
         self.enable_domain_randomization = enable_domain_randomization
         self.dr_config = dr_config or DomainRandomizationConfig()
 
-        # Cache IDs of elements to be randomized for performance
+        # 4. Consolidated Block: Cache all MuJoCo IDs and initialize state
+        #    This block runs AFTER the model is loaded and BEFORE spaces are defined.
         self._cache_dr_element_ids()
-
-
-        self.ee_site_name = "attachment_site"
-        self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.ee_site_name)
+        self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
         if self.ee_site_id == -1:
-            raise ValueError(f"Site '{self.ee_site_name}' not found in the MuJoCo model.")
+            raise ValueError("Site 'attachment_site' not found in the MuJoCo model.")
 
-
-
-
+        self.object_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
+        if self.object_joint_id == -1:
+            raise ValueError("Joint 'object_joint' not found in the MuJoCo model.")
+        self.object_qpos_addr = self.model.jnt_qposadr[self.object_joint_id]
+        
+        self.object_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "object_geom")
+        if self.object_geom_id == -1:
+            raise ValueError("Geom 'object_geom' not found in the XML.")
+            
+        self.left_touch_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "left_finger_touch_sensor")
+        self.right_touch_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "right_finger_touch_sensor")
+        if self.left_touch_sensor_id == -1 or self.right_touch_sensor_id == -1:
+            raise ValueError("Touch sensors for fingertips not found. Check the XML.")
+            
+        self.left_finger_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_finger")
+        self.right_finger_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "right_finger")
+        if self.left_finger_id == -1 or self.right_finger_id == -1:
+            raise ValueError("Could not find 'left_finger' or 'right_finger' bodies in the XML.")
+        self.left_force_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "left_finger_force_sensor")
+        self.right_force_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "right_finger_force_sensor")
+        if self.left_force_sensor_id == -1 or self.right_force_sensor_id == -1:
+            raise ValueError("Force sensors for fingertips not found. Check the XML.")
+            
+        self.clutter_joints = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "clutter_box_joint"),
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "clutter_cylinder_joint"),
+        ]
+        if any(jid == -1 for jid in self.clutter_joints):
+            warnings.warn("One or more clutter object joints not found. Clutter will be disabled.")
+            self.clutter_joints = []
+        self._is_physically_grasped = False
+        
+        # 5. Define Spaces (Must be last)
+        self._define_spaces()
 
     def _cache_dr_element_ids(self):
         """Finds and caches the integer IDs of all elements used in DR."""
@@ -252,7 +284,17 @@ class PandaEnv(gym.Env):
         self.dr_config.table_textures = [n for n in self.dr_config.table_textures if n in self._dr_mat_ids]
         self.dr_config.floor_textures = [n for n in self.dr_config.floor_textures if n in self._dr_mat_ids]
     # ---------- Photometric helpers (sRGB/linear, exposure, tone map) ----------
-
+    def set_object_size(self, size: np.ndarray):
+        """
+        Dynamically sets the size of the object geom for the current episode.
+        NOTE: MuJoCo geoms are defined by half-extents (half-widths).
+        """
+        size = np.asarray(size, dtype=float)
+        if size.shape != (3,):
+            raise ValueError(f"Size must be a 3-element array, but got shape {size.shape}")
+        
+        # We need to set the geom_size to half of the full dimension
+        self.model.geom_size[self.object_geom_id] = size / 2.0
     @staticmethod
     def _srgb_to_linear(img: np.ndarray) -> np.ndarray:
         """img in [0,1] sRGB -> linear RGB (float32)."""
@@ -570,34 +612,34 @@ class PandaEnv(gym.Env):
             debug_info["bounds"] = {"u": u, "v": v, "adaptive_margin": adaptive_margin, "width": width, "height": height}
         
         return is_visible, debug_info
-  
-  
+
     def _define_spaces(self):
         """
-        Defines observation and action spaces. This version provides all keys
-        that are directly used by the OCTO expert pipeline.
+        Defines observation and action spaces.
         """
+        # START OF MODIFIED BLOCK
+        proprio_dim = 7 + 7 + 2 + 6 # 7 qpos, 7 qvel, 2 touch, 6 force (3D x 2)
         self.observation_space = spaces.Dict({
             # --- Core Visual Modalities (HWC format) ---
             "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
             "image_wrist":   spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
             
             # --- Proprioceptive State ---
-            # The primary 14D proprio state (7 joint pos + 7 joint vel)
-            "proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
+            # 7 jnt_pos + 7 jnt_vel + 2 touch_sensor + 2x3D force_sensor
+            "proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(proprio_dim,), dtype=np.float32),
+            "is_grasped": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
             
             # --- Additional State Information for Expert ---
-            # A scalar indicating if the task is complete (0.0 or 1.0)
             "task_completed": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
             
             # Current timestep in the episode, shaped as a 1D array
             "timestep": spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(1,), dtype=np.int32),
         })
+        # END OF MODIFIED BLOCK
         
-        # Action space: 7 arm joint deltas + 1 gripper command
-        act_dim = int(getattr(self.model, "nu", 8))
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
-        
+        act_dim = 8
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)  
+
     def _randomize_photometrics(self, light_target: np.ndarray):
             """
             Implements an advanced 3-point lighting strategy with material randomization
@@ -686,58 +728,70 @@ class PandaEnv(gym.Env):
             # print(f"DEBUG: Fill Light DIR: {np.round(self.model.light_dir[self.fill_light_id], 2)}")
     def render(self, camera_name: str = "fixed_camera"):
         """
-        Robust renderer with filmic post-processing.
-        Always returns tonemapped sRGB uint8 frames at the requested shape.
+        Robust and FAST renderer with filmic post-processing.
+        
+        This optimized version maintains a single, large renderer (256x256) and
+        downsamples for smaller camera views. This avoids the extremely slow process
+        of destroying and re-creating the renderer every step.
         """
         is_wrist = "wrist" in camera_name
         target_key = "image_wrist" if is_wrist else "image_primary"
         target_h, target_w, _ = self.observation_space[target_key].shape
 
-        if self.render_mode != "rgb_array" or self.renderer is None:
-            warnings.warn(f"Renderer not available, returning a black frame for camera '{camera_name}'.")
+        if self.render_mode != "rgb_array":
+            warnings.warn(f"Render mode is not 'rgb_array', returning a black frame for camera '{camera_name}'.")
             return np.zeros((target_h, target_w, 3), dtype=np.uint8)
 
         try:
-            if (self.renderer is None) or (self.renderer.width != target_w or self.renderer.height != target_h):
+            # --- START OF FAST RENDERING LOGIC ---
+            # 1. Ensure the renderer exists and is at the MAXIMUM resolution (256x256).
+            # This logic only runs if the renderer is missing or has been closed.
+            max_h, max_w, _ = self.observation_space["image_primary"].shape
+
+            if (self.renderer is None) or (getattr(self.renderer, "width", None) != max_w or getattr(self.renderer, "height", None) != max_h):
                 if self.renderer is not None:
-                    self.renderer.close()
-                self.renderer = mujoco.Renderer(self.model, height=target_h, width=target_w)
-            
-            # 2. RENDER THE SCENE
+                    try:
+                        self.renderer.close()
+                    except Exception:
+                        pass
+
+            # 2. Render the scene at the native 256x256 resolution.
             self.renderer.update_scene(self.data, camera=camera_name)
-            img_raw = self.renderer.render()
+            img_raw_large = self.renderer.render()
             
-            # 3. NECESSARY PATCH: Apply the vertical flip logic we developed.
+            # 3. Apply necessary patches (flipping and cache clearing).
             if self._decide_flip_for_camera(camera_name):
-                img_raw = np.flipud(img_raw)
+                img_raw_large = np.flipud(img_raw_large)
             
-            # 4. NECESSARY PATCH: Clear the cache for the moving wrist camera.
             if is_wrist and hasattr(self, "_camera_flip_cache"):
                 if camera_name in self._camera_flip_cache:
                     del self._camera_flip_cache[camera_name]
+            # --- END OF FAST RENDERING LOGIC ---
 
         except Exception as e:
             warnings.warn(f"Failed to render from camera '{camera_name}': {e}")
             return np.zeros((target_h, target_w, 3), dtype=np.uint8)
 
-        # Photometric post-processing (tone map etc.) at the native render resolution
-        img_processed = self._postprocess_image(img_raw)
-
-        # Downsample to target shape if needed (e.g., for the wrist camera)
-        if img_processed.shape[0] != target_h or img_processed.shape[1] != target_w:
-            img_out = cv2.resize(img_processed, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        # 4. Apply post-processing ON THE LARGE IMAGE.
+        # This is optional and can be disabled for even more speed.
+        if self.post:
+            img_processed_large = self._postprocess_image(img_raw_large)
         else:
-            img_out = img_processed
+            img_processed_large = img_raw_large
+
+        # 5. Downsample to the target shape ONLY IF NECESSARY (e.g., for wrist camera).
+        if img_processed_large.shape[0] != target_h or img_processed_large.shape[1] != target_w:
+            # Use INTER_AREA for high-quality downsampling.
+            img_out = cv2.resize(img_processed_large, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        else:
+            img_out = img_processed_large
 
         return img_out
-
     def get_ee_pose(self) -> np.ndarray:
         """
         Calculates and returns the current 7D pose of the end-effector.
         This version is optimized by using a cached site ID.
         """
-        mujoco.mj_forward(self.model, self.data)
-        
         # Use the cached ID for efficient access
         pos = self.data.site_xpos[self.ee_site_id].copy()
         
@@ -748,26 +802,36 @@ class PandaEnv(gym.Env):
         
         return np.concatenate([pos, quat_xyzw]).astype(np.float32)
 
-    # envs/panda_env.py --> _get_obs()
     def _get_obs(self) -> Dict[str, np.ndarray]:
         """
         Returns a clean observation dictionary that matches the observation_space.
-        This version includes rendering for both primary and wrist cameras.
         """
         # Get base proprioceptive state (joint positions and velocities)
         qpos = np.asarray(self.data.qpos, dtype=np.float32)
         qvel = np.asarray(self.data.qvel, dtype=np.float32)
-        proprio = np.concatenate([qpos[:7], qvel[:7]])
+        left_touch = self.data.sensordata[self.left_touch_sensor_id]
+        right_touch = self.data.sensordata[self.right_touch_sensor_id]
+        left_force = self.data.sensordata[self.left_force_sensor_id : self.left_force_sensor_id + 3]
+        right_force = self.data.sensordata[self.right_force_sensor_id : self.right_force_sensor_id + 3]
+        
+        proprio = np.concatenate([
+            qpos[:7], 
+            qvel[:7], 
+            np.array([left_touch, right_touch]),
+            left_force,
+            right_force
+        ])
 
-        # The observation now includes both rendered images.
         return {
             "image_primary": self.render(camera_name="fixed_camera"),
             "image_wrist": self.render(camera_name="wrist_camera"),
             "proprio": proprio,
+            "is_grasped": np.array([self._is_physically_grasped], dtype=np.float32),
             "task_completed": np.array([0.0], dtype=np.float32),
             "timestep": np.array([self.timestep], dtype=np.int32),
         }
-    
+
+
     def get_body_pos_expert(self, name: str) -> np.ndarray:
         """
         Expert-specific helper to get a body's world position.
@@ -805,65 +869,62 @@ class PandaEnv(gym.Env):
         # Add the redundant proprio key required by the IKSolver.
         # This isolates the redundancy to the expert pipeline, which is a good design.
         obs["internal_full_proprio"] = obs["proprio"].copy()
-
+        # Use the single, correct flag and match the float32 dtype of the observation space
+        obs["is_grasped"] = np.array([self._is_physically_grasped], dtype=np.float32)
+        obs["object_orn_world"] = self.get_object_orientation_expert()
         return obs
+      
+
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:
         super().reset(seed=seed)
         if seed is not None: self.np_random, _ = seeding.np_random(seed)
         
         self.timestep = 0
         mujoco.mj_resetData(self.model, self.data)
+        
+        # FIX #4: Ensure grasp state is reset at the start of every episode
+        self._is_physically_grasped = False
 
-        # === STAGE 1: UNBIASED TASK GENERATION ===
-        # 1a. Reset robot to a jittered home position.
+        # FIX #3: Apply physics randomization BEFORE the first mj_forward call
+        # 1. Physics Domain Randomization for the main object
+        object_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
+        new_mass = self.np_random.uniform(low=0.1, high=0.5)
+        new_friction = self.np_random.uniform(low=0.5, high=1.2)
+        self.model.body_mass[object_body_id] = new_mass
+        self.model.geom_friction[self.object_geom_id][0] = new_friction
+
+        # Set initial robot pose
         home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
         qpos_jitter = self.np_random.uniform(-0.03, 0.03, size=home_qpos.shape)
         self.data.qpos[:7] = home_qpos + qpos_jitter
-        mujoco.mj_forward(self.model, self.data) # CRITICAL: Update kinematics for a valid gripper pose.
-
-        # 1b. Perform BLIND placement of goal and object to get candidate positions.
-        #     This ensures a truly random and unbiased task distribution.
-        obj_zone_key, goal_zone_key = self.np_random.choice(list(self.PLACEMENT_ZONES.keys()), 2, replace=True)
-        obj_zone, goal_zone = self.PLACEMENT_ZONES[obj_zone_key], self.PLACEMENT_ZONES[goal_zone_key]
         
-        object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT, camera_name="fixed_camera", check_visibility=False)
-        goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT, camera_name="fixed_camera", check_visibility=False)
-
-        # === STAGE 2: ADAPTIVE CAMERA PLACEMENT & DOMAIN RANDOMIZATION ===
-        # 2a. Get key positions to inform the camera logic.
-        gripper_pos = self.get_ee_pose()[:3]
-        
-        # 2b. Delegate all camera and DR logic to the refactored helper function.
-        self._apply_domain_randomization(gripper_pos, goal_pos)
-
-        # === STAGE 3: COMMIT SCENE & FINALIZE ===
-        # 3a. Now that the camera is set, commit the object and goal positions to the simulation state.
-        if np.linalg.norm(goal_pos[:2] - object_pos[:2]) < 0.05:
-            goal_pos[0] += 0.05 # Ensure a small separation if they spawn too close.
-        
-        # --- Start of Patched Code ---
-        # PATCH 1: Use the robust, ID-based method to set the object's position.
-        joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
-        if joint_id != -1 and hasattr(self.model, "jnt_qposadr"):
-            qpos_adr = int(self.model.jnt_qposadr[joint_id])
-            self.data.qpos[qpos_adr:qpos_adr + 3] = object_pos
-        else:
-            # Fallback if the object doesn't have a joint
-            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
-            if body_id != -1:
-                self.data.xpos[body_id] = object_pos
-
-        # PATCH 2: Write to `self.data`, not `self.model`, to set the goal's position.
-        goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "goal")
-        if goal_body_id != -1:
-            self.data.xpos[goal_body_id] = goal_pos
-        # --- End of Patched Code ---
-        
-        # 3b. Final forward pass to ensure all changes (camera, objects) are reflected.
+        # Propagate all model and data changes through the physics state
         mujoco.mj_forward(self.model, self.data)
         
-        return self.get_expert_obs(), {}
+        # Now, proceed with object placement and visual DR
+        initial_ee_pos = self.get_ee_pose()[:3]
+        
+        obj_zone_key, goal_zone_key = self.np_random.choice(list(self.PLACEMENT_ZONES.keys()), 2, replace=True)
+        obj_zone, goal_zone = self.PLACEMENT_ZONES[obj_zone_key], self.PLACEMENT_ZONES[goal_zone_key]
+        object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT,camera_name="fixed_camera", check_visibility=False)
+        goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT,camera_name="primary", check_visibility=False)
 
+        self._apply_domain_randomization(initial_ee_pos, goal_pos)
+
+        if np.linalg.norm(goal_pos[:2] - object_pos[:2]) < 0.05:
+            goal_pos[0] += 0.05 
+        
+        joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
+        qpos_adr = int(self.model.jnt_qposadr[joint_id])
+        self.data.qpos[qpos_adr:qpos_adr + 3] = object_pos
+
+        goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "goal")
+        self.data.xpos[goal_body_id] = goal_pos
+        
+        # Final forward pass to settle the scene before returning the first observation
+        mujoco.mj_forward(self.model, self.data)
+
+        return self.get_expert_obs(), {}
 
 
     def _place_object_in_zone(
@@ -955,40 +1016,100 @@ class PandaEnv(gym.Env):
         cy = 0.5 * height
 
         return cam_pos, R_wc, fx, fy, cx, cy, height, width
-
-
+    def get_object_orientation_expert(self) -> np.ndarray:
+        """Gets the ground-truth world orientation of the object for the expert as an xyzw quat."""
+        body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
+        if body_id == -1:
+            raise ValueError("Body 'object' not found for expert pipeline.")
+        quat_wxyz = self.data.xquat[body_id].copy()
+        return self._mujoco_quat_to_scipy_xyzw(quat_wxyz)
+  
     def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
-        """Applies an action and steps the simulation forward."""
         self.timestep += 1
-        
-        # --- Robust Action Application ---
         action = np.asarray(action, dtype=float).ravel()
-        if action.size != self.model.nu:
-            raise ValueError(f"Action dimension mismatch: got {action.size}, expected {self.model.nu}")
+        arm_action = action[:7]
+        gripper_action = action[7]
+        if self.control_mode == 'absolute':
+            # --- This is your ORIGINAL logic, used by the expert ---
+            # The action is an absolute, normalized target joint position [-1, 1].
+            arm_ctrl_range = self.model.actuator_ctrlrange[:7]
+            arm_lo, arm_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
+            scaled_arm_action = arm_lo + 0.5 * (arm_action + 1.0) * (arm_hi - arm_lo)
+            self.data.ctrl[:7] = scaled_arm_action
+
+
+        elif self.control_mode == 'delta':
+            # This is the physically corrected delta mode.
+            physical_delta = arm_action * self.ACTION_SCALING_FACTOR
+            current_qpos = self.data.qpos[:7].copy()
+            target_qpos = current_qpos + physical_delta
+
+            joint_limits = self.model.jnt_range[:7]
+            jnt_lo, jnt_hi = joint_limits[:, 0], joint_limits[:, 1]
+            target_qpos = np.clip(target_qpos, jnt_lo, jnt_hi)
+
+            if getattr(self, 'debug_instant_move', False):
+                # --- START OF FINAL FIX ---
+                # 1. Teleport the joint to the target position
+                self.data.qpos[:7] = target_qpos
+                
+                # 2. CRITICAL: Also update the controller's target to match.
+                #    This prevents the controller from fighting the teleport.
+                denom = np.where(np.abs(jnt_hi - jnt_lo) > 1e-9, (jnt_hi - jnt_lo), 1.0)
+                norm = 2.0 * (target_qpos - jnt_lo) / denom - 1.0
+                
+                arm_ctrl_range = np.asarray(self.model.actuator_ctrlrange[:7], dtype=float)
+                act_lo, act_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
+                scaled_ctrl = act_lo + 0.5 * (norm + 1.0) * (act_hi - act_lo)
+                self.data.ctrl[:7] = scaled_ctrl
+
+                mujoco.mj_forward(self.model, self.data)
+                # --- END OF FINAL FIX ---
+            else:
+                # For real training: Use the physically realistic controller
+                denom = np.where(np.abs(jnt_hi - jnt_lo) > 1e-9, (jnt_hi - jnt_lo), 1.0)
+                norm = 2.0 * (target_qpos - jnt_lo) / denom - 1.0
+                
+                arm_ctrl_range = np.asarray(self.model.actuator_ctrlrange[:7], dtype=float)
+                act_lo, act_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
+                scaled_ctrl = act_lo + 0.5 * (norm + 1.0) * (act_hi - act_lo)
+                self.data.ctrl[:7] = scaled_ctrl
+
+
+
+        gripper_lo, gripper_hi = self.model.actuator_ctrlrange[7]
+        scaled_gripper_action = gripper_lo + 0.5 * (gripper_action + 1.0) * (gripper_hi - gripper_lo)
+        self.data.ctrl[7] = scaled_gripper_action
         
-        try:
-            ctrl_range = self.model.actuator_ctrlrange
-            lo, hi = ctrl_range[:, 0], ctrl_range[:, 1]
-            scaled_action = lo + 0.5 * (action + 1.0) * (hi - lo)
-        except Exception:
-            scaled_action = action # Pass through if scaling fails
+        N_SUBSTEPS = 5
+        for _ in range(N_SUBSTEPS):
+            left_touch_val = self.data.sensordata[self.left_touch_sensor_id]
+            right_touch_val = self.data.sensordata[self.right_touch_sensor_id]
+            is_gripping_command = gripper_action > 0.1
+            has_object_contact = (left_touch_val > 0.01) and (right_touch_val > 0.01)
+
+            if self._is_physically_grasped:
+                # If already grasped, check for release condition.
+                # Release requires BOTH an open command AND loss of contact.
+                if not is_gripping_command and not has_object_contact:
+                    self._is_physically_grasped = False
+            else:
+                # If not grasped, check for grasp condition.
+                if is_gripping_command and has_object_contact:
+                    self._is_physically_grasped = True
             
-        self.data.ctrl[:scaled_action.size] = scaled_action
-
-        # --- Robust Simulation Stepping ---
-        try:
-            mujoco.mj_step(self.model, self.data, nstep=5)
-        except TypeError: # Fallback for APIs that don't support nstep
-            for _ in range(5):
-                mujoco.mj_step(self.model, self.data)
-
+            mujoco.mj_step(self.model, self.data)
+            
+        
+        mujoco.mj_forward(self.model, self.data)
         obs = self.get_expert_obs()
         reward = 0.0
         terminated = False
         truncated = (self.timestep >= self.max_episode_steps)
-        
         return obs, reward, terminated, truncated, {}
-
+  
+  
+  
     def close(self):
         """Cleans up resources, primarily the renderer."""
         if hasattr(self, "renderer") and self.renderer is not None:

@@ -48,60 +48,33 @@ def set_global_seed(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-
+# +++ REPLACE YOUR main FUNCTION WITH THIS +++
 def main(args: argparse.Namespace):
     """Initializes components, runs the evaluation rollout, and saves a video."""
     log.info("--- Starting RL Policy Evaluation Script ---")
 
-    # --- 1. Setup ---
     set_global_seed(args.seed)
-    device = "cuda" if torch.cuda.is_available() and args.device == "cuda" else "cpu"
+    device_str = "cuda" if torch.cuda.is_available() and args.device == "cuda" else "cpu"
     
     checkpoint_path = Path(args.checkpoint_path)
-    checkpoint_name = checkpoint_path.stem
-    run_name = args.run_name or f"{checkpoint_name}_seed{args.seed}"
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    video_path = output_dir / f"{run_name}.mp4"
+    video_path = output_dir / f"{checkpoint_path.stem}_seed{args.seed}.mp4"
     
-    log.info(f"Device: {device}")
-    log.info(f"Evaluation seed: {args.seed}")
+    log.info(f"Device: {device_str}")
     log.info(f"Output video will be saved to: {video_path}")
 
-    # --- 2. Initialize Environment and OCTO Model ---
-    octo_model = None
-    if args.w_plausibility > 0.0:
-        log.info("Loading OCTO model for reward calculation...")
-        try:
-            octo_model = OctoModel.load_pretrained("hf://rail-berkeley/octo-small-1.5")
-            log.info("OCTO model loaded successfully.")
-        except Exception as e:
-            log.error(f"Could not load OCTO model, divergence reward will be disabled. Error: {e}")
-            args.w_plausibility = 0.0
-
-
-
-    # --- START OF NEW, CORRECTED BLOCK ---
+    # --- 2. Initialize Environment using the Centralized Function ---
     log.info("Initializing environment using the centralized setup_environment function...")
-
-    # We create a single, non-vectorized environment for evaluation.
-    # We explicitly set control_mode to 'absolute' to match training.
-    # We also disable the Monitor wrapper, as it's not needed for evaluation rollouts.
+    # This ensures all wrappers and the control_mode are identical to training.
+    # We create a single VecEnv (n_envs=1).
     env = setup_environment(
         xml_path=args.xml_path,
         seed=args.seed,
-        control_mode='absolute',  # <-- THE CRITICAL FIX
+        control_mode='absolute',  # <-- THE CRITICAL FIX: Match training mode
         n_envs=1,
-        add_monitor_wrapper=False, # We don't need episode logging for a single rollout
-        # The reward weights here are just placeholders for the wrapper,
-        # since we log the info dict directly. Setting them to zero is fine.
-        w_guidance=0.0,
-        w_guidance_dense=0.0,
-        grasp_reward=0.0,
-        lift_reward=0.0,
-        success_reward=0.0,
+        add_monitor_wrapper=False, # We don't need episode logging for this single rollout
     )
-
 
     # --- 3. Load Trained PPO Agent ---
     log.info(f"Loading trained PPO agent from: {checkpoint_path}")
@@ -110,8 +83,8 @@ def main(args: argparse.Namespace):
         return
         
     try:
-        # PPO.load automatically handles device placement and policy setup
-        agent = PPO.load(checkpoint_path, env=env, device=device)
+        # Load the agent, passing the correctly configured VecEnv
+        agent = PPO.load(checkpoint_path, env=env, device=device_str)
         log.info("PPO agent loaded successfully.")
     except Exception as e:
         log.critical(f"Failed to load PPO agent. Error: {e}", exc_info=True)
@@ -119,58 +92,52 @@ def main(args: argparse.Namespace):
         return
 
     # --- 4. Setup Video Writer ---
-    # We get the frame by calling the render method of the *base* environment
-    frame = env.render()
+    # The `render()` method of a VecEnv returns an RGB array for the first env.
+    frame = env.render() 
     h, w, _ = frame.shape
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     video_writer = cv2.VideoWriter(str(video_path), fourcc, 30, (w, h))
 
     # --- 5. Main Evaluation Loop ---
-    obs = env.reset()
+    obs = env.reset()  # VecEnv.reset() returns only the observation
     total_reward = 0.0
     try:
         for t in range(args.max_steps):
-            # Use deterministic=True for evaluation to get the policy's best action
-            action, _states = agent.predict(obs, deterministic=True)
-
+            action, _ = agent.predict(obs, deterministic=True)
             
             obs, rewards, dones, infos = env.step(action)
-
-            # Since we are evaluating with n_envs=1, we need to extract the
-            # single element from the returned arrays.
+            
+            # For a VecEnv (even with n_envs=1), outputs are arrays/lists.
             reward = rewards[0]
             done = dones[0]
             info = infos[0]
 
-            # Log the detailed reward components from the wrapper's info dict
+            total_reward += reward
+            
             reward_info = {k: v for k, v in info.items() if k.startswith("R_")}
-            guidance_error = info.get('guidance_pos_error', 'N/A')
-            if isinstance(guidance_error, float):
-                guidance_error_str = f"{guidance_error:.4f}"
-            else:
-                guidance_error_str = guidance_error
-
-            log.info(f"Step {t+1} | Reward: {reward:.3f} | Expert_Error: {guidance_error_str} | Details: {reward_info}")
+            log.info(f"Step {t+1:03d} | Reward: {reward:.3f} | Total Reward: {total_reward:.3f} | Details: {reward_info}")
 
             frame_rgb = env.render()
             frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
             video_writer.write(frame_bgr)
 
             if done:
-                log.info(f"Episode finished after {t+1} steps. Final total reward: {total_reward:.3f}")
+                log.info(f"Episode finished after {t+1} steps.")
                 break
         
-        # Add a pause at the end of the video
-        for _ in range(30):
-            video_writer.write(frame_bgr)
+        log.info(f"--- Evaluation Summary ---")
+        log.info(f"Final Total Reward: {total_reward:.3f}")
+        log.info(f"Success Status: {info.get('is_success', False)}")
+        
+        for _ in range(30): video_writer.write(frame_bgr) # Add a pause
             
     finally:
-        # --- 6. Cleanup ---
         log.info("Releasing resources...")
         video_writer.release()
         env.close()
         log.info("Evaluation complete.")
 
+# +++ END REPLACEMENT +++
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate a trained SB3 RL policy.")
@@ -218,6 +185,6 @@ python -m run_experiment --run_name "rl_finetune_w_scripted_expert_v2" --bc_init
 """
 
 """
-python -m scripts.evaluate_rl_policy --checkpoint_path "trained_models\advised_stage0_no_guidance_v1\backups\latest_backup.zip" --seed 777
+python -m scripts.evaluate_rl_policy --checkpoint_path "trained_models\advised_stage0_no_guidance_v2\backups\latest_backup.zip" --seed 795
 
 """

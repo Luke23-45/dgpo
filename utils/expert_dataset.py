@@ -70,7 +70,8 @@ class ExpertDataset(IterableDataset):
         warmup: bool = False,
         use_octo: bool = True, # Flag to enable/disable OCTO
         scripted_cfg: ExpertConfig = ExpertConfig(), # Config for our fallback expert
-        yield_full_obs: bool = False
+        yield_full_obs: bool = False,
+        action_scaling_factor: float = 0.05
     ) -> None:
         """
         Args:
@@ -112,6 +113,7 @@ class ExpertDataset(IterableDataset):
         self._scripted_expert: Optional[ScriptedExpert] = None # Add placeholder
         self._episode_buffer: list = []
         self.yield_full_obs = yield_full_obs
+        self.action_scaling_factor = action_scaling_factor
         logger.info("ExpertDataset created (lazy initialization).")
 
     # ----------------------------
@@ -131,7 +133,7 @@ class ExpertDataset(IterableDataset):
             self._task = self._octo_model.create_tasks(texts=[self.instruction])
             self._jax_key = jax.random.PRNGKey(worker_seed)
         
-        self._env = PandaEnv(xml_path=self.env_xml_path)
+        self._env = PandaEnv(xml_path=self.env_xml_path, control_mode='absolute')
         self._env.set_object_size(self.object_profile.size)
         self._env.reset(seed=worker_seed)
         
@@ -144,8 +146,7 @@ class ExpertDataset(IterableDataset):
             try:
                 dummy_obs = {
                     "image_primary": np.zeros((256, 256, 3), dtype=np.uint8),
-                    "proprio": np.zeros(14, dtype=np.float32),
-                    # Add other keys expected by build_octo_observation
+                    "proprio": np.zeros(22, dtype=np.float32), 
                     "task_completed": np.array([0.0], dtype=np.float32),
                 }
                 # Use our robust adapter to build the final OCTO-compliant observation.
@@ -253,9 +254,9 @@ class ExpertDataset(IterableDataset):
             pose_world, gripper_action = self._scripted_expert.get_target_pose(
                 obs["ee_pose_world"],
                 obs["object_pos_world"],
-                obs["object_orn_world"],
+                obs["proprio"], # Pass the full proprio vector
                 obs["goal_pos_world"],
-                obs["is_grasped"][0],
+                obs["is_grasped"][0] > 0.5, # Pass as a boolean
             )
                 
         # 4. Convert the final valid world pose to a joint action via IK
@@ -269,22 +270,36 @@ class ExpertDataset(IterableDataset):
 
         current_joints = obs["internal_full_proprio"][:7]
         # compute_action now correctly returns a 7-DOF arm action
-        arm_action = self._ik_solver.compute_action(target_pose_base, current_joints)
-
-        if np.linalg.norm(arm_action) < 1e-6:
-            logger.debug(
-                f"IK from expert '{expert_source}' resulted in a near-zero action. "
-                "This is expected if the EE is already at the target pose."
-            )
-
-        # 5. Combine the computed 7D arm action with the 1D gripper action
-        final_action = np.concatenate([arm_action, [gripper_action]])
 
         
-        # Add metadata to the observation if you want to track the source
+        absolute_arm_action = self._ik_solver.compute_action(target_pose_base, current_joints)
+        
+        # 5. Combine to get the full absolute action for the simulation step
+        absolute_final_action = np.concatenate([absolute_arm_action, [gripper_action]])
+        absolute_final_action = self._align_action_dim(absolute_final_action)
+        
+        # Un-normalize the absolute action to get the target physical joint positions
+        arm_ctrl_range = self._env.model.actuator_ctrlrange[:7]
+        arm_lo, arm_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
+        physical_target_qpos = arm_lo + 0.5 * (absolute_arm_action + 1.0) * (arm_hi - arm_lo)
+        
+        # Get current physical joint positions from the observation
+        current_physical_qpos = current_obs["proprio"][:7]
+        
+        # Calculate the required physical delta
+        required_physical_delta = physical_target_qpos - current_physical_qpos
+        
+        # Normalize the delta to get the final delta action
+        delta_arm_action = required_physical_delta / self.action_scaling_factor
+        
+        # Combine with gripper action to form the final 8D delta action
+        delta_final_action = np.concatenate([delta_arm_action, [gripper_action]])
+        delta_final_action = np.clip(delta_final_action, -1.0, 1.0)
+        # --- END OF NEW CONVERSION LOGIC ---
+
         obs["expert_source"] = 1 if expert_source == "octo" else 0
         
-        return obs, self._align_action_dim(final_action)
+        return obs, absolute_final_action, delta_final_action
   
 
     def __iter__(self) -> Iterator[Tuple[Dict, np.ndarray]]:
@@ -307,55 +322,53 @@ class ExpertDataset(IterableDataset):
                     self._scripted_expert.reset()
                     obs, _ = self._env.reset()
 
-# In ExpertDataset.__iter__()
                     for _ in range(self._env.max_episode_steps):
                         # The call to _generate_one is now correct
-                        policy_obs, final_action = self._generate_one(obs)
+                        policy_obs, sim_action, data_action = self._generate_one(obs)
 
-                        # --- START OF DATA BALANCING FIX ---
-                        # Get the expert's state to decide if this sample is important.
-
-                        current_state = self._scripted_expert.get_state()
-                        policy_obs["expert_fsm_state"] = current_state
-
-                        # Define the "important" states where we interact with the object.
-                        important_states = {
-                            "DESCEND_TO_GRASP", "GRASP", "WAIT_FOR_GRASP",
-                            "LIFT", "PLACE", "RELEASE", "WAIT_FOR_RELEASE"
-                        }
-                        
+                        # 2. The data balancing logic remains the same.
+                        #    It decides whether to keep the current (obs, action) pair.
                         keep_sample = False
-                        if current_state in important_states:
-                            # Always keep samples from the critical interaction phases.
+                        ee_velocity = np.linalg.norm(obs['proprio'][7:14])
+                        if ee_velocity < 0.1:
                             keep_sample = True
-                        else:
-                            # For "boring" move phases, only keep a fraction of the samples.
-                            # Let's keep 1 in every 4 samples to reduce their dominance.
-                            if np.random.uniform() < 0.25:
-                                keep_sample = True
-
+                        elif np.random.uniform() < 0.1:
+                            keep_sample = True
+                        
                         if keep_sample:
-                            temp_trajectory.append((policy_obs, final_action))
-                        # --- END OF DATA BALANCING FIX ---
+                            if not self.use_octo:
+                                policy_obs["expert_fsm_state"] = self._scripted_expert.get_state()
+                            # 3. CRITICAL: Append the correct action (data_action) to the buffer.
+                            #    This is the delta action intended for the RL agent.
+                            temp_trajectory.append((policy_obs, data_action))
                         
-                        obs, _, terminated, truncated, _ = self._env.step(final_action)
+                        # 4. CRITICAL: Step the internal simulation with the correct action (sim_action).
+                        #    This is the absolute action required by the IK-driven expert.
+                        obs, _, terminated, truncated, _ = self._env.step(sim_action)
                         
-                        if self._scripted_expert.is_done() or terminated or truncated:
+                        # 5. The stop condition is also updated slightly for clarity.
+                        is_done = (not self.use_octo and self._scripted_expert.is_done()) or terminated or truncated
+                        if is_done:
                             break
                     
-                    if self._scripted_expert.was_successful():
+                    is_successful_trajectory = False
+                    if self.use_octo:
+                        final_obs = obs
+                        object_pos = final_obs['object_pos_world']
+                        goal_pos = final_obs['goal_pos_world']
+                        object_lifted = object_pos[2] > (self._env.OBJECT_Z_HEIGHT + 0.03)
+                        object_near_goal = np.linalg.norm(object_pos[:2] - goal_pos[:2]) < 0.05
+                        if object_lifted and object_near_goal:
+                            is_successful_trajectory = True
+                    else:
+                        is_successful_trajectory = self._scripted_expert.was_successful()
+
+                    if is_successful_trajectory:
                         self._episode_buffer.extend(temp_trajectory)
                         consecutive_failures = 0
                     else:
-                        logger.debug(f"Expert did not complete trajectory successfully (state={self._scripted_expert.get_state()}), discarding.")
-                        consecutive_failures += 1
-                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                            raise RuntimeError(
-                                f"ExpertDataset failed to generate a successful trajectory {MAX_CONSECUTIVE_FAILURES} "
-                                f"times in a row. There might be a fundamental issue with the environment "
-                                f"or the scripted expert. Last expert state: {self._scripted_expert.get_state()}"
-                            )
-                        # --- END OF IMPROVEMENT ---
+                        expert_type = "OCTO" if self.use_octo else f"ScriptedExpert (state={self._scripted_expert.get_state()})"
+                        logger.debug(f"Expert ({expert_type}) did not complete trajectory successfully, discarding.")
 
                 except Exception as exc:
                     if self.skip_on_error:

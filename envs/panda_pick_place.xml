@@ -152,7 +152,15 @@
     <body name="goal" pos="0.55 0.2 0.401">
       <geom name="goal_geom" type="box" size="0.025 0.025 0.001" material="goal_mat" contype="0" conaffinity="0"/>
     </body>
+    <!-- <body name="clutter_box" pos="0.7 0.1 0.41">
+      <joint type="free" name="clutter_box_joint" damping="0.05"/>
+      <geom name="clutter_box_geom" type="box" size="0.022 0.022 0.022" rgba="0.1 0.1 0.9 1" mass="0.3"/>
+    </body>
 
+    <body name="clutter_cylinder" pos="0.5 -0.15 0.41">
+      <joint type="free" name="clutter_cylinder_joint" damping="0.05"/>
+      <geom name="clutter_cylinder_geom" type="cylinder" size="0.018 0.03" rgba="0.9 0.9 0.1 1" mass="0.2"/>
+    </body> -->
     <!-- Camera -->
     <!-- <camera name="fixed_camera" pos="1.2 0 1.2" xyaxes="0 -1 0 0.707 0 -0.707"/> -->
     <camera name="fixed_camera" pos="1.2 -0.5 1.0" xyaxes="0 -1 0 0.707 0 -0.707"/>
@@ -170,8 +178,9 @@
     <weld body1="robot_base" body2="link0"/>
 
 
-
 </equality>
+
+<!-- In envs/panda_pick_place.xml -->
 
   <!-- Extra contact exclusions quat="0.707 0.707 0 0" -->
 <contact>
@@ -182,10 +191,8 @@
     <!-- THIS IS THE FIX: Prevent the main hand from sticking to the table -->
     <exclude body1="hand" body2="table"/>
 
-    <exclude body1="left_finger" body2="object"/>
-    <exclude body1="right_finger" body2="object"/>
-    <exclude body1="hand" body2="object"/>
 </contact>
+
 </mujoco>
 
 

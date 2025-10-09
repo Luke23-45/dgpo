@@ -104,9 +104,9 @@ def main(args: argparse.Namespace):
             target_pose, gripper_action = expert.get_target_pose(
                 expert_obs["ee_pose_world"],
                 expert_obs["object_pos_world"],
-                expert_obs["object_orn_world"],
+                expert_obs["proprio"], # Pass the full proprio vector
                 expert_obs["goal_pos_world"],
-                expert_obs["is_grasped"],
+                expert_obs["is_grasped"][0] > 0.5, # Pass as a boolean
             )
 
             log.info(f"--- Step {step_num} | Expert State: {expert.get_state()} ---")
@@ -161,6 +161,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Verify the PandaEnv+ScriptedExpert trajectory generation.")
     parser.add_argument("--urdf_path", type=str, default="urdf/panda_mujoco_kinematics.urdf")
     parser.add_argument("--xml_path", type=str, default="envs/panda_pick_place.xml")
-    parser.add_argument("--seed", type=int, default=110)
+    parser.add_argument("--seed", type=int, default=812)
     args = parser.parse_args()
     main(args)

@@ -11,7 +11,6 @@ import cv2
 from dataclasses import dataclass, field 
 from typing import Optional
 from scipy.spatial.transform import Rotation, Slerp
-
 @dataclass
 class RenderPostConfig:
     """
@@ -171,6 +170,8 @@ class PandaEnv(gym.Env):
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
     ACTION_SCALING_FACTOR = 0.05
 
+
+    # REPLACE THE ENTIRE __init__ METHOD WITH THIS
     def __init__(
             self,
             xml_path: str = "envs/panda_pick_place.xml",
@@ -186,14 +187,14 @@ class PandaEnv(gym.Env):
         assert control_mode in ["absolute", "delta"], "control_mode must be 'absolute' or 'delta'"
         self.control_mode = control_mode
 
-
+        # 1. Load Model (Must be first)
         try:
             self.model = mujoco.MjModel.from_xml_path(xml_path)
             self.data = mujoco.MjData(self.model)
         except Exception as e:
             raise FileNotFoundError(f"Could not load MuJoCo XML from '{xml_path}'. Error: {e}")
 
-        # --- Renderer ---
+        # 2. Initialize Renderer and Configs
         self.render_mode = render_mode
         try:
             self.renderer = mujoco.Renderer(self.model, height=256, width=256)
@@ -201,57 +202,48 @@ class PandaEnv(gym.Env):
             warnings.warn("mujoco.Renderer not available — running headless.")
             self.renderer = None
         self.post = post_config or RenderPostConfig()
-        # --- Episode bookkeeping ---
+        
+        # 3. Initialize Episode Bookkeeping and RNG
         self.max_episode_steps = 400
         self.timestep = 0
-
-        # --- Define Observation and Action Spaces (CRITICAL SECTION) ---
-        self._define_spaces()
-
-        # --- Random Number Generator ---
         self.np_random, _ = seeding.np_random(None)
         self.enable_domain_randomization = enable_domain_randomization
         self.dr_config = dr_config or DomainRandomizationConfig()
 
-        # Cache IDs of elements to be randomized for performance
+        # 4. Consolidated Block: Cache all MuJoCo IDs and initialize state
+        #    This block runs AFTER the model is loaded and BEFORE spaces are defined.
         self._cache_dr_element_ids()
-        # diagnostic: print actuator and joint names + ctrl ranges to ensure mapping
-        # Corrected Diagnostic Block
-        # try:
-        #     print("\n--- PANDA ENV DIAGNOSTICS (Corrected) ---")
-        #     # Correctly get actuator names using model.nu
-        #     actuator_names = [mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i) for i in range(self.model.nu)]
-        #     print(f"Actuator Names (count = {self.model.nu}): {actuator_names}")
-        #     # Correctly get joint names using model.njnt
-        #     joint_names = [mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(self.model.njnt)]
-        #     print(f"Joint Names (count = {self.model.njnt}): {joint_names}")
-        #     print("-----------------------------------------\n")
-        # except Exception as e:
-        #     print(f"Could not list actuator/joint names: {e}")
-
-        self.ee_site_name = "attachment_site"
-        self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.ee_site_name)
+        self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
         if self.ee_site_id == -1:
-            raise ValueError(f"Site '{self.ee_site_name}' not found in the MuJoCo model.")
-        self._is_kinematically_grasped = False
-        self._grasp_offset_pos = None  # Stores the cube's position relative to the gripper
-        self._grasp_offset_rot = None  # Stores the cube's orientation relative to the gripper
+            raise ValueError("Site 'attachment_site' not found in the MuJoCo model.")
 
-        # Cache the ID and qpos address for the object's free joint
         self.object_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
         if self.object_joint_id == -1:
-            raise ValueError("Kinematic grasp requires the 'object' to have a named 'object_joint' in the XML.")
+            raise ValueError("Joint 'object_joint' not found in the MuJoCo model.")
         self.object_qpos_addr = self.model.jnt_qposadr[self.object_joint_id]
-        self.smoothing_factor = 0.2 
-
+        
         self.object_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "object_geom")
         if self.object_geom_id == -1:
             raise ValueError("Geom 'object_geom' not found in the XML.")
-
+            
+        self.left_touch_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "left_finger_touch_sensor")
+        self.right_touch_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "right_finger_touch_sensor")
+        if self.left_touch_sensor_id == -1 or self.right_touch_sensor_id == -1:
+            raise ValueError("Touch sensors for fingertips not found. Check the XML.")
+            
         self.left_finger_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_finger")
         self.right_finger_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "right_finger")
         if self.left_finger_id == -1 or self.right_finger_id == -1:
             raise ValueError("Could not find 'left_finger' or 'right_finger' bodies in the XML.")
+        self.left_force_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "left_finger_force_sensor")
+        self.right_force_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "right_finger_force_sensor")
+        if self.left_force_sensor_id == -1 or self.right_force_sensor_id == -1:
+            raise ValueError("Force sensors for fingertips not found. Check the XML.")
+            
+        self._is_physically_grasped = False
+        
+        # 5. Define Spaces (Must be last)
+        self._define_spaces()
 
     def _cache_dr_element_ids(self):
         """Finds and caches the integer IDs of all elements used in DR."""
@@ -613,36 +605,34 @@ class PandaEnv(gym.Env):
             debug_info["bounds"] = {"u": u, "v": v, "adaptive_margin": adaptive_margin, "width": width, "height": height}
         
         return is_visible, debug_info
-  
-  
+
     def _define_spaces(self):
         """
-        Defines observation and action spaces. This version provides all keys
-        that are directly used by the OCTO expert pipeline.
+        Defines observation and action spaces.
         """
+        # START OF MODIFIED BLOCK
+        proprio_dim = 7 + 7 + 2 + 6 # 7 qpos, 7 qvel, 2 touch, 6 force (3D x 2)
         self.observation_space = spaces.Dict({
             # --- Core Visual Modalities (HWC format) ---
             "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
             "image_wrist":   spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
             
             # --- Proprioceptive State ---
-            # The primary 14D proprio state (7 joint pos + 7 joint vel)
-            "proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
+            # 7 jnt_pos + 7 jnt_vel + 2 touch_sensor + 2x3D force_sensor
+            "proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(proprio_dim,), dtype=np.float32),
             "is_grasped": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
             
             # --- Additional State Information for Expert ---
-            # A scalar indicating if the task is complete (0.0 or 1.0)
             "task_completed": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
             
             # Current timestep in the episode, shaped as a 1D array
             "timestep": spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(1,), dtype=np.int32),
         })
+        # END OF MODIFIED BLOCK
         
-        # Action space: 7 arm joint deltas + 1 gripper command
-        act_dim = 8 # We are defining a consistent 8D action space for the agent.
+        act_dim = 8
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)  
 
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
-        
     def _randomize_photometrics(self, light_target: np.ndarray):
             """
             Implements an advanced 3-point lighting strategy with material randomization
@@ -750,10 +740,13 @@ class PandaEnv(gym.Env):
             # 1. Ensure the renderer exists and is at the MAXIMUM resolution (256x256).
             # This logic only runs if the renderer is missing or has been closed.
             max_h, max_w, _ = self.observation_space["image_primary"].shape
-            if (self.renderer is None) or (self.renderer.width != max_w or self.renderer.height != max_h):
+
+            if (self.renderer is None) or (getattr(self.renderer, "width", None) != max_w or getattr(self.renderer, "height", None) != max_h):
                 if self.renderer is not None:
-                    self.renderer.close()
-                self.renderer = mujoco.Renderer(self.model, height=max_h, width=max_w)
+                    try:
+                        self.renderer.close()
+                    except Exception:
+                        pass
 
             # 2. Render the scene at the native 256x256 resolution.
             self.renderer.update_scene(self.data, camera=camera_name)
@@ -802,7 +795,6 @@ class PandaEnv(gym.Env):
         
         return np.concatenate([pos, quat_xyzw]).astype(np.float32)
 
-
     def _get_obs(self) -> Dict[str, np.ndarray]:
         """
         Returns a clean observation dictionary that matches the observation_space.
@@ -810,18 +802,29 @@ class PandaEnv(gym.Env):
         # Get base proprioceptive state (joint positions and velocities)
         qpos = np.asarray(self.data.qpos, dtype=np.float32)
         qvel = np.asarray(self.data.qvel, dtype=np.float32)
-        proprio = np.concatenate([qpos[:7], qvel[:7]])
+        left_touch = self.data.sensordata[self.left_touch_sensor_id]
+        right_touch = self.data.sensordata[self.right_touch_sensor_id]
+        left_force = self.data.sensordata[self.left_force_sensor_id : self.left_force_sensor_id + 3]
+        right_force = self.data.sensordata[self.right_force_sensor_id : self.right_force_sensor_id + 3]
+        
+        proprio = np.concatenate([
+            qpos[:7], 
+            qvel[:7], 
+            np.array([left_touch, right_touch]),
+            left_force,
+            right_force
+        ])
 
-        # The observation now includes both rendered images.
         return {
             "image_primary": self.render(camera_name="fixed_camera"),
             "image_wrist": self.render(camera_name="wrist_camera"),
             "proprio": proprio,
-            "is_grasped": np.array([self._is_kinematically_grasped], dtype=np.float32),
+            "is_grasped": np.array([self._is_physically_grasped], dtype=np.float32),
             "task_completed": np.array([0.0], dtype=np.float32),
             "timestep": np.array([self.timestep], dtype=np.int32),
         }
-    
+
+
     def get_body_pos_expert(self, name: str) -> np.ndarray:
         """
         Expert-specific helper to get a body's world position.
@@ -859,12 +862,12 @@ class PandaEnv(gym.Env):
         # Add the redundant proprio key required by the IKSolver.
         # This isolates the redundancy to the expert pipeline, which is a good design.
         obs["internal_full_proprio"] = obs["proprio"].copy()
-        obs["is_grasped"] = np.array([self._is_kinematically_grasped], dtype=bool)
+        # Use the single, correct flag and match the float32 dtype of the observation space
+        obs["is_grasped"] = np.array([self._is_physically_grasped], dtype=np.float32)
         obs["object_orn_world"] = self.get_object_orientation_expert()
         return obs
       
 
-    # Replace your entire reset method with this one.
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:
         super().reset(seed=seed)
         if seed is not None: self.np_random, _ = seeding.np_random(seed)
@@ -872,21 +875,32 @@ class PandaEnv(gym.Env):
         self.timestep = 0
         mujoco.mj_resetData(self.model, self.data)
         
-        self._is_kinematically_grasped = False
-        self._grasp_offset_pos = None
-        self._grasp_offset_rot = None
+        # FIX #4: Ensure grasp state is reset at the start of every episode
+        self._is_physically_grasped = False
 
+        # FIX #3: Apply physics randomization BEFORE the first mj_forward call
+        # 1. Physics Domain Randomization for the main object
+        object_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
+        new_mass = self.np_random.uniform(low=0.1, high=0.5)
+        new_friction = self.np_random.uniform(low=0.5, high=1.2)
+        self.model.body_mass[object_body_id] = new_mass
+        self.model.geom_friction[self.object_geom_id][0] = new_friction
+
+        # Set initial robot pose
         home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
         qpos_jitter = self.np_random.uniform(-0.03, 0.03, size=home_qpos.shape)
         self.data.qpos[:7] = home_qpos + qpos_jitter
+        
+        # Propagate all model and data changes through the physics state
         mujoco.mj_forward(self.model, self.data)
         
+        # Now, proceed with object placement and visual DR
         initial_ee_pos = self.get_ee_pose()[:3]
         
         obj_zone_key, goal_zone_key = self.np_random.choice(list(self.PLACEMENT_ZONES.keys()), 2, replace=True)
         obj_zone, goal_zone = self.PLACEMENT_ZONES[obj_zone_key], self.PLACEMENT_ZONES[goal_zone_key]
-        object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT,camera_name="camera_primary", check_visibility=False)
-        goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT,camera_name="camera_primary", check_visibility=False)
+        object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT,camera_name="fixed_camera", check_visibility=False)
+        goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT,camera_name="primary", check_visibility=False)
 
         self._apply_domain_randomization(initial_ee_pos, goal_pos)
 
@@ -900,6 +914,7 @@ class PandaEnv(gym.Env):
         goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "goal")
         self.data.xpos[goal_body_id] = goal_pos
         
+        # Final forward pass to settle the scene before returning the first observation
         mujoco.mj_forward(self.model, self.data)
 
         return self.get_expert_obs(), {}
@@ -1061,67 +1076,23 @@ class PandaEnv(gym.Env):
         
         N_SUBSTEPS = 5
         for _ in range(N_SUBSTEPS):
-            gripper_pose = self.get_ee_pose()
-            R_world_gripper = R.from_quat(gripper_pose[3:])
-            
-            object_pos_world = self.data.body("object").xpos.copy()
-            distance = np.linalg.norm(gripper_pose[:3] - object_pos_world)
-            GRASP_THRESHOLD = 0.055
-            # if gripper_action > 0 and not self._is_kinematically_grasped:
-            #     print(f"[PandaEnv DEBUG] Grasp Check | Distance: {distance:.4f} | Threshold: {GRASP_THRESHOLD:.4f} | Condition Met: {distance < GRASP_THRESHOLD}")
-            if not self._is_kinematically_grasped and gripper_action > 0 and distance < GRASP_THRESHOLD:
-                self._is_kinematically_grasped = True
-                
-                # --- START OF PATCH: Calculate grasp from finger midpoint ---
-                # 1. Get world poses of fingers and object
-                left_finger_pos = self.data.xpos[self.left_finger_id].copy()
-                right_finger_pos = self.data.xpos[self.right_finger_id].copy()
-                finger_midpoint = (left_finger_pos + right_finger_pos) / 2.0
+            left_touch_val = self.data.sensordata[self.left_touch_sensor_id]
+            right_touch_val = self.data.sensordata[self.right_touch_sensor_id]
+            is_gripping_command = gripper_action > 0.1
+            has_object_contact = (left_touch_val > 0.01) and (right_touch_val > 0.01)
 
-                object_quat_world_wxyz = self.data.body("object").xquat.copy()
-                object_quat_world_xyzw = self._mujoco_quat_to_scipy_xyzw(object_quat_world_wxyz)
-                R_world_object = R.from_quat(object_quat_world_xyzw)
-                
-                R_gripper_world = R_world_gripper.inv()
-                
-                vec_gripper_to_midpoint = finger_midpoint - gripper_pose[:3]
-                vec_midpoint_to_object = object_pos_world - finger_midpoint
-                
-                self._grasp_offset_pos = R_gripper_world.apply(vec_gripper_to_midpoint + vec_midpoint_to_object)
-                self._grasp_offset_rot = R_gripper_world * R_world_object
-            
-            elif self._is_kinematically_grasped and gripper_action < 0:
-                self._is_kinematically_grasped = False
-
-            if self._is_kinematically_grasped:
-                target_pos = gripper_pose[:3] + R_world_gripper.apply(self._grasp_offset_pos)
-                target_rot = R_world_gripper * self._grasp_offset_rot
-
-                qpos_addr = self.object_qpos_addr
-                current_pos = self.data.qpos[qpos_addr : qpos_addr + 3]
-                current_rot = R.from_quat(self._mujoco_quat_to_scipy_xyzw(
-                    self.data.qpos[qpos_addr + 3 : qpos_addr + 7]
-                ))
-
-                smoothed_pos = current_pos + self.smoothing_factor * (target_pos - current_pos)
-                
-                # =====================================================================
-                # VVVVVV           THE DEFINITIVE, CORRECT SLERP SYNTAX          VVVVVV
-                # =====================================================================
-                # 1. Create a Rotation object containing the start and end rotations
-                key_rots = R.from_quat([current_rot.as_quat(), target_rot.as_quat()])
-                # 2. Define the "times" corresponding to these rotations (start=0, end=1)
-                key_times = [0, 1]
-                # 3. Create the Slerp interpolator object
-                slerp = Slerp(key_times, key_rots)
-                # 4. Call the interpolator with the desired fraction to get the result
-                smoothed_rot = slerp(self.smoothing_factor)
-                # --- END OF FIX ---
-                
-                self.data.qpos[qpos_addr : qpos_addr + 3] = smoothed_pos
-                self.data.qpos[qpos_addr + 3 : qpos_addr + 7] = self._scipy_xyzw_to_mujoco_wxyz(smoothed_rot.as_quat())
+            if self._is_physically_grasped:
+                # If already grasped, check for release condition.
+                # Release requires BOTH an open command AND loss of contact.
+                if not is_gripping_command and not has_object_contact:
+                    self._is_physically_grasped = False
+            else:
+                # If not grasped, check for grasp condition.
+                if is_gripping_command and has_object_contact:
+                    self._is_physically_grasped = True
             
             mujoco.mj_step(self.model, self.data)
+            
         
         mujoco.mj_forward(self.model, self.data)
         obs = self.get_expert_obs()

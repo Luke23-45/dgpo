@@ -126,8 +126,6 @@ class DownsampleImageWrapper(gym.ObservationWrapper):
                 obs[key] = np.transpose(resized_hwc, (2, 0, 1))
         return obs
 
-
-
 def setup_environment(
     xml_path: str,
     seed: int,
@@ -186,8 +184,7 @@ def setup_environment(
             env = DownsampleImageWrapper(env, res_map)
 
         return env
-    wrapper = Monitor if add_monitor_wrapper else None
-    vec_env = make_vec_env(make_env, n_envs=n_envs, seed=seed, wrapper_class=wrapper)
+    vec_env = make_vec_env(make_env, n_envs=n_envs, seed=seed, monitor_dir=None if add_monitor_wrapper else "disabled")
 
     logger.info("Applying VecNormalize wrapper for observation and reward normalization.")
     
