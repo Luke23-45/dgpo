@@ -52,6 +52,9 @@ def main(args: argparse.Namespace):
     # --- 1. Initialize Core Components ---
     log.info("Initializing components...")
     env = PandaEnv(xml_path=args.xml_path)
+    model = env.model
+
+
     expert = ScriptedExpert(object_profile=object_to_grasp)
     ik_solver = IKSolver(urdf_path=args.urdf_path)
     log.info("Components initialized.")
@@ -104,13 +107,14 @@ def main(args: argparse.Namespace):
             target_pose, gripper_action = expert.get_target_pose(
                 expert_obs["ee_pose_world"],
                 expert_obs["object_pos_world"],
-                expert_obs["proprio"], # Pass the full proprio vector
+                expert_obs["object_orn_world"], # <--- CORRECTED ARGUMENT
                 expert_obs["goal_pos_world"],
-                expert_obs["is_grasped"][0] > 0.5, # Pass as a boolean
+                expert_obs["is_grasped"][0] > 0.5,
             )
 
             log.info(f"--- Step {step_num} | Expert State: {expert.get_state()} ---")
-
+            # log.info(f"   Object Position (World): {np.round(expert_obs['object_pos_world'], 3)}")
+            # log.info(f"   Object Orientation (World): {np.round(expert_obs['object_orn_world'], 3)}")
             # Convert the target pose into a joint action via IK
             base_pos, base_quat = env.get_base_pose()
             R_world_base = R.from_quat(base_quat)
@@ -161,6 +165,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Verify the PandaEnv+ScriptedExpert trajectory generation.")
     parser.add_argument("--urdf_path", type=str, default="urdf/panda_mujoco_kinematics.urdf")
     parser.add_argument("--xml_path", type=str, default="envs/panda_pick_place.xml")
-    parser.add_argument("--seed", type=int, default=812)
+    parser.add_argument("--seed", type=int, default=813)
     args = parser.parse_args()
     main(args)

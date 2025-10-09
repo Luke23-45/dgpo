@@ -191,6 +191,7 @@ class PandaEnv(gym.Env):
         try:
             self.model = mujoco.MjModel.from_xml_path(xml_path)
             self.data = mujoco.MjData(self.model)
+
         except Exception as e:
             raise FileNotFoundError(f"Could not load MuJoCo XML from '{xml_path}'. Error: {e}")
 
@@ -213,6 +214,7 @@ class PandaEnv(gym.Env):
         # 4. Consolidated Block: Cache all MuJoCo IDs and initialize state
         #    This block runs AFTER the model is loaded and BEFORE spaces are defined.
         self._cache_dr_element_ids()
+
         self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
         if self.ee_site_id == -1:
             raise ValueError("Site 'attachment_site' not found in the MuJoCo model.")
@@ -241,10 +243,50 @@ class PandaEnv(gym.Env):
             raise ValueError("Force sensors for fingertips not found. Check the XML.")
             
         self._is_physically_grasped = False
-        
+        self.left_finger_geom_ids = []
+        for i in range(self.model.ngeom):
+            if "left_finger" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, self.model.geom_bodyid[i]):
+                self.left_finger_geom_ids.append(i)
+
+        self.right_finger_geom_ids = []
+        for i in range(self.model.ngeom):
+            if "right_finger" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, self.model.geom_bodyid[i]):
+                self.right_finger_geom_ids.append(i)
         # 5. Define Spaces (Must be last)
         self._define_spaces()
 
+    def _check_grasp(self):
+        """
+        Checks if the gripper is grasping the object by checking for active contacts
+        between both fingers and the object.
+        """
+        has_left_contact = False
+        has_right_contact = False
+        
+        # Iterate through all active contacts
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+            
+            # Check if one geom is the object and the other is a left finger part
+            is_left_contact = (contact.geom1 == self.object_geom_id and contact.geom2 in self.left_finger_geom_ids) or \
+                              (contact.geom2 == self.object_geom_id and contact.geom1 in self.left_finger_geom_ids)
+            
+            # Check if one geom is the object and the other is a right finger part
+            is_right_contact = (contact.geom1 == self.object_geom_id and contact.geom2 in self.right_finger_geom_ids) or \
+                               (contact.geom2 == self.object_geom_id and contact.geom1 in self.right_finger_geom_ids)
+
+            if is_left_contact:
+                has_left_contact = True
+            if is_right_contact:
+                has_right_contact = True
+
+            # If we've already found contacts on both sides, we can stop checking
+            if has_left_contact and has_right_contact:
+                self._is_physically_grasped = True
+                return
+
+        # If the loop finishes and we haven't found contacts on both sides, the grasp is not active
+        self._is_physically_grasped = False
     def _cache_dr_element_ids(self):
         """Finds and caches the integer IDs of all elements used in DR."""
         if not self.enable_domain_randomization:
@@ -843,7 +885,21 @@ class PandaEnv(gym.Env):
         """Gets the ground-truth world position of the goal for the expert."""
         return self.get_body_pos_expert("goal")
 
+    def get_object_orientation_expert(self) -> np.ndarray:
+        """
+        Retrieves the object's orientation quaternion from the MuJoCo simulation data.
+        Assumes object_joint is a free joint (pos + quat).
+        Returns quaternion in [x, y, z, w] format for compatibility with scipy.spatial.transform.Rotation.
+        """
 
+        object_qpos_addr = self.model.jnt_qposadr[self.object_joint_id]
+
+        quat_wxyz = self.data.qpos[object_qpos_addr + 3 : object_qpos_addr + 7].copy()
+
+        quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float32)
+
+        return quat_xyzw
+    
     def get_expert_obs(self) -> Dict[str, np.ndarray]:
         """
         Returns a rich observation dictionary for the expert pipeline.
@@ -865,6 +921,7 @@ class PandaEnv(gym.Env):
         # Use the single, correct flag and match the float32 dtype of the observation space
         obs["is_grasped"] = np.array([self._is_physically_grasped], dtype=np.float32)
         obs["object_orn_world"] = self.get_object_orientation_expert()
+
         return obs
       
 
@@ -907,9 +964,22 @@ class PandaEnv(gym.Env):
         if np.linalg.norm(goal_pos[:2] - object_pos[:2]) < 0.05:
             goal_pos[0] += 0.05 
         
+
         joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
         qpos_adr = int(self.model.jnt_qposadr[joint_id])
+        
+        # 2. Randomize the object's yaw angle (rotation around Z-axis).
+        #    This creates a non-identity rotation for the expert to align to.
+        random_yaw_angle = self.np_random.uniform(low=-np.pi, high=np.pi)
+        random_yaw_rotation = R.from_euler('z', random_yaw_angle)
+        
+        # 3. Convert to MuJoCo format (w, x, y, z) and apply to qpos.
+        #    _scipy_xyzw_to_mujoco_wxyz converts [x,y,z,w] to [w,x,y,z]
+        random_quat_wxyz = self._scipy_xyzw_to_mujoco_wxyz(random_yaw_rotation.as_quat())
+        
+        # 4. Apply both position and orientation to the object's free joint.
         self.data.qpos[qpos_adr:qpos_adr + 3] = object_pos
+        self.data.qpos[qpos_adr + 3:qpos_adr + 7] = random_quat_wxyz
 
         goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "goal")
         self.data.xpos[goal_body_id] = goal_pos
@@ -1009,6 +1079,8 @@ class PandaEnv(gym.Env):
         cy = 0.5 * height
 
         return cam_pos, R_wc, fx, fy, cx, cy, height, width
+    
+    
     def get_object_orientation_expert(self) -> np.ndarray:
         """Gets the ground-truth world orientation of the object for the expert as an xyzw quat."""
         body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
@@ -1022,6 +1094,7 @@ class PandaEnv(gym.Env):
         action = np.asarray(action, dtype=float).ravel()
         arm_action = action[:7]
         gripper_action = action[7]
+        
         if self.control_mode == 'absolute':
             # --- This is your ORIGINAL logic, used by the expert ---
             # The action is an absolute, normalized target joint position [-1, 1].
@@ -1069,32 +1142,85 @@ class PandaEnv(gym.Env):
                 self.data.ctrl[:7] = scaled_ctrl
 
 
-
-        gripper_lo, gripper_hi = self.model.actuator_ctrlrange[7]
-        scaled_gripper_action = gripper_lo + 0.5 * (gripper_action + 1.0) * (gripper_hi - gripper_lo)
+        scaled_gripper_action = (gripper_action + 1.0) / 2.0 * 0.04
         self.data.ctrl[7] = scaled_gripper_action
+        self.data.ctrl[8] = scaled_gripper_action
         
         N_SUBSTEPS = 5
         for _ in range(N_SUBSTEPS):
+            # try:
+            #     # replace with actual cached indices/names you use
+            #     left_touch_val = float(self.data.sensordata[self.left_touch_sensor_id])
+            #     right_touch_val = float(self.data.sensordata[self.right_touch_sensor_id])
+
+            #     # get qpos for finger joints (replace joint names with your actual names)
+            #     j1_addr = self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "finger_joint_left")]
+            #     j2_addr = self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "finger_joint_right")]
+            #     left_qpos = float(self.data.qpos[j1_addr])
+            #     right_qpos = float(self.data.qpos[j2_addr])
+
+            #     # print actuator ctrl state (list first few if many)
+            #     ctrl0 = float(self.data.ctrl[0])
+            #     # print a small structured line
+            #     print(f"[GRASP_DBG] step={self.timestep} ctrl0={ctrl0:.4f} left_qpos={left_qpos:.4f} right_qpos={right_qpos:.4f} left_touch={left_touch_val:.6f} right_touch={right_touch_val:.6f}")
+            # except Exception as e:
+            #     print("GRASP_DBG: debug error %s", e)
+
             left_touch_val = self.data.sensordata[self.left_touch_sensor_id]
             right_touch_val = self.data.sensordata[self.right_touch_sensor_id]
+            left_force_vec = self.data.sensordata[self.left_force_sensor_id : self.left_force_sensor_id + 3]
+            right_force_vec = self.data.sensordata[self.right_force_sensor_id : self.right_force_sensor_id + 3]
+
+            # 2. Define physically-meaningful thresholds
+            # The object's mass is randomized up to 0.5kg, which has a weight of ~4.9N.
+            # A force of 1.0N on each finger should be a reliable indicator of solid contact.
+            touch_threshold = 0.005  # Increased slightly for reliability
+            force_threshold = 1.0    # In Newtons (N)
+
+            # 3. Evaluate the three core conditions for a stable grasp
             is_gripping_command = gripper_action > 0.1
-            has_object_contact = (left_touch_val > 0.01) and (right_touch_val > 0.01)
+            
+            # Condition A: Contact must be detected on BOTH fingers. (The AND fix)
+            has_bilateral_contact = (left_touch_val > touch_threshold) and (right_touch_val > touch_threshold)
+
+            # Condition B: Sufficient force must be applied by at least one finger.
+            # This prevents false positives from tiny, incidental contacts.
+            has_sufficient_force = (np.linalg.norm(left_force_vec) > force_threshold) and \
+                                   (np.linalg.norm(right_force_vec) > force_threshold)
+            
+            # The final, robust condition for grasping
+            is_grasp_conditions_met = is_gripping_command and has_bilateral_contact and has_sufficient_force
+            
+            # 4. Use the existing stabilization counter to confirm the grasp/release
+            GRASP_STABILIZATION_REQUIRED = 5  # Number of substeps required to confirm grasp
 
             if self._is_physically_grasped:
-                # If already grasped, check for release condition.
-                # Release requires BOTH an open command AND loss of contact.
-                if not is_gripping_command and not has_object_contact:
-                    self._is_physically_grasped = False
+                # To release, the grip command must be off OR the physical conditions must fail
+                if not is_gripping_command or not has_bilateral_contact:
+                    self._grasp_stabilization_counter -= 1
+                    if self._grasp_stabilization_counter <= 0:
+                        self._is_physically_grasped = False
+                        self._grasp_stabilization_counter = 0
+                else:
+                    # Maintain grasp if conditions are still met
+                    self._grasp_stabilization_counter = GRASP_STABILIZATION_REQUIRED
             else:
-                # If not grasped, check for grasp condition.
-                if is_gripping_command and has_object_contact:
-                    self._is_physically_grasped = True
-            
-            mujoco.mj_step(self.model, self.data)
+                # To grasp, all physical conditions must be met
+                if is_grasp_conditions_met:
+                    self._grasp_stabilization_counter += 1
+                    if self._grasp_stabilization_counter >= GRASP_STABILIZATION_REQUIRED:
+                        self._is_physically_grasped = True
+                else:
+                    # Reset if conditions fail
+                    self._grasp_stabilization_counter = 0
+
+            mujoco.mj_step(self.model, self.data)  
+            self._check_grasp()        
             
         
         mujoco.mj_forward(self.model, self.data)
+
+        
         obs = self.get_expert_obs()
         reward = 0.0
         terminated = False

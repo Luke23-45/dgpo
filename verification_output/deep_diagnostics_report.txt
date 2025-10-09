@@ -1,0 +1,1104 @@
+--- STARTING DEEP DIAGNOSTICS FOR EXPERT GRASPING ---
+Report will be saved to: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\verification_output\deep_diagnostics_report.txt
+
+
+==================== STEP 0 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [ 0.3033, -0.0063,  0.5038]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.3439 m
+  - Dist (EE -> Object):  0.3223 m
+CALCULATED ACTION (normalized): [-0.0967, -0.1106,  0.168 , -0.4126,  0.1554,  0.9249,  0.1626, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.2165
+  - Right Touch Sensor: -0.4018
+  - Left Force Sensor:  [ 0.4018, -0.5733, -0.2165]
+  - Right Force Sensor: [-0.5733, -0.2165, -0.4018]
+
+==================== STEP 1 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [ 0.3048, -0.0064,  0.5053]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.3420 m
+  - Dist (EE -> Object):  0.3214 m
+CALCULATED ACTION (normalized): [-0.1007, -0.1114,  0.1711, -0.4132,  0.1534,  0.9244,  0.1651, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.1070
+  - Right Touch Sensor: -0.3604
+  - Left Force Sensor:  [ 0.3605, -0.5842,  0.107 ]
+  - Right Force Sensor: [-0.5842,  0.107 , -0.3604]
+
+==================== STEP 2 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [ 0.3091, -0.0044,  0.5077]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.3367 m
+  - Dist (EE -> Object):  0.3175 m
+CALCULATED ACTION (normalized): [-0.1067, -0.1127,  0.1758, -0.4141,  0.1503,  0.9237,  0.1691, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.1387
+  - Right Touch Sensor: -0.3614
+  - Left Force Sensor:  [ 0.3615, -0.5728,  0.1387]
+  - Right Force Sensor: [-0.5728,  0.1387, -0.3614]
+
+==================== STEP 3 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.3162, 0.0013, 0.5086]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.3288 m
+  - Dist (EE -> Object):  0.3098 m
+CALCULATED ACTION (normalized): [-0.1113, -0.1136,  0.1794, -0.4147,  0.1479,  0.9232,  0.1722, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.1807
+  - Right Touch Sensor: -0.3509
+  - Left Force Sensor:  [ 0.3509, -0.5678,  0.1807]
+  - Right Force Sensor: [-0.5678,  0.1807, -0.3509]
+
+==================== STEP 4 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.3258, 0.0106, 0.5078]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.3188 m
+  - Dist (EE -> Object):  0.2986 m
+CALCULATED ACTION (normalized): [-0.1156, -0.1146,  0.1827, -0.4154,  0.1456,  0.9227,  0.1751, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.1259
+  - Right Touch Sensor: -0.2920
+  - Left Force Sensor:  [0.292 , 0.0016, 0.1259]
+  - Right Force Sensor: [ 0.0016,  0.1259, -0.292 ]
+
+==================== STEP 5 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.3378, 0.0232, 0.505 ]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.3073 m
+  - Dist (EE -> Object):  0.2840 m
+CALCULATED ACTION (normalized): [-0.1198, -0.1155,  0.1859, -0.4159,  0.1433,  0.9222,  0.178 , -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.1063
+  - Right Touch Sensor: -0.2491
+  - Left Force Sensor:  [0.2491, 0.3173, 0.1063]
+  - Right Force Sensor: [ 0.3173,  0.1063, -0.2491]
+
+==================== STEP 6 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.3518, 0.0365, 0.5004]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.2956 m
+  - Dist (EE -> Object):  0.2674 m
+CALCULATED ACTION (normalized): [-0.5248, -0.7132,  0.3681, -0.3197,  0.7702,  0.3386, -0.1111, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.5689
+  - Right Touch Sensor: -0.1521
+  - Left Force Sensor:  [ 0.1521,  0.0852, -0.5689]
+  - Right Force Sensor: [ 0.0852, -0.5689, -0.1521]
+
+==================== STEP 7 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.367 , 0.0488, 0.4964]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.2835 m
+  - Dist (EE -> Object):  0.2502 m
+CALCULATED ACTION (normalized): [-0.1293, -0.1177,  0.1931, -0.4173,  0.1379,  0.9212,  0.1848, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.1034
+  - Right Touch Sensor: -0.0555
+  - Left Force Sensor:  [0.0555, 0.0325, 0.1034]
+  - Right Force Sensor: [ 0.0325,  0.1034, -0.0555]
+
+==================== STEP 8 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.3828, 0.061 , 0.4917]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.2723 m
+  - Dist (EE -> Object):  0.2328 m
+CALCULATED ACTION (normalized): [-0.1356, -0.1193,  0.1979, -0.4182,  0.1342,  0.9205,  0.1895, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0015
+  - Right Touch Sensor: -0.0119
+  - Left Force Sensor:  [0.0119, 0.4552, 0.0015]
+  - Right Force Sensor: [ 0.4552,  0.0015, -0.0119]
+
+==================== STEP 9 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.3993, 0.0719, 0.4847]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.2631 m
+  - Dist (EE -> Object):  0.2146 m
+CALCULATED ACTION (normalized): [-0.515 , -0.683 ,  0.3727, -0.3137,  0.7669,  0.3609, -0.1251, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.5432
+  - Right Touch Sensor: -0.2364
+  - Left Force Sensor:  [ 0.2364,  0.1216, -0.5432]
+  - Right Force Sensor: [ 0.1216, -0.5432, -0.2364]
+
+==================== STEP 10 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.4169, 0.0809, 0.4784]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.2538 m
+  - Dist (EE -> Object):  0.1960 m
+CALCULATED ACTION (normalized): [-0.5116, -0.6725,  0.3742, -0.3116,  0.766 ,  0.3686, -0.1301, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.5095
+  - Right Touch Sensor: 0.1378
+  - Left Force Sensor:  [-0.1378,  0.5345, -0.5095]
+  - Right Force Sensor: [ 0.5345, -0.5095,  0.1378]
+
+==================== STEP 11 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.4353, 0.0881, 0.4751]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.2433 m
+  - Dist (EE -> Object):  0.1779 m
+CALCULATED ACTION (normalized): [-0.509 , -0.6642,  0.3754, -0.3099,  0.7652,  0.3747, -0.134 , -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.5594
+  - Right Touch Sensor: 0.1326
+  - Left Force Sensor:  [-0.1326,  0.5902, -0.5594]
+  - Right Force Sensor: [ 0.5902, -0.5594,  0.1326]
+
+==================== STEP 12 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.4532, 0.0916, 0.4742]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.2322 m
+  - Dist (EE -> Object):  0.1610 m
+CALCULATED ACTION (normalized): [-0.5068, -0.6574,  0.3763, -0.3084,  0.7647,  0.3797, -0.1372, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.6910
+  - Right Touch Sensor: 0.0959
+  - Left Force Sensor:  [-0.0959,  0.3986, -0.691 ]
+  - Right Force Sensor: [ 0.3986, -0.691 ,  0.0959]
+
+==================== STEP 13 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.4704, 0.0912, 0.4759]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.2200 m
+  - Dist (EE -> Object):  0.1457 m
+CALCULATED ACTION (normalized): [-0.173 , -0.1299,  0.2249, -0.4236,  0.1091,  0.9164,  0.2205, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0952
+  - Right Touch Sensor: 0.1658
+  - Left Force Sensor:  [-0.1658, -0.2107, -0.0952]
+  - Right Force Sensor: [-0.2107, -0.0952,  0.1658]
+
+==================== STEP 14 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.4857, 0.0896, 0.4772]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.2099 m
+  - Dist (EE -> Object):  0.1322 m
+CALCULATED ACTION (normalized): [-0.5031, -0.6456,  0.3779, -0.3059,  0.7638,  0.3884, -0.1429, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.8138
+  - Right Touch Sensor: -0.0860
+  - Left Force Sensor:  [ 0.086 ,  0.5883, -0.8138]
+  - Right Force Sensor: [ 0.5883, -0.8138, -0.086 ]
+
+==================== STEP 15 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.4996, 0.0869, 0.4785]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.2011 m
+  - Dist (EE -> Object):  0.1202 m
+CALCULATED ACTION (normalized): [-0.1781, -0.1315,  0.2285, -0.4244,  0.1053,  0.9158,  0.2252, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.2611
+  - Right Touch Sensor: 0.0112
+  - Left Force Sensor:  [-0.0112, -0.3196, -0.2611]
+  - Right Force Sensor: [-0.3196, -0.2611,  0.0112]
+
+==================== STEP 16 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5119, 0.0824, 0.4804]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.1931 m
+  - Dist (EE -> Object):  0.1103 m
+CALCULATED ACTION (normalized): [-0.4988, -0.6322,  0.3796, -0.3031,  0.763 ,  0.3983, -0.1495, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.7974
+  - Right Touch Sensor: -0.1564
+  - Left Force Sensor:  [ 0.1564,  0.5902, -0.7974]
+  - Right Force Sensor: [ 0.5902, -0.7974, -0.1564]
+
+==================== STEP 17 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5235, 0.0779, 0.4828]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.1855 m
+  - Dist (EE -> Object):  0.1021 m
+CALCULATED ACTION (normalized): [-0.4968, -0.6259,  0.3804, -0.3017,  0.7626,  0.403 , -0.1527, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.7852
+  - Right Touch Sensor: -0.0419
+  - Left Force Sensor:  [ 0.0419,  0.377 , -0.7852]
+  - Right Force Sensor: [ 0.377 , -0.7852, -0.0419]
+
+==================== STEP 18 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5348, 0.0699, 0.4888]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.1755 m
+  - Dist (EE -> Object):  0.0976 m
+CALCULATED ACTION (normalized): [-0.4957, -0.6222,  0.3808, -0.3009,  0.7624,  0.4057, -0.1545, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.4499
+  - Right Touch Sensor: -0.1927
+  - Left Force Sensor:  [ 0.1927, -0.1614, -0.4499]
+  - Right Force Sensor: [-0.1614, -0.4499, -0.1927]
+
+==================== STEP 19 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5445, 0.0598, 0.4984]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.1635 m
+  - Dist (EE -> Object):  0.0994 m
+CALCULATED ACTION (normalized): [-0.4947, -0.6191,  0.3812, -0.3002,  0.7622,  0.4079, -0.156 , -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.3512
+  - Right Touch Sensor: -0.1283
+  - Left Force Sensor:  [ 0.1283, -0.3104, -0.3512]
+  - Right Force Sensor: [-0.3104, -0.3512, -0.1283]
+
+==================== STEP 20 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.553 , 0.0504, 0.5104]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.1506 m
+  - Dist (EE -> Object):  0.1065 m
+CALCULATED ACTION (normalized): [-0.4937, -0.6158,  0.3816, -0.2994,  0.7621,  0.4104, -0.1577, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.2883
+  - Right Touch Sensor: -0.1078
+  - Left Force Sensor:  [ 0.1078, -0.3474, -0.2883]
+  - Right Force Sensor: [-0.3474, -0.2883, -0.1078]
+
+==================== STEP 21 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5601, 0.0432, 0.5238]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.1372 m
+  - Dist (EE -> Object):  0.1169 m
+CALCULATED ACTION (normalized): [-0.4926, -0.6123,  0.382 , -0.2986,  0.7619,  0.4129, -0.1594, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.3284
+  - Right Touch Sensor: 0.0565
+  - Left Force Sensor:  [-0.0565, -0.4566, -0.3284]
+  - Right Force Sensor: [-0.4566, -0.3284,  0.0565]
+
+==================== STEP 22 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5657, 0.0386, 0.538 ]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.1237 m
+  - Dist (EE -> Object):  0.1291 m
+CALCULATED ACTION (normalized): [-0.4916, -0.609 ,  0.3824, -0.2979,  0.7618,  0.4154, -0.1611, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.2903
+  - Right Touch Sensor: 0.0184
+  - Left Force Sensor:  [-0.0184, -0.4712, -0.2903]
+  - Right Force Sensor: [-0.4712, -0.2903,  0.0184]
+
+==================== STEP 23 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5699, 0.0367, 0.5528]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.1097 m
+  - Dist (EE -> Object):  0.1422 m
+CALCULATED ACTION (normalized): [-0.4909, -0.6069,  0.3826, -0.2974,  0.7617,  0.4169, -0.1622, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0229
+  - Right Touch Sensor: -0.0176
+  - Left Force Sensor:  [ 0.0176, -0.475 , -0.0229]
+  - Right Force Sensor: [-0.475 , -0.0229, -0.0176]
+
+==================== STEP 24 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5729, 0.0376, 0.5679]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0952 m
+  - Dist (EE -> Object):  0.1556 m
+CALCULATED ACTION (normalized): [-0.4906, -0.6061,  0.3827, -0.2972,  0.7617,  0.4175, -0.1626, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.1011
+  - Right Touch Sensor: 0.1179
+  - Left Force Sensor:  [-0.118 , -0.1594,  0.1011]
+  - Right Force Sensor: [-0.1594,  0.1011,  0.1179]
+
+==================== STEP 25 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5754, 0.0412, 0.5823]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0807 m
+  - Dist (EE -> Object):  0.1681 m
+CALCULATED ACTION (normalized): [-0.4906, -0.6058,  0.3828, -0.2971,  0.7617,  0.4177, -0.1627, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0873
+  - Right Touch Sensor: 0.1051
+  - Left Force Sensor:  [-0.1051, -0.0159,  0.0873]
+  - Right Force Sensor: [-0.0159,  0.0873,  0.1051]
+
+==================== STEP 26 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5778, 0.046 , 0.5945]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0676 m
+  - Dist (EE -> Object):  0.1788 m
+CALCULATED ACTION (normalized): [-0.4905, -0.6057,  0.3828, -0.297 ,  0.7616,  0.4178, -0.1628, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0516
+  - Right Touch Sensor: 0.0717
+  - Left Force Sensor:  [-0.0717,  0.0479,  0.0516]
+  - Right Force Sensor: [0.0479, 0.0516, 0.0717]
+
+==================== STEP 27 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5801, 0.0509, 0.6049]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0562 m
+  - Dist (EE -> Object):  0.1879 m
+CALCULATED ACTION (normalized): [-0.4905, -0.6055,  0.3828, -0.2969,  0.7616,  0.418 , -0.1629, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0239
+  - Right Touch Sensor: 0.0433
+  - Left Force Sensor:  [-0.0433,  0.0719,  0.0239]
+  - Right Force Sensor: [0.0719, 0.0239, 0.0433]
+
+==================== STEP 28 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5823, 0.0557, 0.6135]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0464 m
+  - Dist (EE -> Object):  0.1957 m
+CALCULATED ACTION (normalized): [-0.4905, -0.6055,  0.3828, -0.2969,  0.7616,  0.418 , -0.1628, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0070
+  - Right Touch Sensor: 0.0362
+  - Left Force Sensor:  [-0.0362,  0.1309,  0.007 ]
+  - Right Force Sensor: [0.1309, 0.007 , 0.0362]
+
+==================== STEP 29 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5844, 0.06  , 0.6209]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0379 m
+  - Dist (EE -> Object):  0.2023 m
+CALCULATED ACTION (normalized): [-0.4905, -0.6056,  0.3828, -0.2969,  0.7616,  0.4179, -0.1628, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0051
+  - Right Touch Sensor: -0.0130
+  - Left Force Sensor:  [ 0.013 ,  0.0984, -0.0051]
+  - Right Force Sensor: [ 0.0984, -0.0051, -0.013 ]
+
+==================== STEP 30 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5862, 0.0636, 0.6268]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0311 m
+  - Dist (EE -> Object):  0.2079 m
+CALCULATED ACTION (normalized): [-0.4906, -0.6056,  0.3828, -0.2969,  0.7616,  0.4179, -0.1628, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0106
+  - Right Touch Sensor: -0.0367
+  - Left Force Sensor:  [ 0.0367,  0.0828, -0.0106]
+  - Right Force Sensor: [ 0.0828, -0.0106, -0.0367]
+
+==================== STEP 31 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5879, 0.0665, 0.6316]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0257 m
+  - Dist (EE -> Object):  0.2124 m
+CALCULATED ACTION (normalized): [-0.4906, -0.6057,  0.3828, -0.2968,  0.7616,  0.4179, -0.1627, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0211
+  - Right Touch Sensor: -0.0745
+  - Left Force Sensor:  [ 0.0745,  0.0801, -0.0211]
+  - Right Force Sensor: [ 0.0801, -0.0211, -0.0745]
+
+==================== STEP 32 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5894, 0.0688, 0.6354]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0214 m
+  - Dist (EE -> Object):  0.2160 m
+CALCULATED ACTION (normalized): [-0.4906, -0.6057,  0.3828, -0.2968,  0.7616,  0.4178, -0.1627, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0211
+  - Right Touch Sensor: -0.0961
+  - Left Force Sensor:  [ 0.0961,  0.0643, -0.0211]
+  - Right Force Sensor: [ 0.0643, -0.0211, -0.0961]
+
+==================== STEP 33 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5908, 0.0707, 0.6384]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0180 m
+  - Dist (EE -> Object):  0.2188 m
+CALCULATED ACTION (normalized): [-0.4906, -0.6058,  0.3828, -0.2968,  0.7616,  0.4178, -0.1626, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0240
+  - Right Touch Sensor: -0.1100
+  - Left Force Sensor:  [ 0.11  ,  0.0615, -0.024 ]
+  - Right Force Sensor: [ 0.0615, -0.024 , -0.11  ]
+
+==================== STEP 34 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.592 , 0.0722, 0.6407]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0153 m
+  - Dist (EE -> Object):  0.2210 m
+CALCULATED ACTION (normalized): [-0.4907, -0.6059,  0.3828, -0.2968,  0.7616,  0.4177, -0.1626, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0243
+  - Right Touch Sensor: -0.1217
+  - Left Force Sensor:  [ 0.1217,  0.0575, -0.0243]
+  - Right Force Sensor: [ 0.0575, -0.0243, -0.1217]
+
+==================== STEP 35 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5931, 0.0733, 0.6425]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0132 m
+  - Dist (EE -> Object):  0.2227 m
+CALCULATED ACTION (normalized): [-0.4907, -0.6059,  0.3828, -0.2968,  0.7616,  0.4177, -0.1626, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0263
+  - Right Touch Sensor: -0.1390
+  - Left Force Sensor:  [ 0.139 ,  0.0525, -0.0263]
+  - Right Force Sensor: [ 0.0525, -0.0263, -0.139 ]
+
+==================== STEP 36 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5942, 0.0743, 0.6438]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0115 m
+  - Dist (EE -> Object):  0.2241 m
+CALCULATED ACTION (normalized): [-0.4907, -0.6059,  0.3828, -0.2968,  0.7616,  0.4177, -0.1626, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0229
+  - Right Touch Sensor: -0.1494
+  - Left Force Sensor:  [ 0.1494,  0.0418, -0.0229]
+  - Right Force Sensor: [ 0.0418, -0.0229, -0.1494]
+
+==================== STEP 37 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5951, 0.075 , 0.6449]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0102 m
+  - Dist (EE -> Object):  0.2250 m
+CALCULATED ACTION (normalized): [-0.4907, -0.606 ,  0.3828, -0.2968,  0.7616,  0.4176, -0.1625, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0212
+  - Right Touch Sensor: -0.1479
+  - Left Force Sensor:  [ 0.1479,  0.0435, -0.0212]
+  - Right Force Sensor: [ 0.0435, -0.0212, -0.1479]
+
+==================== STEP 38 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.596 , 0.0756, 0.6456]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0091 m
+  - Dist (EE -> Object):  0.2258 m
+CALCULATED ACTION (normalized): [-0.4908, -0.6061,  0.3828, -0.2968,  0.7616,  0.4175, -0.1625, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0221
+  - Right Touch Sensor: -0.1619
+  - Left Force Sensor:  [ 0.1619,  0.0387, -0.0221]
+  - Right Force Sensor: [ 0.0387, -0.0221, -0.1619]
+
+==================== STEP 39 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5968, 0.076 , 0.6461]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0082 m
+  - Dist (EE -> Object):  0.2263 m
+CALCULATED ACTION (normalized): [-0.4908, -0.6062,  0.3828, -0.2968,  0.7616,  0.4175, -0.1624, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0183
+  - Right Touch Sensor: -0.1674
+  - Left Force Sensor:  [ 0.1674,  0.032 , -0.0183]
+  - Right Force Sensor: [ 0.032 , -0.0183, -0.1674]
+
+==================== STEP 40 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5975, 0.0763, 0.6465]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0075 m
+  - Dist (EE -> Object):  0.2266 m
+CALCULATED ACTION (normalized): [-0.4908, -0.6062,  0.3828, -0.2968,  0.7616,  0.4174, -0.1624, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0172
+  - Right Touch Sensor: -0.1716
+  - Left Force Sensor:  [ 0.1716,  0.0301, -0.0172]
+  - Right Force Sensor: [ 0.0301, -0.0172, -0.1716]
+
+==================== STEP 41 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5982, 0.0765, 0.6468]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0069 m
+  - Dist (EE -> Object):  0.2269 m
+CALCULATED ACTION (normalized): [-0.4908, -0.6063,  0.3828, -0.2968,  0.7616,  0.4174, -0.1623, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0143
+  - Right Touch Sensor: -0.1678
+  - Left Force Sensor:  [ 0.1678,  0.0295, -0.0143]
+  - Right Force Sensor: [ 0.0295, -0.0143, -0.1678]
+
+==================== STEP 42 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5988, 0.0767, 0.6469]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0063 m
+  - Dist (EE -> Object):  0.2270 m
+CALCULATED ACTION (normalized): [-0.4909, -0.6064,  0.3828, -0.2968,  0.7616,  0.4173, -0.1623, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0140
+  - Right Touch Sensor: -0.1738
+  - Left Force Sensor:  [ 0.1738,  0.0263, -0.014 ]
+  - Right Force Sensor: [ 0.0263, -0.014 , -0.1738]
+
+==================== STEP 43 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5994, 0.0768, 0.647 ]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0059 m
+  - Dist (EE -> Object):  0.2271 m
+CALCULATED ACTION (normalized): [-0.4909, -0.6064,  0.3828, -0.2968,  0.7616,  0.4173, -0.1623, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0090
+  - Right Touch Sensor: -0.1690
+  - Left Force Sensor:  [ 0.169 ,  0.0223, -0.009 ]
+  - Right Force Sensor: [ 0.0223, -0.009 , -0.169 ]
+
+==================== STEP 44 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.5999, 0.0769, 0.647 ]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0055 m
+  - Dist (EE -> Object):  0.2271 m
+CALCULATED ACTION (normalized): [-0.4909, -0.6065,  0.3828, -0.2968,  0.7616,  0.4172, -0.1622, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0108
+  - Right Touch Sensor: -0.1755
+  - Left Force Sensor:  [ 0.1755,  0.0243, -0.0108]
+  - Right Force Sensor: [ 0.0243, -0.0108, -0.1755]
+
+==================== STEP 45 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6003, 0.0769, 0.647 ]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0052 m
+  - Dist (EE -> Object):  0.2270 m
+CALCULATED ACTION (normalized): [-0.4909, -0.6065,  0.3828, -0.2968,  0.7616,  0.4172, -0.1622, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0082
+  - Right Touch Sensor: -0.1746
+  - Left Force Sensor:  [ 0.1746,  0.0218, -0.0082]
+  - Right Force Sensor: [ 0.0218, -0.0082, -0.1746]
+
+==================== STEP 46 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6008, 0.0769, 0.6469]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0050 m
+  - Dist (EE -> Object):  0.2270 m
+CALCULATED ACTION (normalized): [-0.491 , -0.6066,  0.3827, -0.2968,  0.7616,  0.4172, -0.1622, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0072
+  - Right Touch Sensor: -0.1756
+  - Left Force Sensor:  [ 0.1756,  0.0207, -0.0072]
+  - Right Force Sensor: [ 0.0207, -0.0072, -0.1756]
+
+==================== STEP 47 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6012, 0.0769, 0.6469]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0048 m
+  - Dist (EE -> Object):  0.2269 m
+CALCULATED ACTION (normalized): [-0.491 , -0.6067,  0.3827, -0.2968,  0.7616,  0.4171, -0.1621, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0064
+  - Right Touch Sensor: -0.1804
+  - Left Force Sensor:  [ 0.1804,  0.0169, -0.0064]
+  - Right Force Sensor: [ 0.0169, -0.0064, -0.1804]
+
+==================== STEP 48 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6015, 0.0769, 0.6468]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0047 m
+  - Dist (EE -> Object):  0.2268 m
+CALCULATED ACTION (normalized): [-0.491 , -0.6067,  0.3827, -0.2968,  0.7616,  0.4171, -0.1621, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0027
+  - Right Touch Sensor: -0.1741
+  - Left Force Sensor:  [ 0.1741,  0.0155, -0.0027]
+  - Right Force Sensor: [ 0.0155, -0.0027, -0.1741]
+
+==================== STEP 49 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6018, 0.0768, 0.6467]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0046 m
+  - Dist (EE -> Object):  0.2267 m
+CALCULATED ACTION (normalized): [-0.491 , -0.6068,  0.3827, -0.2969,  0.7616,  0.417 , -0.1621, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0022
+  - Right Touch Sensor: -0.1710
+  - Left Force Sensor:  [ 0.171 ,  0.0188, -0.0022]
+  - Right Force Sensor: [ 0.0188, -0.0022, -0.171 ]
+
+==================== STEP 50 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6021, 0.0768, 0.6466]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0045 m
+  - Dist (EE -> Object):  0.2266 m
+CALCULATED ACTION (normalized): [-0.491 , -0.6068,  0.3827, -0.2969,  0.7616,  0.417 , -0.162 , -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0036
+  - Right Touch Sensor: -0.1801
+  - Left Force Sensor:  [ 0.1801,  0.016 , -0.0036]
+  - Right Force Sensor: [ 0.016 , -0.0036, -0.1801]
+
+==================== STEP 51 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6024, 0.0768, 0.6465]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0044 m
+  - Dist (EE -> Object):  0.2265 m
+CALCULATED ACTION (normalized): [-0.4911, -0.6069,  0.3827, -0.2969,  0.7616,  0.4169, -0.162 , -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0001
+  - Right Touch Sensor: -0.1729
+  - Left Force Sensor:  [ 0.1729,  0.0155, -0.0001]
+  - Right Force Sensor: [ 0.0155, -0.0001, -0.1729]
+
+==================== STEP 52 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6026, 0.0767, 0.6464]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0044 m
+  - Dist (EE -> Object):  0.2264 m
+CALCULATED ACTION (normalized): [-0.4911, -0.6069,  0.3827, -0.2969,  0.7616,  0.4169, -0.162 , -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0026
+  - Right Touch Sensor: -0.1798
+  - Left Force Sensor:  [ 0.1798,  0.0155, -0.0026]
+  - Right Force Sensor: [ 0.0155, -0.0026, -0.1798]
+
+==================== STEP 53 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6028, 0.0767, 0.6463]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0044 m
+  - Dist (EE -> Object):  0.2263 m
+CALCULATED ACTION (normalized): [-0.4911, -0.607 ,  0.3827, -0.2969,  0.7616,  0.4169, -0.162 , -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0024
+  - Right Touch Sensor: -0.1692
+  - Left Force Sensor:  [0.1692, 0.0149, 0.0024]
+  - Right Force Sensor: [ 0.0149,  0.0024, -0.1692]
+
+==================== STEP 54 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.603 , 0.0766, 0.6462]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0044 m
+  - Dist (EE -> Object):  0.2262 m
+CALCULATED ACTION (normalized): [-0.4911, -0.607 ,  0.3827, -0.2969,  0.7616,  0.4168, -0.1619, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  -0.0021
+  - Right Touch Sensor: -0.1755
+  - Left Force Sensor:  [ 0.1755,  0.0175, -0.0021]
+  - Right Force Sensor: [ 0.0175, -0.0021, -0.1755]
+
+==================== STEP 55 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6032, 0.0766, 0.6461]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0044 m
+  - Dist (EE -> Object):  0.2262 m
+CALCULATED ACTION (normalized): [-0.4911, -0.6071,  0.3827, -0.2969,  0.7616,  0.4168, -0.1619, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0033
+  - Right Touch Sensor: -0.1725
+  - Left Force Sensor:  [0.1725, 0.0123, 0.0033]
+  - Right Force Sensor: [ 0.0123,  0.0033, -0.1725]
+
+==================== STEP 56 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6034, 0.0765, 0.6461]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0045 m
+  - Dist (EE -> Object):  0.2261 m
+CALCULATED ACTION (normalized): [-0.4911, -0.6071,  0.3827, -0.2969,  0.7616,  0.4168, -0.1619, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0025
+  - Right Touch Sensor: -0.1751
+  - Left Force Sensor:  [0.1751, 0.0134, 0.0025]
+  - Right Force Sensor: [ 0.0134,  0.0025, -0.1751]
+
+==================== STEP 57 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6035, 0.0765, 0.646 ]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0045 m
+  - Dist (EE -> Object):  0.2260 m
+CALCULATED ACTION (normalized): [-0.4911, -0.6071,  0.3827, -0.2969,  0.7616,  0.4168, -0.1619, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0030
+  - Right Touch Sensor: -0.1700
+  - Left Force Sensor:  [0.17  , 0.0163, 0.003 ]
+  - Right Force Sensor: [ 0.0163,  0.003 , -0.17  ]
+
+==================== STEP 58 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6037, 0.0764, 0.6459]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0045 m
+  - Dist (EE -> Object):  0.2259 m
+CALCULATED ACTION (normalized): [-0.4912, -0.6072,  0.3827, -0.2969,  0.7616,  0.4167, -0.1618, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0013
+  - Right Touch Sensor: -0.1781
+  - Left Force Sensor:  [0.1781, 0.0155, 0.0013]
+  - Right Force Sensor: [ 0.0155,  0.0013, -0.1781]
+
+==================== STEP 59 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6038, 0.0764, 0.6459]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0046 m
+  - Dist (EE -> Object):  0.2259 m
+CALCULATED ACTION (normalized): [-0.4912, -0.6073,  0.3827, -0.2969,  0.7616,  0.4166, -0.1618, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0047
+  - Right Touch Sensor: -0.1686
+  - Left Force Sensor:  [0.1686, 0.015 , 0.0047]
+  - Right Force Sensor: [ 0.015 ,  0.0047, -0.1686]
+
+==================== STEP 60 ====================
+EXPERT STATE: MOVE_TO_HOVER
+  - ACTUAL EE POS:      [0.6039, 0.0764, 0.6458]
+  - ACTUAL OBJECT POS:  [0.6039, 0.0745, 0.42  ]
+EXPERT INTENT:
+  - TARGET EE POS:      [0.6039, 0.0745, 0.65  ]
+  - GRIPPER ACTION:     -1.0000
+METRICS:
+  - Dist (EE -> Target):  0.0046 m
+  - Dist (EE -> Object):  0.2258 m
+CALCULATED ACTION (normalized): [-0.4912, -0.6074,  0.3827, -0.297 ,  0.7616,  0.4166, -0.1618, -1.    ]
+OUTCOME:
+  - Is Grasped Flag:    False
+  - Left Touch Sensor:  0.0032
+  - Right Touch Sensor: -0.1759
+  - Left Force Sensor:  [0.1759, 0.013 , 0.0032]
+  - Right Force Sensor: [ 0.013 ,  0.0032, -0.1759]
+
+==================== EPISODE END ====================
+Episode finished at step 60. Final expert state: DONE
