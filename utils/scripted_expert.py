@@ -346,7 +346,7 @@ class ScriptedExpert:
                 retract_z
             ])
             self._target_pose_7d = np.concatenate([target_pos, self._downward_quat])
-            self._gripper_action = -1.0  # Open
+            self._gripper_action = 1.0  # Open
             if self._wait_counter > self.cfg.retract_duration_steps:
                 self.succeeded = True
                 self._advance_state("DONE")
