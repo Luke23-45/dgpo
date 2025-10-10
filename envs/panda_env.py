@@ -252,6 +252,8 @@ class PandaEnv(gym.Env):
         for i in range(self.model.ngeom):
             if "right_finger" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, self.model.geom_bodyid[i]):
                 self.right_finger_geom_ids.append(i)
+
+
         # 5. Define Spaces (Must be last)
         self._define_spaces()
 
@@ -899,7 +901,15 @@ class PandaEnv(gym.Env):
         quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float32)
 
         return quat_xyzw
-    
+    def get_goal_orientation_expert(self) -> np.ndarray:
+        """Gets the ground-truth world orientation of the goal for the expert as an xyzw quat."""
+        body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "goal")
+        if body_id == -1:
+            raise ValueError("Body 'goal' not found for expert pipeline.")
+        # Goals are simple bodies, their orientation is in `xquat`
+        quat_wxyz = self.data.xquat[body_id].copy()
+        return self._mujoco_quat_to_scipy_xyzw(quat_wxyz)
+        
     def get_expert_obs(self) -> Dict[str, np.ndarray]:
         """
         Returns a rich observation dictionary for the expert pipeline.
@@ -909,7 +919,9 @@ class PandaEnv(gym.Env):
         """
         # Start with the standard observation, which now includes the wrist image.
         obs = self._get_obs()
-
+        goal_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "goal_geom")
+        goal_size_full = self.model.geom_size[goal_geom_id] * 2
+        obs["goal_size_world"] = goal_size_full.astype(np.float32)
         # Add ground-truth data required ONLY by the expert.
         obs["ee_pose_world"] = self.get_ee_pose()
         obs["object_pos_world"] = self.get_object_pos_expert()
@@ -921,7 +933,14 @@ class PandaEnv(gym.Env):
         # Use the single, correct flag and match the float32 dtype of the observation space
         obs["is_grasped"] = np.array([self._is_physically_grasped], dtype=np.float32)
         obs["object_orn_world"] = self.get_object_orientation_expert()
-
+        obs["goal_orn_world"] = self.get_goal_orientation_expert()
+        finger_joint1_idx = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "finger_joint1")
+        finger_joint2_idx = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "finger_joint2")
+        
+        obs["gripper_qpos"] = np.array([
+            self.data.qpos[self.model.jnt_qposadr[finger_joint1_idx]],
+            self.data.qpos[self.model.jnt_qposadr[finger_joint2_idx]]
+        ], dtype=np.float32)
         return obs
       
 

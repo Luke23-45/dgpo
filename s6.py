@@ -29,10 +29,8 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from envs.panda_env import PandaEnv
 from utils.scripted_expert import ScriptedExpert
 from utils.ik_solver import IKSolver
-# --- FIX: REMOVED UNNECESSARY AND BUGGY IMPORT ---
-# from utils.controls import gripper_action_to_ctrl 
 
-# --- Setup Logging ---
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | [%(name)s] | %(message)s"
 )
@@ -104,13 +102,7 @@ def main(args: argparse.Namespace):
             expert_obs = env.get_expert_obs()
 
             # Get the target pose and gripper command from our stateful expert
-            target_pose, gripper_action = expert.get_target_pose(
-                expert_obs["ee_pose_world"],
-                expert_obs["object_pos_world"],
-                expert_obs["object_orn_world"], # <--- CORRECTED ARGUMENT
-                expert_obs["goal_pos_world"],
-                expert_obs["is_grasped"][0] > 0.5,
-            )
+            target_pose, gripper_action = expert.get_target_pose(expert_obs)
 
             log.info(f"--- Step {step_num} | Expert State: {expert.get_state()} ---")
             # log.info(f"   Object Position (World): {np.round(expert_obs['object_pos_world'], 3)}")
@@ -139,6 +131,17 @@ def main(args: argparse.Namespace):
             # Render and write frame
             frame_rgb = env.render()
             frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            state_text = f"State: {expert.get_state()}"
+            cv2.putText(
+                img=frame_bgr,
+                text=state_text,
+                org=(10, 30),  # Position (bottom-left corner of text)
+                fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                fontScale=0.8,
+                color=(255, 205, 100),  # White color in BGR
+                thickness=2,
+                lineType=cv2.LINE_AA
+            )
             video_writer.write(frame_bgr)
 
             # Check for episode completion
