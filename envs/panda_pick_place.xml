@@ -6,7 +6,8 @@
   <include file="../mujoco_menagerie/franka_emika_panda/panda.xml"/>
 
   <compiler meshdir="../mujoco_menagerie/franka_emika_panda/assets" angle="radian" autolimits="true"/>
-  <option timestep="0.002" integrator="RK4" gravity="0 0 -9.81" cone="elliptic"/>
+  <option timestep="0.0005" integrator="RK4" gravity="0 0 -9.81" cone="elliptic"/>
+
 
   <visual>
     <quality shadowsize="8192" />
@@ -94,7 +95,7 @@
     <material name="goal_mat" rgba="0.1 0.9 0.1 0.5"/>
   </asset>
   <default>
-    <geom solref="0.005 1" solimp="0.95 0.99 0.001" friction="1.0 0.1 0.01"/>
+    <geom solref="0.01 1" solimp="0.99 0.995 0.001" friction="1.5 0.005 0.0001"/>
   </default>
   <worldbody>
 
@@ -150,7 +151,7 @@
 
     <!-- Goal marker (on table surface) -->
     <body name="goal" pos="0.55 0.2 0.401">
-      <geom name="goal_geom" type="box" size="0.025 0.025 0.001" material="goal_mat" contype="0" conaffinity="0"/>
+      <geom name="goal_geom" type="box" size="0.05 0.05 0.001" material="goal_mat" contype="0" conaffinity="0"/>
     </body>
     <!-- <body name="clutter_box" pos="0.7 0.1 0.41">
       <joint type="free" name="clutter_box_joint" damping="0.05"/>

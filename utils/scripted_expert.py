@@ -15,7 +15,7 @@ class ObjectProfile:
 class ExpertConfig:
     """Configuration for the scripted expert policy."""
     hover_height: float = 0.10
-    pos_tolerance: float = 0.015
+    pos_tolerance: float = 0.02
     workspace: dict = None
     grasp_offset_z: float = 0.025  
     descent_xy_offset: np.ndarray = np.array([0.00, 0.0, 0.0])   
@@ -30,6 +30,7 @@ class ExpertConfig:
     gripper_closed_threshold: float = 0.002 # Considered "closed" if joint position is < 0.002
     home_pose_7d: np.ndarray = np.array([0.5, 0.0, 0.7, 0.0, 1.0, 0.0, 0.0])
     orn_tolerance_rad: float = 0.05 
+    max_lift_height: float = 0.65
 
 
     def __post_init__(self):
@@ -99,7 +100,7 @@ class ScriptedExpert:
         self._lift_target_pos = None
         self._final_hover_pose = None # Already exists
         self._final_place_pose = None # <-- ADD THIS LINE
-        
+
     def _get_motion_aligned_orientation(self, start_pos, end_pos):
         """Calculates a downward-facing quat with yaw aligned to the direction of motion."""
         move_vector = end_pos - start_pos
@@ -139,19 +140,7 @@ class ScriptedExpert:
         self._state = new_state
         self._reset_wait_counter()
 
-    def _handle_grasp_failure(self):
-        """Handles grasp failure by retrying or failing gracefully."""
-        self._grasp_retry_count += 1
-        if self._grasp_retry_count <= self.cfg.max_grasp_retries:
-            # Retry: Go back to pre-grasp
-            self._state = "MOVE_TO_PRE_GRASP"
-            self._gripper_action = -1.0  # Ensure open for retry
-            self._reset_wait_counter()
-        else:
-            # Exhaust retries: Fail to done
-            self.succeeded = False
-            self._state = "DONE"
-            self._gripper_action = -1.0
+
 
 
     def _calculate_aligned_orientation(self, object_quat_xyzw: np.ndarray, gripper_quat_xyzw: np.ndarray) -> np.ndarray:
@@ -234,6 +223,76 @@ class ScriptedExpert:
             return self._downward_quat.copy()
 
 
+    def adaptive_hover_height(self, current_ee_xy: np.ndarray, robot_base_xy: np.ndarray) -> float:
+        """
+        Calculates a safe hover height that decreases as the arm extends.
+        The min/max values are derived from the ExpertConfig for consistency.
+        """
+        # 1. Define the kinematic parameters of the robot's reach.
+        # These are based on the expert's defined safe workspace.
+        min_reach = 0.35
+        max_reach = 0.68
+        
+        # --- START OF THE FIX ---
+        # 2. Derive min/max heights from the existing configuration.
+        # The maximum height is the standard hover height.
+        max_hover_height = self.cfg.hover_height  # Typically 0.10
+        # The minimum height must be greater than the lift verification threshold.
+        # We add a 1cm safety margin.
+        min_hover_height = self.cfg.verify_lift_height + 0.01 # Typically 0.03 + 0.01 = 0.04
+        # --- END OF THE FIX ---
+
+        # 3. Calculate the current horizontal reach.
+        reach = np.linalg.norm(current_ee_xy - robot_base_xy)
+
+        # 4. Calculate the "risk factor" (0.0 to 1.0) based on the reach.
+        if max_reach <= min_reach: return min_hover_height
+        risk_factor = (reach - min_reach) / (max_reach - min_reach)
+        risk_factor = np.clip(risk_factor, 0.0, 1.0)
+
+        # 5. Linearly interpolate the hover height.
+        hover_height = max_hover_height - risk_factor * (max_hover_height - min_hover_height)
+        
+        return hover_height
+    
+    def _clamp_to_workspace(self, pos: np.ndarray) -> np.ndarray:
+        """Clamps position to safe workspace bounds."""
+        pos = pos.copy()
+        pos[0] = np.clip(pos[0], *self.cfg.workspace["x"])
+        pos[1] = np.clip(pos[1], *self.cfg.workspace["y"])
+        pos[2] = np.clip(pos[2], *self.cfg.workspace["z"])
+        return pos
+
+    def _handle_failure(self):
+        """
+        Handles any timeout or failure. If the failure occurs before the object
+        is placed, it retries the grasp. If it occurs after placement,
+        it terminates the episode as a failure.
+        """
+        # Define the states that occur *after* a successful placement.
+        # A failure in these states is terminal and should not be retried.
+        terminal_states = ["AWAIT_PLACEMENT_CONTACT", "RELEASE", "WAIT_FOR_RELEASE", "RETRACT"]
+
+        if self._state in terminal_states:
+            # If we fail during the placement/retraction phase, the task is over.
+            print(f"ERROR: Terminal failure in state '{self._state}'. Aborting episode.")
+            self.succeeded = False
+            self._state = "DONE"
+            self._gripper_action = 1.0 # Open gripper for safety
+        else:
+            # For any other failure (e.g., during pre-grasp, grasp, lift), attempt a retry.
+            self._grasp_retry_count += 1
+            if self._grasp_retry_count <= self.cfg.max_grasp_retries:
+                print(f"WARN: Failure in state '{self._state}'. Attempting retry #{self._grasp_retry_count}.")
+                self._state = "MOVE_TO_PRE_GRASP"
+                self._gripper_action = -1.0 # Ensure gripper is open for retry
+                self._reset_wait_counter()
+            else:
+                print(f"ERROR: Max retries ({self.cfg.max_grasp_retries}) exceeded. Aborting episode.")
+                self.succeeded = False
+                self._state = "DONE"
+                self._gripper_action = 1.0
+
     def get_target_pose(
         self,
         expert_obs: dict, 
@@ -249,6 +308,7 @@ class ScriptedExpert:
         goal_pos_world = expert_obs["goal_pos_world"]
         is_grasped = expert_obs["is_grasped"][0] > 0.5
         gripper_qpos = expert_obs["gripper_qpos"]
+        robot_base_pos_world = expert_obs["robot_base_pos_world"]
 
         ee_pos = ee_pose_world[:3]
         object_half_height = self.object.size[2] / 2.0
@@ -259,6 +319,7 @@ class ScriptedExpert:
 
         self._wait_counter += 1
         timeout_steps = 0
+        print(f"is_grasped -- {is_grasped}")
         
         # States that follow a trajectory for a fixed duration.
         # The timeout should be slightly longer than their intended duration.
@@ -267,6 +328,8 @@ class ScriptedExpert:
         elif self._state == "MOVE_TO_GOAL":
             timeout_steps = self.cfg.move_duration_steps + 30 # Extra generous
         elif self._state == "MOVE_HOVER_FINAL":
+            timeout_steps = self.cfg.retract_duration_steps + 20
+        elif self._state == "DESCEND_TO_PLACE":
             timeout_steps = self.cfg.retract_duration_steps + 20
         
         # States that are event-driven (e.g., waiting for grasp).
@@ -284,7 +347,7 @@ class ScriptedExpert:
         # 2. Now, check if the single, unified timeout has been exceeded.
         if self._wait_counter > timeout_steps:
             print(f"WARN: Timeout of {timeout_steps} steps exceeded in state '{self._state}'. Handling grasp failure.")
-            self._handle_grasp_failure()
+            self._handle_failure()
             
         if self._state == "MOVE_TO_PRE_GRASP":
 
@@ -390,40 +453,55 @@ class ScriptedExpert:
                 self.object_pos_pre_lift = cube_pos_world[2] 
                 self._advance_state("LIFT")
             elif self._wait_counter > 30:
-                self._handle_grasp_failure()
+                self._handle_failure()
 
         elif self._state == "LIFT":
-            # --- START OF FIX: Use a fixed, object-centric lift target ---
-            
+            """
+            Adaptive Lift: Adjusts target height based on reach distance to maintain
+            kinematic stability.
+            """
             # === STATE ENTRY LOGIC (runs only on the first step) ===
             if self._wait_counter == 1:
-                # Calculate the lift target position ONCE and store it.
-                # Base the XY on the cube's position at the start of the lift for a perfect vertical trajectory.
-                object_top_z_start = self.object_pos_pre_lift + object_half_height
+                # 1. Get the robot base position from the observation.
+                robot_base_pos_world = expert_obs["robot_base_pos_world"]
+                
+                # 2. Compute the adaptive hover height based on the current reach.
+                adaptive_h = self.adaptive_hover_height(ee_pos[:2], robot_base_pos_world[:2])
+                print(f"INFO: Adaptive lift height for reach {np.linalg.norm(ee_pos[:2] - robot_base_pos_world[:2]):.2f}m is {adaptive_h:.3f}m")
+
+                # 3. Compute the lift target, starting from the current EE position.
+                start_lift_pos = ee_pos.copy()
                 self._lift_target_pos = np.array([
-                    cube_pos_world[0], 
-                    cube_pos_world[1], 
-                    object_top_z_start + self.cfg.hover_height
+                    start_lift_pos[0],
+                    start_lift_pos[1],
+                    start_lift_pos[2] + adaptive_h
                 ])
 
+                # 4. Apply a final workspace clamp as a safety measure.
+                self._lift_target_pos = self._clamp_to_workspace(self._lift_target_pos)
+
+            # === CONTINUOUS LOGIC & TRANSITION ===
             
-            # Command the robot to move to the STORED target position.
+            # Command the robot to the stored lift target.
             self._target_pose_7d = np.concatenate([self._lift_target_pos, self.current_grasp_orientation])
-            self._gripper_action = -1.0 # Keep gripper closed
-            # --- END OF FIX ---
+            self._gripper_action = -1.0
 
-            # The failure checks remain the same and are already robust.
-            is_object_lifted = (cube_pos_world[2] - self.object_pos_pre_lift) > self.cfg.verify_lift_height
+            # Failure checks and transition logic remain the same.
             is_still_grasped = is_grasped
+            if self._wait_counter > 15 and not is_still_grasped:
+                self._handle_failure()
+                # DO NOT return here. Allow the function to finish and return a valid action.
 
-            if self._wait_counter > 15:
-                if not is_object_lifted or not is_still_grasped:
-                    print(f"DEBUG: Grasp failure detected in LIFT. Lifted: {is_object_lifted}, Grasped: {is_still_grasped}")
-                    self._handle_grasp_failure()
-            
-            # The success transition now correctly checks against the fixed target.
-            if np.linalg.norm(ee_pos - self._lift_target_pos) < self.cfg.pos_tolerance:
-                self._advance_state("MOVE_TO_GOAL")
+            # --- Success check: Have we reached the target? ---
+            else: # Use 'else' to prevent trying to transition on the same frame as a failure.
+                is_at_target = np.linalg.norm(ee_pos - self._lift_target_pos) < self.cfg.pos_tolerance
+                if is_at_target:
+                    # Final sanity check before transitioning.
+                    if is_still_grasped:
+                        self._advance_state("MOVE_TO_GOAL")
+                    else:
+                        print("DEBUG: Reached lift target, but grasp was lost. Failing.")
+                        self._handle_failure()
 
         elif self._state == "MOVE_TO_GOAL":
             # --- START OF FULL REPLACEMENT ---
@@ -490,153 +568,115 @@ class ScriptedExpert:
                 # We can now transition directly to placing the object.
                 self._advance_state("PREPARE_PLACE")
 
+
         elif self._state == "PREPARE_PLACE":
             """
-            NEW, ROBUST STATE: Corrects both position and orientation to a precise
-            hovering pose above the goal before the final descent.
+            Definitive hover pose calculation.
             """
-            # === STATE ENTRY LOGIC (runs only on the first step) ===
             if self._wait_counter == 1:
-                # 1. Define the single, ideal 7D pre-placement pose for the END-EFFECTOR.
+                # Get the full sizes of the object and goal
+                goal_size = expert_obs["goal_size_world"]
+                object_size = self.object.size
+
+                x_offset = (goal_size[0] - object_size[0]) / 2.0
+                y_offset = (goal_size[1] - object_size[1]) / 2.0
                 
-                # --- START OF CENTERING FIX ---
+                object_target_xy = np.array([
+                    goal_pos_world[0],
+                    goal_pos_world[1] 
+                ])
                 
-                # The final desired position for the OBJECT'S CENTER.
-                object_final_pos = np.array([
+                # The hover height for the OBJECT'S CENTER.
+                final_place_z = self.table_surface_z + self.object.size[2]
+                hover_z = final_place_z + self.cfg.hover_height
+
+                tcp_hover_pos = np.array([
                     goal_pos_world[0],
                     goal_pos_world[1],
-                    self.table_surface_z + object_half_height # Z-pos of object center on table
+                    hover_z
                 ])
 
-                # To achieve this, the TCP must be positioned above the object's final center
-                # by half the object's height. This is our hover target for the TCP.
-                tcp_hover_pos = np.array([
-                    object_final_pos[0],
-                    object_final_pos[1],
-                    object_final_pos[2] + object_half_height + self.cfg.hover_height
-                ])
-                # --- END OF CENTERING FIX ---
-
-                # The target orientation is the one calculated for placement.
                 goal_orn_world = expert_obs["goal_orn_world"]
                 target_orn = self._calculate_aligned_orientation(
                     goal_orn_world, ee_pose_world[3:]
                 )
                 
-                # 2. Store this fixed 7D pose and reset the stability counter.
+                # Store this definitive 7D hover pose.
                 self._final_hover_pose = np.concatenate([tcp_hover_pos, target_orn])
                 self._orientation_stable_counter = 0
 
-            # === CONTINUOUS LOGIC (runs every step) ===
-            
-            # Command the robot to go to the STORED final hover pose.
             self._target_pose_7d = self._final_hover_pose
-            self._gripper_action = -1.0  # Keep gripper closed
+            self._gripper_action = -1.0
 
-            # === ROBUST TRANSITION LOGIC ===
-            
-            # Condition 1: Is the robot at the target pose and stable?
             pos_error = np.linalg.norm(ee_pos - self._final_hover_pose[:3])
-            
             R_current = R.from_quat(ee_pose_world[3:])
             R_target = R.from_quat(self._final_hover_pose[3:])
             angular_distance = (R_target.inv() * R_current).magnitude()
-            
-            is_at_pose = (pos_error < self.cfg.pos_tolerance) and \
-                         (angular_distance < self.cfg.orn_tolerance_rad)
+            is_at_pose = (pos_error < self.cfg.pos_tolerance) and (angular_distance < self.cfg.orn_tolerance_rad)
 
-            if is_at_pose:
-                self._orientation_stable_counter += 1
-            else:
-                self._orientation_stable_counter = 0
+            if is_at_pose: self._orientation_stable_counter += 1
+            else: self._orientation_stable_counter = 0
             
             is_stable = self._orientation_stable_counter > 5
-
-            # Condition 2: Timeout safety net.
             is_timed_out = self._wait_counter > 60
 
             if is_stable or is_timed_out:
-                if is_timed_out:
-                    print("WARN: PREPARE_PLACE timed out.")
-                # Commit the final, correct orientation before descending.
+                if is_timed_out: print("WARN: PREPARE_PLACE timed out.")
                 self.current_grasp_orientation = self._final_hover_pose[3:].copy()
                 self._advance_state("DESCEND_TO_PLACE")
 
+
         elif self._state == "DESCEND_TO_PLACE": 
-            # --- START OF FINAL, EDGE-ALIGNED PLACEMENT LOGIC ---
-            
-            # Get the full sizes of the object and goal
-            goal_size = expert_obs["goal_size_world"]
-            object_size = self.object.size
-
-            # Calculate the required offset to align the "bottom-left" (min-X, min-Y) edges
-            x_offset = (goal_size[0] - object_size[0]) / 2.0
-            y_offset = (goal_size[1] - object_size[1]) / 2.0
-            
-            # The target for the OBJECT'S CENTER is the goal's center minus the offsets.
-            # (Assuming +X is right, +Y is forward)
-            object_target_xy = np.array([
-                goal_pos_world[0] - x_offset,
-                goal_pos_world[1] - y_offset
-            ])
-
-            # The Z-height for the object's CENTER when it rests on the table.
-            object_center_on_table_z = self.table_surface_z + object_half_height
-
-            # To place the object correctly, the TCP (end-effector) must be positioned
-            # above the object's center by half the object's height.
-            tcp_placement_z = object_center_on_table_z + object_half_height
-
-            # Construct the final target position FOR THE END-EFFECTOR.
-            target_pos = np.array([
-                object_target_xy[0],
-                object_target_xy[1],
-                tcp_placement_z
-            ])
-
-            # Use the final, correct orientation from the previous state.
-            self._target_pose_7d = np.concatenate([target_pos, self.current_grasp_orientation])
-            self._gripper_action = -1.0 # Keep gripper closed
-
-            if np.linalg.norm(ee_pos - target_pos) < self.cfg.pos_tolerance:
-                self._advance_state("AWAIT_PLACEMENT_CONTACT")  
-        
-        elif self._state == "AWAIT_PLACEMENT_CONTACT":
             """
-            NEW, ROBUST STATE: Holds the final placement pose and waits for physical
-            confirmation that the object is supported by the table before releasing.
+            Authoritative descent to the final placement pose. It calculates the
+            target from scratch using ground truth to be immune to any and all prior errors.
             """
-            object_center_on_table_z = self.table_surface_z + object_half_height
+            # --- START OF THE "TRUST NOTHING" FIX ---
+            
+            # 1. Recalculate the ideal edge-aligned XY target for the OBJECT from ground truth.
+            tcp_placement_z = self.table_surface_z + self.object.size[2]
 
-            # To place the object correctly, the TCP (end-effector) must be positioned
-            # above the object's center by half the object's height.
-            tcp_placement_z = object_center_on_table_z + object_half_height
-
-            # Construct the final target position FOR THE END-EFFECTOR.
-            target_pos = np.array([
+            # 2. Assemble the definitive target pose. The XY is simply the goal's center.
+            place_pos = np.array([
                 goal_pos_world[0],
                 goal_pos_world[1],
                 tcp_placement_z
             ])
-            # 1. Command the robot to hold the final placement pose.
-            # We use the pose from the previous state's target for stability.
-            self._target_pose_7d = np.concatenate([target_pos, self.current_grasp_orientation])
-            self._gripper_action = -1.0 # Keep holding
+            
+            self._target_pose_7d = np.concatenate([place_pos, self.current_grasp_orientation])
+            self._gripper_action = -1.0
 
-            # 2. Check for physical confirmation of placement.
-            # When the object is supported by the table, the force on the gripper will drop.
-            # We check if the object's upward velocity has stopped, indicating contact.
-            object_is_supported = abs(expert_obs.get("object_vel", [0,0,0,0,0,0])[2]) < 0.005
+            # --- END OF THE "TRUST NOTHING" FIX ---
 
-            # We wait a few steps for physics to stabilize AND for the object to be supported.
+            # The robust, physically-grounded transition logic remains correct.
+            object_vertical_velocity = expert_obs.get("object_vel", [0]*6)[2]
+            contact_made = self._wait_counter > 5 and abs(object_vertical_velocity) < 0.01
+            is_timed_out = self._wait_counter > self.cfg.place_duration_steps
+
+            if contact_made or is_timed_out:
+                if is_timed_out:
+                    print("WARN: DESCEND_TO_PLACE timed out. Forcing transition.")
+                # Store the final place pose for the AWAIT_CONTACT state to use.
+                self._final_place_pose = self._target_pose_7d.copy()
+                self._advance_state("AWAIT_PLACEMENT_CONTACT")
+
+        elif self._state == "AWAIT_PLACEMENT_CONTACT":
+            """
+            Holds the definitive final placement pose and waits for physical contact.
+            """
+            # Command the robot to hold the FINAL, correct placement pose.
+            self._target_pose_7d = self._final_place_pose
+            self._gripper_action = -1.0 
+
+            object_is_supported = abs(expert_obs.get("object_vel", [0,0,0,0,0,0])[2]) < 0.001
+
             if self._wait_counter > 5 and object_is_supported:
                 self._advance_state("RELEASE")
-            
-            # Fallback timeout
             elif self._wait_counter > 25:
                 print("WARN: AWAIT_PLACEMENT_CONTACT timed out. Forcing release.")
                 self._advance_state("RELEASE")
-
+    
+    
         elif self._state == "RELEASE":
             # Hold position and open gripper (object stays via physics)
             self._target_pose_7d = np.concatenate([ee_pos, self.current_grasp_orientation]) 
@@ -683,16 +723,15 @@ class ScriptedExpert:
             
             # Command the robot to move to the STORED fixed retract position.
             self._target_pose_7d = np.concatenate([self._retract_pos, self.current_grasp_orientation])
-            self._gripper_action = 1.0  # Keep gripper open
+            self._gripper_action = -1.0  # Keep gripper open
 
             # === TRANSITION LOGIC (position-based with timeout) ===
             
             # Transition when the end-effector reaches the target retract position.
-            if np.linalg.norm(ee_pos - self._retract_pos) < self.cfg.pos_tolerance:
+            print(f"np.linalg.norm(ee_pos - self._retract_pos) - {round(np.linalg.norm(ee_pos - self._retract_pos),3) } and self.cfg.pos_tolerance - {self.cfg.pos_tolerance}")
+            if round(np.linalg.norm(ee_pos - self._retract_pos),3) < self.cfg.pos_tolerance:
                 self.succeeded = True
                 self._advance_state("DONE")
-    
-  
 
         elif self._state == "DONE":
             # Hold final position

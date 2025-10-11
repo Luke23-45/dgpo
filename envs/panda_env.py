@@ -180,6 +180,7 @@ class PandaEnv(gym.Env):
             enable_domain_randomization: bool = True,
             post_config: RenderPostConfig = None,
             control_mode: str = "absolute",
+            grasp_mode: str = "stateful", 
         ):
         super().__init__()
 
@@ -243,52 +244,45 @@ class PandaEnv(gym.Env):
             raise ValueError("Force sensors for fingertips not found. Check the XML.")
             
         self._is_physically_grasped = False
-        self.left_finger_geom_ids = []
-        for i in range(self.model.ngeom):
-            if "left_finger" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, self.model.geom_bodyid[i]):
-                self.left_finger_geom_ids.append(i)
+        self._grasp_stabilization_counter = 0
 
-        self.right_finger_geom_ids = []
-        for i in range(self.model.ngeom):
-            if "right_finger" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, self.model.geom_bodyid[i]):
-                self.right_finger_geom_ids.append(i)
+        # Cache body and geom IDs for efficient contact checking
+        self.object_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
+        self.left_finger_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_finger")
+        self.right_finger_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "right_finger")
 
+        if any(id_ == -1 for id_ in [self.object_body_id, self.left_finger_body_id, self.right_finger_body_id]):
+            raise ValueError("Could not find body IDs for object, left_finger, or right_finger.")
 
+        # Collect all geoms belonging to the relevant bodies
+        self.object_geoms = np.where(self.model.geom_bodyid == self.object_body_id)[0]
+        self.left_finger_geoms = np.where(self.model.geom_bodyid == self.left_finger_body_id)[0]
+        self.right_finger_geoms = np.where(self.model.geom_bodyid == self.right_finger_body_id)[0]
+
+        self._is_physically_grasped = False
+        self._grasp_stabilization_counter = 0
         # 5. Define Spaces (Must be last)
+        assert grasp_mode in ["stateful", "physical"], "grasp_mode must be 'stateful' or 'physical'"
+        self.grasp_mode = grasp_mode
         self._define_spaces()
 
-    def _check_grasp(self):
-        """
-        Checks if the gripper is grasping the object by checking for active contacts
-        between both fingers and the object.
-        """
-        has_left_contact = False
-        has_right_contact = False
-        
-        # Iterate through all active contacts
+
+    def _has_geom_contact(self, group1_geoms: np.ndarray, group2_geoms: np.ndarray) -> bool:
+        """Checks if any geom in group1 is in contact with any geom in group2."""
         for i in range(self.data.ncon):
-            contact = self.data.contact[i]
+            con = self.data.contact[i]
+            # Check if the contact involves one geom from each group
+            is_in_group1_geom1 = np.any(con.geom1 == group1_geoms)
+            is_in_group2_geom2 = np.any(con.geom2 == group2_geoms)
+            is_in_group2_geom1 = np.any(con.geom1 == group2_geoms)
+            is_in_group1_geom2 = np.any(con.geom2 == group1_geoms)
             
-            # Check if one geom is the object and the other is a left finger part
-            is_left_contact = (contact.geom1 == self.object_geom_id and contact.geom2 in self.left_finger_geom_ids) or \
-                              (contact.geom2 == self.object_geom_id and contact.geom1 in self.left_finger_geom_ids)
-            
-            # Check if one geom is the object and the other is a right finger part
-            is_right_contact = (contact.geom1 == self.object_geom_id and contact.geom2 in self.right_finger_geom_ids) or \
-                               (contact.geom2 == self.object_geom_id and contact.geom1 in self.right_finger_geom_ids)
+            if (is_in_group1_geom1 and is_in_group2_geom2) or \
+               (is_in_group2_geom1 and is_in_group1_geom2):
+                return True
+        return False
 
-            if is_left_contact:
-                has_left_contact = True
-            if is_right_contact:
-                has_right_contact = True
 
-            # If we've already found contacts on both sides, we can stop checking
-            if has_left_contact and has_right_contact:
-                self._is_physically_grasped = True
-                return
-
-        # If the loop finishes and we haven't found contacts on both sides, the grasp is not active
-        self._is_physically_grasped = False
     def _cache_dr_element_ids(self):
         """Finds and caches the integer IDs of all elements used in DR."""
         if not self.enable_domain_randomization:
@@ -524,6 +518,8 @@ class PandaEnv(gym.Env):
 
         # 1. Select a random high-quality "exemplar" shot from our curated list.
         chosen_shot = self.np_random.choice(self.dr_config.camera_shots)
+
+        print(f"Camera Short: {chosen_shot}")
         base_cam_pos = np.array(chosen_shot.pos)
         base_target_pos = np.array(chosen_shot.target)
 
@@ -941,8 +937,68 @@ class PandaEnv(gym.Env):
             self.data.qpos[self.model.jnt_qposadr[finger_joint1_idx]],
             self.data.qpos[self.model.jnt_qposadr[finger_joint2_idx]]
         ], dtype=np.float32)
+        base_pos, _ = self.get_base_pose()
+        obs["robot_base_pos_world"] = base_pos
         return obs
       
+    def compensatory_clamp_xy(self, orig_xy, goal_xy, x_min, x_max, y_min, y_max, max_y_offset=None):
+        """
+        Clamp orig_xy = (x_orig, y_orig) with respect to goal_xy = (gx, gy),
+        so that x_new ∈ [x_min, x_max], while preserving distance to goal as much as possible,
+        by compensating in y-direction. Optionally limit how far Y can shift.
+        Returns new (x_new, y_new).
+        """
+        x_orig, y_orig = float(orig_xy[0]), float(orig_xy[1])
+        gx, gy = float(goal_xy[0]), float(goal_xy[1])
+        
+        x_new = x_orig
+        y_new = y_orig
+
+        # If within bounds already, just clip and return
+        if x_min <= x_orig <= x_max:
+            y_new = np.clip(y_new, y_min, y_max)
+            return x_new, y_new
+
+        # Determine which bound is violated
+        if x_orig > x_max:
+            x_new = x_max
+        elif x_orig < x_min:
+            x_new = x_min
+
+        # Compute squared distances
+        dx0 = x_orig - gx
+        dy0 = y_orig - gy
+        dist_sq = dx0 * dx0 + dy0 * dy0
+
+        dx_new = x_new - gx
+        dx_new_sq = dx_new * dx_new
+
+        # Clamp negative underflows
+        rem = dist_sq - dx_new_sq
+        if rem < 0:
+            rem = 0.0
+
+        # Compute candidate Y offsets
+        y_offset = np.sqrt(rem)
+        # Choose sign consistent with original side of goal
+        if y_orig >= gy:
+            y_new = gy + y_offset
+        else:
+            y_new = gy - y_offset
+
+        # Optionally limit how far Y can shift
+        if max_y_offset is not None:
+            # cap |y_new − original y|
+            max_shift = abs(max_y_offset)
+            delta_y = y_new - y_orig
+            if abs(delta_y) > max_shift:
+                y_new = y_orig + np.sign(delta_y) * max_shift
+
+        # Finally, clip y_new to workspace bounds
+        y_new = np.clip(y_new, y_min, y_max)
+
+        return x_new, y_new
+    
 
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:
         super().reset(seed=seed)
@@ -953,7 +1009,9 @@ class PandaEnv(gym.Env):
         
         # FIX #4: Ensure grasp state is reset at the start of every episode
         self._is_physically_grasped = False
-
+        self._grasp_stabilization_counter = 0
+        self._grasp_pos_offset = None
+        self._grasp_orn_offset = None
         # FIX #3: Apply physics randomization BEFORE the first mj_forward call
         # 1. Physics Domain Randomization for the main object
         object_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
@@ -978,6 +1036,30 @@ class PandaEnv(gym.Env):
         object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT,camera_name="fixed_camera", check_visibility=False)
         goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT,camera_name="primary", check_visibility=False)
 
+        MAX_REACH_X = 0.68
+        MIN_REACH_X = 0.40
+        MAX_REACH_Y = 0.25
+        MIN_REACH_Y = -0.25
+        # optionally limit how far Y can shift to prevent extreme lateral jumps
+        MAX_Y_SHIFT = 0.15  # for example
+
+        x0, y0 = object_pos[0], object_pos[1]
+        gx, gy = goal_pos[0], goal_pos[1]
+
+        x_new, y_new = self.compensatory_clamp_xy(
+            (x0, y0),
+            (gx, gy),
+            MIN_REACH_X, MAX_REACH_X,
+            MIN_REACH_Y, MAX_REACH_Y,
+            max_y_offset=MAX_Y_SHIFT
+        )
+
+        if (x_new, y_new) != (x0, y0):
+            print(f"WARN: object position compensated: ({x0:.3f}, {y0:.3f}) → ({x_new:.3f}, {y_new:.3f})")
+
+        object_pos[0] = x_new
+        object_pos[1] = y_new
+             
         self._apply_domain_randomization(initial_ee_pos, goal_pos)
 
         if np.linalg.norm(goal_pos[:2] - object_pos[:2]) < 0.05:
@@ -1107,7 +1189,97 @@ class PandaEnv(gym.Env):
             raise ValueError("Body 'object' not found for expert pipeline.")
         quat_wxyz = self.data.xquat[body_id].copy()
         return self._mujoco_quat_to_scipy_xyzw(quat_wxyz)
-  
+
+    def _update_grasp_physical(self, gripper_action: float):
+        """
+        Updates grasp state based purely on physical conditions.
+        The is_grasped flag can flicker, representing the noisy physical reality.
+        """
+        # Asymmetric stabilization counters for robustness against jitter
+        GRASP_REQUIRED_STEPS = 5
+        RELEASE_REQUIRED_STEPS = 15
+
+        # Determine the raw physical state of the gripper/object contact
+        # (This logic is the same as our previous robust physical checker)
+        left_force_adr = self.model.sensor_adr[self.left_force_sensor_id]
+        right_force_adr = self.model.sensor_adr[self.right_force_sensor_id]
+        left_force_vec = self.data.sensordata[left_force_adr : left_force_adr + 3]
+        right_force_vec = self.data.sensordata[right_force_adr : right_force_adr + 3]
+
+        has_bilateral_contact = (
+            self._has_geom_contact(self.left_finger_geoms, self.object_geoms) and
+            self._has_geom_contact(self.right_finger_geoms, self.object_geoms)
+        )
+        has_sufficient_force = (np.linalg.norm(left_force_vec) > 0.5) and (np.linalg.norm(right_force_vec) > 0.5)
+        is_gripping_command = gripper_action < -0.1
+        
+        is_grasp_conditions_met = is_gripping_command and has_bilateral_contact and has_sufficient_force
+
+        # Update the grasp flag using asymmetric debouncing
+        if self._is_physically_grasped:
+            if not is_grasp_conditions_met:
+                self._grasp_condition_counter += 1
+                if self._grasp_condition_counter >= RELEASE_REQUIRED_STEPS:
+                    self._is_physically_grasped = False
+            else:
+                self._grasp_condition_counter = 0
+        else:
+            if is_grasp_conditions_met:
+                self._grasp_condition_counter += 1
+                if self._grasp_condition_counter >= GRASP_REQUIRED_STEPS:
+                    self._is_physically_grasped = True
+            else:
+                self._grasp_condition_counter = 0
+
+    def _update_grasp_stateful(self, gripper_action: float):
+        """
+        Updates grasp state using a latched, stateful model.
+        Once grasped, the object is kinematically welded until an explicit release.
+        """
+        GRASP_CONFIRM_STEPS = 5
+        RELEASE_CONFIRM_STEPS = 5
+
+        # Determine the raw physical state
+        has_bilateral_contact = (
+            self._has_geom_contact(self.left_finger_geoms, self.object_geoms) and
+            self._has_geom_contact(self.right_finger_geoms, self.object_geoms)
+        )
+        left_force_adr = self.model.sensor_adr[self.left_force_sensor_id]
+        right_force_adr = self.model.sensor_adr[self.right_force_sensor_id]
+        left_force_vec = self.data.sensordata[left_force_adr : left_force_adr + 3]
+        right_force_vec = self.data.sensordata[right_force_adr : right_force_adr + 3]
+        has_sufficient_force = (np.linalg.norm(left_force_vec) > 0.5) and (np.linalg.norm(right_force_vec) > 0.5)
+        physical_conditions_met = has_bilateral_contact and has_sufficient_force
+
+        # State machine logic
+        if not self._is_physically_grasped:
+            # Entry condition: command and physics must align
+            is_gripping_command = gripper_action < -0.1
+            if is_gripping_command and physical_conditions_met:
+                self._grasp_condition_counter += 1
+            else:
+                self._grasp_condition_counter = 0
+
+            if self._grasp_condition_counter >= GRASP_CONFIRM_STEPS:
+                self._is_physically_grasped = True
+                ee_pos, ee_quat_xyzw = self.get_ee_pose()[:3], self.get_ee_pose()[3:]
+                R_ee_world = R.from_quat(ee_quat_xyzw)
+                obj_pos, obj_quat_wxyz = self.data.xpos[self.object_body_id].copy(), self.data.xquat[self.object_body_id].copy()
+                R_obj_world = R.from_quat(self._mujoco_quat_to_scipy_xyzw(obj_quat_wxyz))
+                self._grasp_pos_offset = R_ee_world.inv().apply(obj_pos - ee_pos)
+                self._grasp_orn_offset = R_ee_world.inv() * R_obj_world
+        else:
+            # Exit condition: command and loss of contact must align
+            is_releasing_command = gripper_action > 0.1
+            if is_releasing_command and not has_bilateral_contact:
+                self._grasp_condition_counter += 1
+            else:
+                self._grasp_condition_counter = 0
+
+            if self._grasp_condition_counter >= RELEASE_CONFIRM_STEPS:
+                self._is_physically_grasped = False
+                self._grasp_pos_offset, self._grasp_orn_offset = None, None
+
     def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
         self.timestep += 1
         action = np.asarray(action, dtype=float).ravel()
@@ -1165,81 +1337,31 @@ class PandaEnv(gym.Env):
         self.data.ctrl[7] = scaled_gripper_action
         self.data.ctrl[8] = scaled_gripper_action
         
-        N_SUBSTEPS = 5
+        # --- START OF GRASP DETECTION PATCH ---
+        # Update substeps to maintain control frequency with smaller timestep
+        N_SUBSTEPS = 20
         for _ in range(N_SUBSTEPS):
-            # try:
-            #     # replace with actual cached indices/names you use
-            #     left_touch_val = float(self.data.sensordata[self.left_touch_sensor_id])
-            #     right_touch_val = float(self.data.sensordata[self.right_touch_sensor_id])
+            # Dispatch to the correct grasp update logic based on the environment's mode
+            if self.grasp_mode == "stateful":
+                self._update_grasp_stateful(gripper_action)
+            else: # self.grasp_mode == "physical"
+                self._update_grasp_physical(gripper_action)
 
-            #     # get qpos for finger joints (replace joint names with your actual names)
-            #     j1_addr = self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "finger_joint_left")]
-            #     j2_addr = self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "finger_joint_right")]
-            #     left_qpos = float(self.data.qpos[j1_addr])
-            #     right_qpos = float(self.data.qpos[j2_addr])
+            mujoco.mj_step(self.model, self.data)
 
-            #     # print actuator ctrl state (list first few if many)
-            #     ctrl0 = float(self.data.ctrl[0])
-            #     # print a small structured line
-            #     print(f"[GRASP_DBG] step={self.timestep} ctrl0={ctrl0:.4f} left_qpos={left_qpos:.4f} right_qpos={right_qpos:.4f} left_touch={left_touch_val:.6f} right_touch={right_touch_val:.6f}")
-            # except Exception as e:
-            #     print("GRASP_DBG: debug error %s", e)
-
-            left_touch_val = self.data.sensordata[self.left_touch_sensor_id]
-            right_touch_val = self.data.sensordata[self.right_touch_sensor_id]
-            left_force_vec = self.data.sensordata[self.left_force_sensor_id : self.left_force_sensor_id + 3]
-            right_force_vec = self.data.sensordata[self.right_force_sensor_id : self.right_force_sensor_id + 3]
-
-            # 2. Define physically-meaningful thresholds
-            # The object's mass is randomized up to 0.5kg, which has a weight of ~4.9N.
-            # A force of 1.0N on each finger should be a reliable indicator of solid contact.
-            touch_threshold = 0.005  # Increased slightly for reliability
-            force_threshold = 1.0    # In Newtons (N)
-
-            # 3. Evaluate the three core conditions for a stable grasp
-            is_gripping_command = gripper_action > 0.1
-            
-            # Condition A: Contact must be detected on BOTH fingers. (The AND fix)
-            has_bilateral_contact = (left_touch_val > touch_threshold) and (right_touch_val > touch_threshold)
-
-            # Condition B: Sufficient force must be applied by at least one finger.
-            # This prevents false positives from tiny, incidental contacts.
-            has_sufficient_force = (np.linalg.norm(left_force_vec) > force_threshold) and \
-                                   (np.linalg.norm(right_force_vec) > force_threshold)
-            
-            # The final, robust condition for grasping
-            is_grasp_conditions_met = is_gripping_command and has_bilateral_contact and has_sufficient_force
-            
-            # 4. Use the existing stabilization counter to confirm the grasp/release
-            GRASP_STABILIZATION_REQUIRED = 5  # Number of substeps required to confirm grasp
-
-            if self._is_physically_grasped:
-                # To release, the grip command must be off OR the physical conditions must fail
-                if not is_gripping_command or not has_bilateral_contact:
-                    self._grasp_stabilization_counter -= 1
-                    if self._grasp_stabilization_counter <= 0:
-                        self._is_physically_grasped = False
-                        self._grasp_stabilization_counter = 0
-                else:
-                    # Maintain grasp if conditions are still met
-                    self._grasp_stabilization_counter = GRASP_STABILIZATION_REQUIRED
-            else:
-                # To grasp, all physical conditions must be met
-                if is_grasp_conditions_met:
-                    self._grasp_stabilization_counter += 1
-                    if self._grasp_stabilization_counter >= GRASP_STABILIZATION_REQUIRED:
-                        self._is_physically_grasped = True
-                else:
-                    # Reset if conditions fail
-                    self._grasp_stabilization_counter = 0
-
-            mujoco.mj_step(self.model, self.data)  
-            self._check_grasp()        
-            
+            # The kinematic weld is only applied in stateful mode
+            if self.grasp_mode == "stateful" and self._is_physically_grasped:
+                ee_pos, ee_quat_xyzw = self.get_ee_pose()[:3], self.get_ee_pose()[3:]
+                R_ee_world = R.from_quat(ee_quat_xyzw)
+                new_obj_pos = ee_pos + R_ee_world.apply(self._grasp_pos_offset)
+                new_obj_orn = (R_ee_world * self._grasp_orn_offset)
+                qpos_addr = self.model.jnt_qposadr[self.object_joint_id]
+                self.data.qpos[qpos_addr : qpos_addr + 3] = new_obj_pos
+                self.data.qpos[qpos_addr + 3 : qpos_addr + 7] = self._scipy_xyzw_to_mujoco_wxyz(new_obj_orn.as_quat())
         
-        mujoco.mj_forward(self.model, self.data)
+        mujoco.mj_forward(self.model, self.data)    
 
-        
+
         obs = self.get_expert_obs()
         reward = 0.0
         terminated = False
