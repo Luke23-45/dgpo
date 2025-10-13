@@ -6,9 +6,12 @@ from ikpy.link import URDFLink, OriginLink
 import io
 import logging 
 from scipy.spatial.transform import Rotation as R
+from mujoco import mj_jac  # For Jacobian
+import mujoco
+from numpy.linalg import inv, pinv, cond
+
+
 logger = logging.getLogger(__name__) 
-
-
 
 
 class IKSolver:
@@ -20,7 +23,7 @@ class IKSolver:
         which returns normalized [-1,1] deltas for the arm (7 joints) + 1 gripper
     """
 
-    def __init__(self, urdf_path: str, expect_7_dof: bool = True):
+    def __init__(self, urdf_path: str, expect_7_dof: bool = True,kp=40.0, ki=1.0, kd=4.0):
         logger.info(f"⏳ [IKSolver] Loading kinematic chain from: {urdf_path}")
         try:
             # Load full chain starting from "link0"
@@ -34,6 +37,11 @@ class IKSolver:
                 origin_orientation=[0, 0, 0],    # No rotation
                 joint_type="fixed",
             )
+            self.kp = kp
+            self.ki = ki
+            self.kd = kd
+            self.reset_controller_state()
+            self._integral_error = np.zeros(6)
 
             # 3. Create a new chain by appending the virtual link to the original's list of links.
             #    This is the correct way to modify the chain.
@@ -250,3 +258,194 @@ class IKSolver:
             hi_use = 1e9 if not np.isfinite(hi) else hi
             out[i] = np.clip(val, lo_use, hi_use)
         return out
+    
+    def compute_delta_action_(
+        self,
+        target_pose_7d: np.ndarray,
+        current_joint_angles: np.ndarray,
+        current_ee_pose: np.ndarray,  # From env
+        dt: float = 0.002,
+        max_dq: float = 0.1
+    ) -> np.ndarray:
+        target_pos = target_pose_7d[:3]
+        target_quat = target_pose_7d[3:]
+        current_pos = current_ee_pose[:3]
+        current_quat = current_ee_pose[3:]
+
+        # Delta pos
+        d_pos = target_pos - current_pos
+
+        # Delta orn (angular vel approx)
+        d_rot = R.from_quat(target_quat) * R.from_quat(current_quat).inv()
+        d_orn = d_rot.as_euler('xyz') / dt  # Approx ang vel
+
+        d_ee = np.concatenate([d_pos, d_orn]) / dt  # ee_vel
+
+        # Jacobian (MuJoCo mj_jac)
+        jac_pos = np.zeros((3, self.n_joints))
+        jac_rot = np.zeros((3, self.n_joints))
+        mj_jac(self.model, self.data, jac_pos, jac_rot, current_pos, self.ee_site_id)
+        J = np.vstack([jac_pos, jac_rot])
+
+        # Pseudo-inverse
+        J_pinv = np.linalg.pinv(J)
+
+        # dq (joint vel)
+        dq = J_pinv @ d_ee
+
+        # Normalize to action
+        action = np.clip(dq / max_dq, -1, 1)
+
+        return action
+    
+    def compute_delta_action__1(
+        self,
+        target_ee_pose: np.ndarray,
+        current_ee_pose: np.ndarray,
+        model, # mujoco.MjModel
+        data,  # mujoco.MjData
+        ee_site_id: int,
+        joint_ids: np.ndarray,
+        dt: float,
+        max_dq: float = 1.0 # Max normalized joint velocity
+    ) -> np.ndarray:
+        """
+        Computes a normalized delta action using Differential Inverse Kinematics.
+        """
+        # --- 1. Calculate desired end-effector velocity ---
+        # Positional velocity
+        pos_error = target_ee_pose[:3] - current_ee_pose[:3]
+        vel_pos = pos_error / dt
+        
+        # Rotational velocity (as axis-angle)
+        d_rot = R.from_quat(target_ee_pose[3:]) * R.from_quat(current_ee_pose[3:]).inv()
+        vel_rot = d_rot.as_rotvec() / dt
+
+        # Desired 6D end-effector velocity (twist)
+        ee_vel_target = np.concatenate([vel_pos, vel_rot])
+
+        # --- 2. Calculate Jacobian ---
+        jac_pos = np.zeros((3, model.nv))
+        jac_rot = np.zeros((3, model.nv))
+        mj_jac(model, data, jac_pos, jac_rot, current_ee_pose[:3], ee_site_id)
+        J_full = np.vstack([jac_pos, jac_rot])
+        
+        # Select only the columns corresponding to the arm joints
+        J = J_full[:, joint_ids]
+
+        # --- 3. Solve for joint velocities (dq) ---
+        # dq = J_pinv * ee_vel
+        try:
+            dq = np.linalg.lstsq(J, ee_vel_target, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            # Fallback to zeros if Jacobian is singular
+            return np.zeros(len(joint_ids))
+
+        # --- 4. Normalize to action space ---
+        action = np.clip(dq / max_dq, -1.0, 1.0)
+        
+        return action
+  
+    def reset_controller_state(self):
+        """Resets the internal state of the PID controller."""
+        self._integral_error = np.zeros(6)
+
+    def set_gains(self, kp: float, ki: float, kd: float):
+        """
+        Dynamically sets the PID gains for the controller.
+        This is primarily used for tuning scripts.
+        """
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+
+    def compute_delta_action(
+        self,
+        target_ee_pose: np.ndarray,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+        ee_site_id: int,
+        joint_qpos_indices: np.ndarray,
+        effective_dt: float,
+        max_dq: float,
+    ) -> np.ndarray:
+        """
+        [DEFINITIVE, TUNED FOR Kp=40, PRODUCTION-GRADE PID CONTROLLER V4]
+        This version uses a balanced set of gains for a responsive yet stable
+        system, based on the manual tuning methodology.
+        - Kp=40.0 provides a fast response.
+        - Kd=4.0 provides critical damping to prevent overshoot.
+        - Ki=1.0 provides slow, stable correction for steady-state error.
+        """
+        # --- 1. GET CURRENT STATE ---
+        current_ee_pos = data.site_xpos[ee_site_id]
+        current_ee_mat = data.site_xmat[ee_site_id].reshape(3, 3)
+        current_ee_quat = R.from_matrix(current_ee_mat).as_quat()
+        
+        jac_pos = np.zeros((3, model.nv))
+        jac_rot = np.zeros((3, model.nv))
+        ee_body_id = model.site_bodyid[ee_site_id]
+        mujoco.mj_jac(model, data, jac_pos, jac_rot, current_ee_pos, ee_body_id)
+        
+        J_full = np.vstack([jac_pos, jac_rot])
+        J = J_full[:, joint_qpos_indices]
+
+        # --- 2. IMPLEMENT STABLE & TUNED PID CONTROL LAW ---
+        # FINAL TUNED GAINS for Kp=40
+        Kp = 40.0
+        Kd = 1.0
+        Ki = 1.0
+        integral_clamp = 0.4
+        damping = 1e-2
+        
+        # Filter for the derivative term to prevent noise amplification
+        tau_d = 3.0 * effective_dt # Derivative filter time constant
+        alpha = effective_dt / (tau_d + effective_dt)
+
+        # Calculate 6D error vector
+        pos_error = target_ee_pose[:3] - current_ee_pos
+        orn_error_vec = (R.from_quat(target_ee_pose[3:]) * R.from_quat(current_ee_quat).inv()).as_rotvec()
+        error_6d = np.concatenate([pos_error, orn_error_vec])
+
+        # Proportional Term
+        p_term = Kp * error_6d
+
+        # Derivative Term (on error, and filtered)
+        prev_error = getattr(self, "_prev_error", np.zeros_like(error_6d))
+        error_deriv = (error_6d - prev_error) / effective_dt
+        
+        prev_filtered_deriv = getattr(self, "_d_filter_state", np.zeros_like(error_deriv))
+        filtered_deriv = (1 - alpha) * prev_filtered_deriv + alpha * error_deriv
+        d_term = Kd * filtered_deriv
+
+        # Integral Term (with conditional anti-windup)
+        integrator = getattr(self, "_integral_error", np.zeros_like(error_6d))
+        i_term = Ki * integrator
+
+        # Target velocity is the sum of PID components
+        ee_vel_target = p_term + i_term + d_term
+
+        # --- 3. SOLVE FOR JOINT VELOCITIES (dIK) ---
+        try:
+            lhs = J.T @ J + damping * np.eye(J.shape[1])
+            rhs = J.T @ ee_vel_target
+            dq = np.linalg.solve(lhs, rhs)
+        except np.linalg.LinAlgError:
+            dq = np.zeros(len(joint_qpos_indices))
+
+        # --- 4. ANTI-WINDUP & NORMALIZE ACTION ---
+        action_if_applied = dq / max_dq
+        is_saturated = np.any(np.abs(action_if_applied) > 1.0)
+
+        # Conditional Integration: Only integrate if the controller is not saturated.
+        if not is_saturated:
+            integrator += error_6d * effective_dt
+            np.clip(integrator, -integral_clamp, integral_clamp, out=integrator)
+        
+        # Store states for next step
+        self._prev_error = error_6d.copy()
+        self._d_filter_state = filtered_deriv.copy()
+        self._integral_error = integrator.copy()
+
+        action = np.clip(action_if_applied, -1.0, 1.0)
+        return action

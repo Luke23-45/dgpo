@@ -11,6 +11,9 @@ import cv2
 from dataclasses import dataclass, field 
 from typing import Optional
 from scipy.spatial.transform import Rotation, Slerp
+
+
+
 @dataclass
 class RenderPostConfig:
     """
@@ -168,7 +171,7 @@ class PandaEnv(gym.Env):
     CAM_MIN_FOVY = 25.0      # Min zoom
     CAM_MAX_FOVY = 90.0      # Max zoom (wide-angle)
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
-    ACTION_SCALING_FACTOR = 0.05
+    ACTION_SCALING_FACTOR = 0.1
 
 
     # REPLACE THE ENTIRE __init__ METHOD WITH THIS
@@ -206,7 +209,7 @@ class PandaEnv(gym.Env):
         self.post = post_config or RenderPostConfig()
         
         # 3. Initialize Episode Bookkeeping and RNG
-        self.max_episode_steps = 400
+        self.max_episode_steps = 700
         self.timestep = 0
         self.np_random, _ = seeding.np_random(None)
         self.enable_domain_randomization = enable_domain_randomization
@@ -939,6 +942,25 @@ class PandaEnv(gym.Env):
         ], dtype=np.float32)
         base_pos, _ = self.get_base_pose()
         obs["robot_base_pos_world"] = base_pos
+        ee_vel_6d = np.zeros(6, dtype=np.float64) 
+        mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_SITE, self.ee_site_id, ee_vel_6d, 0)
+        obs["ee_vel"] = ee_vel_6d.astype(np.float32) # Cast to float32 for observation consistency
+
+        # 2. Get Object 6D Velocity (Twist)
+        # MuJoCo functions require float64 arrays
+        object_vel_6d = np.zeros(6, dtype=np.float64)
+        mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_BODY, self.object_body_id, object_vel_6d, 0)
+        obs["object_vel"] = object_vel_6d.astype(np.float32) # Cast to float32
+
+        # 3. Get Gripper Joint Velocities
+        finger_joint1_vel_idx = self.model.jnt_dofadr[finger_joint1_idx]
+        finger_joint2_vel_idx = self.model.jnt_dofadr[finger_joint2_idx]
+        obs["gripper_vel"] = np.array([
+            self.data.qvel[finger_joint1_vel_idx],
+            self.data.qvel[finger_joint2_vel_idx]
+        ], dtype=np.float32)
+        # --- [END OF THE FIX] ---
+
         return obs
       
     def compensatory_clamp_xy(self, orig_xy, goal_xy, x_min, x_max, y_min, y_max, max_y_offset=None):
@@ -1293,7 +1315,6 @@ class PandaEnv(gym.Env):
             arm_lo, arm_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
             scaled_arm_action = arm_lo + 0.5 * (arm_action + 1.0) * (arm_hi - arm_lo)
             self.data.ctrl[:7] = scaled_arm_action
-
 
         elif self.control_mode == 'delta':
             # This is the physically corrected delta mode.

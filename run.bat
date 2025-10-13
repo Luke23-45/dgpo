@@ -1,6 +1,1 @@
-cd ..
-cd dgpo_project
-.\venv\Scripts\activate
-cd ..
-cd dgpo
-
+C:/Users/Hellx/Documents/Programming/python/Project/dgpo_project/venv/Scripts/activate.bat
