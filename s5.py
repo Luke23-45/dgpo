@@ -95,7 +95,7 @@ log = logging.getLogger("COMPARE_CONTROLLERS")
 def main(args: argparse.Namespace):
     log.info("--- Starting Delta vs. Absolute Comparison Script ---")
 
-    output_dir = Path("verification_output")
+    output_dir = Path("verification_output_delta")
     output_dir.mkdir(parents=True, exist_ok=True)
     video_path = output_dir / f"delta_control_seed{args.seed}.mp4"
     log_path = output_dir / f"delta_control_log_seed{args.seed}.csv"

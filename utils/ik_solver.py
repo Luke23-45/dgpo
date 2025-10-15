@@ -392,7 +392,7 @@ class IKSolver:
 
         # --- 2. IMPLEMENT STABLE & TUNED PID CONTROL LAW ---
         # FINAL TUNED GAINS for Kp=40
-        Kp = 40.0
+        Kp = 200.0
         Kd = 1.0
         Ki = 1.0
         integral_clamp = 0.4

@@ -171,7 +171,7 @@ class PandaEnv(gym.Env):
     CAM_MIN_FOVY = 25.0      # Min zoom
     CAM_MAX_FOVY = 90.0      # Max zoom (wide-angle)
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
-    ACTION_SCALING_FACTOR = 0.1
+    ACTION_SCALING_FACTOR = 0.5
 
 
     # REPLACE THE ENTIRE __init__ METHOD WITH THIS
@@ -184,6 +184,7 @@ class PandaEnv(gym.Env):
             post_config: RenderPostConfig = None,
             control_mode: str = "absolute",
             grasp_mode: str = "stateful", 
+            action_scaling_factor: float = 0.5,
         ):
         super().__init__()
 
@@ -209,11 +210,12 @@ class PandaEnv(gym.Env):
         self.post = post_config or RenderPostConfig()
         
         # 3. Initialize Episode Bookkeeping and RNG
-        self.max_episode_steps = 700
+        self.max_episode_steps = 500
         self.timestep = 0
         self.np_random, _ = seeding.np_random(None)
         self.enable_domain_randomization = enable_domain_randomization
         self.dr_config = dr_config or DomainRandomizationConfig()
+        self.ACTION_SCALING_FACTOR = action_scaling_factor
 
         # 4. Consolidated Block: Cache all MuJoCo IDs and initialize state
         #    This block runs AFTER the model is loaded and BEFORE spaces are defined.
@@ -329,6 +331,12 @@ class PandaEnv(gym.Env):
         
         # We need to set the geom_size to half of the full dimension
         self.model.geom_size[self.object_geom_id] = size / 2.0
+        try:
+            mujoco.mj_forward(self.model, self.data)
+        except Exception as e:
+            print(f"mj_forward failed after setting object size: {e}")
+            # Depending on the desired robustness, you might want to raise the exception
+            raise
     @staticmethod
     def _srgb_to_linear(img: np.ndarray) -> np.ndarray:
         """img in [0,1] sRGB -> linear RGB (float32)."""
@@ -1058,7 +1066,7 @@ class PandaEnv(gym.Env):
         object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT,camera_name="fixed_camera", check_visibility=False)
         goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT,camera_name="primary", check_visibility=False)
 
-        MAX_REACH_X = 0.68
+        MAX_REACH_X = 0.65
         MIN_REACH_X = 0.40
         MAX_REACH_Y = 0.25
         MIN_REACH_Y = -0.25

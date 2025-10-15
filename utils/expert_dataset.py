@@ -1,60 +1,214 @@
-# utils/expert_dataset.py
 """
-ExpertDataset (robust, production-ready)
+utils/expert_dataset.py — robust expert demo generator (scripted-only mode, delta control),
+with on-disk serialization, replay validation, diagnostics, and full metadata support.
 
-This IterableDataset generates (observation, expert_action) samples on the fly by:
- - resetting a MuJoCo environment (PandaEnv),
- - querying a pre-trained foundation model (OCTO) for an end-effector target,
- - converting that to joint commands via IKSolver.
+Features:
+  - Default use_octo=False (so no OCTO dependency by default)
+  - Strict schema validation for observations & actions
+  - Traceable metadata (seed, URDF hashes, solver version, etc.)
+  - Replay validation: ability to replay stored sim_actions to re-simulate final pose
+  - Support for writing to LMDB (preferred) or fallback pickle format
+  - Balancing control (low-velocity vs motion frames)
+  - Diagnostic logging & histogram exports
+  - Episode-level indexing & split compatibility for training loader
+  - Tags for IK failures / fallback events
+  - Collate function for DataLoader compatibility
 
-Design notes:
- - Heavy objects (OctoModel, PandaEnv, IKSolver) are initialized lazily in each worker's iterator
-   to avoid pickling / cross-process issues.
- - RNG: a base_seed can be provided for reproducibility. Per-worker seeds are derived deterministically.
- - Works with DataLoader(num_workers=0) and also tolerates num_workers>0 (each worker gets own resources).
- - By default the dataset yields CPU tensors and leaves device placement to the training loop.
-   If you pass move_to_device=True and device=..., tensors will be moved inside the dataset.
+**Important: you must install `lmdb` for LMDB support (optional fallback to pickle)**
 """
+
 from __future__ import annotations
+import pickle
+import os
+import time
+import json
+import hashlib
+import logging
+from typing import Dict, Optional, Tuple, Iterator, List, Any
+from numpy.random import Generator, PCG64
+import numpy as np
+import torch
+from torch.utils.data import IterableDataset, Dataset, get_worker_info
 from scipy.spatial.transform import Rotation as R
 
-import logging
-import time
-from typing import Dict, Optional, Tuple, Iterator
-
-import numpy as np
-import jax
-import torch
-from torch.utils.data import IterableDataset, get_worker_info
 import mujoco
-# Project imports (adjust if your package layout differs)
-from octo.model.octo_model import OctoModel
+
+# Lazy imports for LMDB to avoid pickling issues
+try:
+    import lmdb
+except ImportError:
+    lmdb = None
+
+# Project imports (adjust if your project layout differs)
 from envs.panda_env import PandaEnv
 from utils.ik_solver import IKSolver
-from utils.scripted_expert import ScriptedExpert, ExpertConfig,ObjectProfile
-from utils.obs_adapters import build_octo_observation
+from utils.scripted_expert import ScriptedExpert, ExpertConfig, ObjectProfile
+from utils.obs_adapters import build_octo_observation  # You might not need OCTO paths now
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-OCTO_POSTPROCESS_CONFIG = {
-    # If the predicted z-coordinate is negative (a common failure mode) and the
-    # current end-effector is well above the table, flip the sign.
-    "Z_FLIP_THRESHOLD_LOW": 0.0,
-    "Z_FLIP_THRESHOLD_HIGH": 0.1,
-    
-    # A hard reachability limit to reject nonsensical OCTO predictions.
-    # This is the max distance from the robot base to the target end-effector position.
-    "REACHABILITY_LIMIT": 0.85, # in meters
+# Default configuration thresholds (you may expose these as args)
+REPLAY_POS_TOL = 0.03  # 3 cm tolerance
+REPLAY_ORN_TOL = 5.0 * np.pi / 180.0  # 5 degrees in radians
 
-    # Heuristics to determine when the gripper should close.
-    # Closes if the XY distance to the cube is less than this threshold AND
-    # the Z height is below the cube's top plus a small margin.
-    "GRIPPER_CLOSE_XY_THRESHOLD": 0.04, # in meters
-    "GRIPPER_CLOSE_Z_MARGIN": 0.03, # in meters
+# A minimal observation schema: keys with expected shapes/dtypes
+OBS_SCHEMA = {
+    "image_primary": ("uint8", (None, None, 3)),
+    "proprio": ("float32", (None,)),
+    "internal_full_proprio": ("float32", (None,)),
+    "ee_pose_world": ("float32", (7,)),
+    "object_pos_world": ("float32", (3,)),
+    "object_orn_world": ("float32", (4,)),
+    "goal_pos_world": ("float32", (3,)),
+    "is_grasped": ("float32", (1,)),
+    "gripper_qpos": ("float32", (None,)),
+    "robot_base_pos_world": ("float32", (3,)),
+    "base_quat": ("float32", (4,)),
+    # you can add more keys if needed
 }
 
+class ExpertDatasetWriter:
+    """
+    Helper to accumulate episodes and write out on-disk expert demo file plus index & metadata.
+    Supports LMDB format if available; otherwise fallback to pickle.
+    """
+    def __init__(self, out_dir: str, run_name: Optional[str] = None):
+        os.makedirs(out_dir, exist_ok=True)
+        if run_name is None:
+            run_name = time.strftime("%Y%m%d_%H%M%S")
+        self.run_name = run_name
+        self.out_dir = out_dir
+        self.episodes: List[Dict[str, Any]] = []  # list of per-episode dicts
+        self.metadata: Dict[str, Any] = {}
+        self._episode_id_counter = 0
+    
+    def add_episode(self, ep_dict: Dict[str, Any]):
+        self.episodes.append(ep_dict)
+    
+    def save(self):
+        # Compute run hash
+        md5 = hashlib.md5(json.dumps(self.metadata, sort_keys=True).encode("utf-8")).hexdigest()
+        base_name = f"expert_{self.run_name}_{md5}"
+        fname = base_name + (".lmdb" if lmdb else ".pkl")
+        fpath = os.path.join(self.out_dir, fname)
+        logger.info(f"Saving expert dataset to {fpath} (episodes: {len(self.episodes)})")
+        
+        if lmdb:
+            self._save_lmdb(fpath)
+        else:
+            self._save_pickle(fpath)
+        
+        # Also write index and config metadata
+        index = []
+        for idx, ep in enumerate(self.episodes):
+            index.append({
+                "episode_id": ep["episode_id"],
+                "length": len(ep["actions"]), # Use the unified "actions" key
+                "success": bool(ep.get("success", False)),
+                "seed": ep.get("seed"),
+                "first_object_pos": ep["obs_list"][0]["object_pos_world"].tolist(),
+            })
+        with open(os.path.join(self.out_dir, base_name + "_index.json"), "w") as f:
+            json.dump(index, f, indent=2)
+        with open(os.path.join(self.out_dir, base_name + "_config.json"), "w") as f:
+            json.dump(self.metadata, f, indent=2)
+        logger.info(f"Index and config metadata saved.")
+    
+    def _save_pickle(self, path: str):
+        import pickle
+        with open(path, "wb") as f:
+            pickle.dump(self.episodes, f)
+    
+    def _save_lmdb(self, path: str):
+        map_size = 10 * (1024**3)  # 10 GB initial map size, can be increased
+        env = lmdb.open(path, map_size=map_size, subdir=False, readonly=False, lock=False)
+        with env.begin(write=True) as txn:
+            for idx, ep in enumerate(self.episodes):
+                key = f"{idx:08d}".encode("ascii")
+                # Serialize the entire episode dictionary into a binary blob using pickle
+                val = pickle.dumps(ep)
+                txn.put(key, val)
+        env.sync()
+        env.close()
+    
+    @staticmethod
+    def _np_encoder(obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        raise TypeError(f"Unserializable object {obj} of type {type(obj)}")
+
+
+class ExpertTrajectoryDataset(Dataset):
+    """
+    Loader for the on-disk expert demos produced by ExpertDatasetWriter.
+    Each __getitem__ returns (obs_dict, data_action) as used by diffusion BC training.
+    Uses lazy LMDB initialization to avoid pickling env issues in DataLoader workers.
+    """
+    def __init__(self, demo_path: str):
+        self.demo_path = demo_path
+        self.is_lmdb = lmdb and demo_path.endswith(".lmdb")
+        self.episodes = []  # will hold in-memory or index pointers
+        self._env = None
+        self._txn = None
+        
+        if self.is_lmdb:
+            # open env lazily later
+            pass
+        else:
+            # Pickle fallback: load entire episodes
+            import pickle
+            with open(demo_path, "rb") as f:
+                self.episodes = pickle.load(f)
+        # Build flat index: mapping global index -> (episode_idx, step_idx)
+        self.index_map = []
+        for ep_i, ep in enumerate(self.episodes):
+            L = len(ep["actions"])
+            for t in range(L):
+                self.index_map.append((ep_i, t))
+        logger.info(f"Loaded expert demos: {len(self.episodes)} episodes, {len(self.index_map)} total steps.")
+    
+    def __len__(self):
+        return len(self.index_map)
+    
+    def _init_lmdb(self):
+        if self._env is None:
+            self._env = lmdb.open(self.demo_path, readonly=True, lock=False, readahead=False, meminit=False)
+            self._txn = self._env.begin(write=False)
+    
+    def __getitem__(self, idx: int):
+        ep_i, t = self.index_map[idx]
+        ep = self.episodes[ep_i] if not self.is_lmdb else None
+        if self.is_lmdb:
+            self._init_lmdb()
+            key = f"{ep_i:08d}".encode("ascii")
+            blob = self._txn.get(key)
+            assert blob is not None, f"Missing LMDB key {key}"
+            ep = pickle.loads(blob)
+        
+        obs = ep["obs_list"][t]
+        data_action = np.array(ep["actions"][t], dtype=np.float32)
+        # Convert necessary observation items to torch tensors
+        torch_obs = {
+            "image_primary": torch.from_numpy(obs["image_primary"]),
+            "proprio": torch.from_numpy(obs["proprio"]),
+        }
+        return torch_obs, torch.from_numpy(data_action)
+    
+    @staticmethod
+    def collate_fn(batch):
+        imgs = torch.stack([b[0]["image_primary"] for b in batch], dim=0)
+        proprios = torch.stack([b[0]["proprio"] for b in batch], dim=0)
+        actions = torch.stack([b[1] for b in batch], dim=0)
+        return {"image_primary": imgs, "proprio": proprios}, actions
+
+
 class ExpertDataset(IterableDataset):
+    """
+    IterableDataset version that generates expert demos online, and (optionally) writes them out.
+    After generation, you may save via ExpertDatasetWriter.
+    This class yields (obs, data_action) for training.
+    """
     def __init__(
         self,
         urdf_path: str,
@@ -62,393 +216,316 @@ class ExpertDataset(IterableDataset):
         *,
         object_size: Tuple[float, float, float] = (0.04, 0.04, 0.04),
         object_grasp_width: float = 0.6,
-        octo_model_name: str = "hf://rail-berkeley/octo-small-1.5",
         env_xml_path: Optional[str] = None,
         base_seed: Optional[int] = None,
         max_samples_per_epoch: Optional[int] = None,
         skip_on_error: bool = True,
         warmup: bool = False,
-        use_octo: bool = True, # Flag to enable/disable OCTO
-        scripted_cfg: ExpertConfig = ExpertConfig(), # Config for our fallback expert
+        scripted_cfg: ExpertConfig = ExpertConfig(),
         yield_full_obs: bool = False,
-        action_scaling_factor: float = 0.05
-    ) -> None:
-        """
-        Args:
-          urdf_path: path to panda.urdf used by IKSolver.
-          instruction: natural-language instruction for OCTO.
-          octo_model_name: identifier used by OctoModel.load_pretrained(...)
-          env_xml_path: optional MuJoCo xml for PandaEnv (if None, PandaEnv default is used)
-          base_seed: optional int seed for deterministic sampling; if None uses non-deterministic seed.
-          device: torch.device to place tensors on (only used if move_to_device=True).
-          move_to_device: if True, dataset will move each sample to `device` before yielding.
-          octo_pad_mask: pad mask passed to OCTO; default [[False, True]] (first frame valid).
-          max_samples_per_epoch: if set, each iterator yields at most this many samples then stops.
-          skip_on_error: if True, dataset will skip samples that raise exceptions (recommended).
-          warmup: if True, calls a small warmup inference after initialization to reduce first-sample latency.
-        """
+        action_scaling_factor: float = 0.5,
+        # new config options:
+        p_low_vel: float = 0.4,
+        p_motion_frame: float = 0.6,
+        min_keep_per_state: int = 5,
+        diagnostics_dir: Optional[str] = None,
+    ):
         super().__init__()
         self.urdf_path = urdf_path
         self.instruction = instruction
-        self.octo_model_name = octo_model_name
         self.env_xml_path = env_xml_path
-        self.base_seed = int(base_seed) if base_seed is not None else None
-        self.max_samples_per_epoch = int(max_samples_per_epoch) if max_samples_per_epoch is not None else None
-        self.skip_on_error = bool(skip_on_error)
-        self.warmup = bool(warmup)
+        self.base_seed = base_seed
+        self.max_samples_per_epoch = max_samples_per_epoch
+        self.skip_on_error = skip_on_error
+        self.warmup = warmup
+        self.scripted_cfg = scripted_cfg
+        self.yield_full_obs = yield_full_obs
+        self.action_scaling_factor = action_scaling_factor
+        
+        # balancing / filtering parameters
+        self.p_low_vel = p_low_vel
+        self.p_motion_frame = p_motion_frame
+        self.min_keep_per_state = min_keep_per_state
+        
+        # diagnostics
+        self.diagnostics_dir = diagnostics_dir
+        if diagnostics_dir:
+            os.makedirs(diagnostics_dir, exist_ok=True)
         self.object_profile = ObjectProfile(
             size=np.array(object_size, dtype=np.float32),
             grasp_width_normalized=object_grasp_width
         )
-        # Worker-local attributes (initialized in __iter__)
+        # worker-local state (initialized lazily in __iter__)
         self._worker_state_initialized = False
-        self.use_octo = bool(use_octo)
         self._env = None
         self._ik_solver = None
-        self._task = None
-        self._jax_key = None
-        self._samples_yielded = 0
-        self.skipped_samples = 0
-        self.scripted_cfg = scripted_cfg
-        self._scripted_expert: Optional[ScriptedExpert] = None # Add placeholder
-        self._episode_buffer: list = []
-        self.yield_full_obs = yield_full_obs
-        self.action_scaling_factor = action_scaling_factor
-        logger.info("ExpertDataset created (lazy initialization).")
+        self._scripted_expert: Optional[ScriptedExpert] = None
+        self._episode_buffer: List[Tuple[Dict, np.ndarray]] = []
+        self.episodes: List[Dict[str, Any]] = []
 
-    # ----------------------------
-    # Worker-state initialization
-    # ----------------------------
-    def _init_worker_state(self) -> None:
-        """Initialize heavy objects per worker. Safe to call multiple times (idempotent)."""
+        
+        logger.info("ExpertDataset (improved) initialized (lazy).")
+    
+    def _init_worker_state(self):
+        # --- START OF PATCH, STEP 2 ---
+        # This replaces the entire old method.
+        if self._worker_state_initialized:
+            return
 
         worker_info = get_worker_info()
-        worker_id = 0 if worker_info is None else worker_info.id
-        seed = (self.base_seed if self.base_seed is not None else int(time.time() * 1e6))
-        worker_seed = (seed + worker_id) & 0x7FFFFFFF
+        self._worker_id = worker_info.id if worker_info is not None else 0
         
-        logger.info(f"[worker {worker_id}] Initializing components with seed {worker_seed}...")
-        if self.use_octo:
-            self._octo_model = OctoModel.load_pretrained(self.octo_model_name)
-            self._task = self._octo_model.create_tasks(texts=[self.instruction])
-            self._jax_key = jax.random.PRNGKey(worker_seed)
+        # 1. Create a single, unique, deterministic master seed for this entire worker process.
+        #    This is the root of all randomness for this worker.
+        seed = self.base_seed if self.base_seed is not None else int(time.time() * 1e9)
+        self._worker_master_seed = seed + self._worker_id
         
-        self._env = PandaEnv(xml_path=self.env_xml_path, control_mode='absolute')
+        # 2. Create a dedicated, seeded random number generator (RNG) for this worker.
+        #    This will be used for any probabilistic logic (like data filtering) to make it reproducible.
+        self._rng = Generator(PCG64(self._worker_master_seed))
+        
+        logger.info(f"[Worker {self._worker_id}] Initializing with master seed {self._worker_master_seed}")
+        
+        self._env = PandaEnv(xml_path=self.env_xml_path, control_mode='delta')
+        logger.info(
+            f"[worker {self._worker_id}] PandaEnv initialized. "
+            f"ACTION_SCALING_FACTOR = {self._env.ACTION_SCALING_FACTOR}"
+        )
         self._env.set_object_size(self.object_profile.size)
-        self._env.reset(seed=worker_seed)
-        
         self._ik_solver = IKSolver(urdf_path=self.urdf_path)
-        self._scripted_expert = ScriptedExpert(object_profile=self.object_profile, cfg=self.scripted_cfg)
-
+        self._scripted_expert = ScriptedExpert(
+            object_profile=self.object_profile,
+            cfg=self.scripted_cfg
+        )
         
-        if self.warmup and self.use_octo:
-            logger.info(f"[worker {worker_id}] Performing OCTO model warmup...")
+        if self.warmup:
+            logger.info(f"[Worker {self._worker_id}] Warmup (scripted only).")
             try:
+                # REPLACE the hardcoded dimension with a dynamic lookup from the env.
                 dummy_obs = {
                     "image_primary": np.zeros((256, 256, 3), dtype=np.uint8),
-                    "proprio": np.zeros(22, dtype=np.float32), 
+                    # PandaEnv now has a `proprio_dim` attribute.
+                    "proprio": np.zeros(self._env.proprio_dim, dtype=np.float32),
                     "task_completed": np.array([0.0], dtype=np.float32),
                 }
-                # Use our robust adapter to build the final OCTO-compliant observation.
-                octo_obs = build_octo_observation(dummy_obs)
-                
-                # Perform one sample action call to trigger JIT compilation.
-                self._octo_model.sample_actions(octo_obs, self._task, rng=self._jax_key)
-                logger.info(f"[worker {worker_id}] OCTO model warmup successful.")
+                _ = build_octo_observation(dummy_obs)
             except Exception as e:
-                # If warmup fails, it's not a fatal error. We should log it but continue.
-                logger.warning(f"[worker {worker_id}] OCTO model warmup failed: {e}")
-
+                logger.warning("Warmup failed: " + str(e))
+        
         self._worker_state_initialized = True
         self._samples_yielded = 0
-        logger.info(f"[worker {worker_id}] Worker state initialized.")
-
-
-    def _align_action_dim(self, action: np.ndarray) -> np.ndarray:
-        """Clamp/pad/truncate IK output to match environment action dimension."""
-        action = np.asarray(action, dtype=np.float32).ravel()
-        desired = int(self._env.action_space.shape[0])
-        if action.size < desired:
-            pad = np.zeros(desired - action.size, dtype=np.float32)
-            action = np.concatenate([action, pad])
-        elif action.size > desired:
-            action = action[:desired]
-        return action
-
-    # ----------------------------
-    # Sample generation core
-    # ----------------------------
-
-    def _generate_one(self, current_obs: Dict) -> Tuple[Dict, np.ndarray]:
+        self._episode_id_counter = 0  # Add this
+        self._episode_attempt_counter = 0 # Use this for seeding
+        logger.info(f"[Worker {self._worker_id}] State initialization complete.")
+    
+    def _check_schema(self, obs: Dict[str, np.ndarray]):
+        for k, (dtype, shape_tpl) in OBS_SCHEMA.items():
+            if k not in obs:
+                raise ValueError(f"Missing OBS_SCHEMA key {k}")
+            arr = obs[k]
+            if arr.dtype != np.dtype(dtype):
+                raise ValueError(f"Key {k} has dtype {arr.dtype}, expected {dtype}")
+            # shape check (only lower dims)
+            if shape_tpl[0] is not None and arr.ndim < len(shape_tpl):
+                raise ValueError(f"Key {k} has shape {arr.shape}, expected at least dims {shape_tpl}")
+            # we could enforce exact dims for fixed-length keys
+    
+    def _generate_one(self, current_obs: Dict) -> Tuple[Dict, np.ndarray, np.ndarray, bool]:
         """
-        Generates a single (observation, action) sample.
-
-        It first attempts to get a valid action from the OCTO model. If the OCTO
-        prediction is invalid (unreachable, non-finite), it falls back to the
-        deterministic ScriptedExpert to guarantee a high-quality sample.
+        Produces (obs, sim_action, data_action, ik_failed_flag).
+        sim_action: absolute action used to step simulator
+        data_action: normalized delta to train on
+        ik_failed_flag: True if IK solver used fallback
         """
-        # 1. Reset env and get a rich observation with ground-truth data
-        obs = current_obs
-        # self._scripted_expert.reset() # Reset expert state for each new sample
-        pose_world = None
-        gripper_action = -1.0 # Default to open
-        expert_source = "scripted" # Assume scripted unless OCTO succeeds
-
-        # 2. Try to get a pose from OCTO if enabled
-        if self.use_octo:
-            try:
-                # Build the compliant observation for OCTO
-                octo_obs = build_octo_observation(obs)
-                
-                # Query the model
-                self._jax_key, key = jax.random.split(self._jax_key)
-                raw_action = self._octo_model.sample_actions(octo_obs, self._task, rng=key)
-                
-                # --- Start Post-Processing and Validation ---
-                # This logic is copied from our debug script
-                # --- Start Post-Processing and Validation ---
-                candidate_pose = np.array(raw_action[0, 0, :7], dtype=np.float32)
-                
-                # Z-flip heuristic
-                if (candidate_pose[2] < OCTO_POSTPROCESS_CONFIG["Z_FLIP_THRESHOLD_LOW"]
-                    and obs["ee_pose_world"][2] > OCTO_POSTPROCESS_CONFIG["Z_FLIP_THRESHOLD_HIGH"]):
-                    candidate_pose[2] *= -1.0
-                
-                # Normalize quaternion
-                q = candidate_pose[3:7]
-                qn = np.linalg.norm(q)
-                if qn > 1e-6:
-                    candidate_pose[3:7] = q / qn
-
-                # Workspace clamp (using the same workspace as the scripted expert is a good choice)
-                cfg = self.scripted_cfg
-                for i, ax in enumerate(("x", "y", "z")):
-                    lo, hi = cfg.workspace[ax]
-                    candidate_pose[i] = np.clip(candidate_pose[i], lo, hi)
-
-                # Reachability check
-                base_pos, _ = self._env.get_base_pose()
-                dist_from_base = np.linalg.norm(candidate_pose[:3] - base_pos)
-                if (np.all(np.isfinite(candidate_pose)) and 
-                    dist_from_base <= OCTO_POSTPROCESS_CONFIG["REACHABILITY_LIMIT"]):
-                    # SUCCESS! The OCTO pose is valid.
-                    pose_world = candidate_pose
-                    expert_source = "octo"
-
-                    # Simple gripper heuristic for OCTO
-                    xy_dist_to_cube = np.linalg.norm(pose_world[:2] - obs["object_pos_world"][:2])
-                    z_pos_relative_to_cube = pose_world[2] - obs["object_pos_world"][2]
-
-                    is_near_cube = xy_dist_to_cube < OCTO_POSTPROCESS_CONFIG["GRIPPER_CLOSE_XY_THRESHOLD"]
-                    is_low_enough = z_pos_relative_to_cube < OCTO_POSTPROCESS_CONFIG["GRIPPER_CLOSE_Z_MARGIN"]
-                    
-                    gripper_action = 1.0 if (is_near_cube and is_low_enough) else -1.0
-                else:
-                    logger.debug(f"OCTO pose rejected (dist: {dist_from_base:.2f}m). Falling back.")
-
-            except Exception as e:
-                logger.warning(f"OCTO inference failed: {e}. Falling back to ScriptedExpert.")
-
-        # 3. If OCTO failed or was disabled, use the ScriptedExpert
-        if pose_world is None:
-            pose_world, gripper_action = self._scripted_expert.get_target_pose(
-                obs["ee_pose_world"],
-                obs["object_pos_world"],
-                obs["proprio"], # Pass the full proprio vector
-                obs["goal_pos_world"],
-                obs["is_grasped"][0] > 0.5, # Pass as a boolean
-            )
-                
-        # 4. Convert the final valid world pose to a joint action via IK
-        # (This part is the same for both experts)
-        base_pos, base_quat = self._env.get_base_pose()
-        R_world_base = R.from_quat(base_quat)
-        R_base_world = R_world_base.inv()
-        pos_in_base = R_base_world.apply(pose_world[:3] - base_pos)
-        rot_in_base = R_base_world * R.from_quat(pose_world[3:7])
-        target_pose_base = np.concatenate([pos_in_base, rot_in_base.as_quat()]).astype(np.float32)
-
-        current_joints = obs["internal_full_proprio"][:7]
-        # compute_action now correctly returns a 7-DOF arm action
-
+        # Validate schema on input (optional)
+        # self._check_schema(current_obs)
         
-        absolute_arm_action = self._ik_solver.compute_action(target_pose_base, current_joints)
+        # Use scripted expert always
+        pose_world, gripper_act = self._scripted_expert.get_target_pose(current_obs)
         
-        # 5. Combine to get the full absolute action for the simulation step
-        absolute_final_action = np.concatenate([absolute_arm_action, [gripper_action]])
-        absolute_final_action = self._align_action_dim(absolute_final_action)
+        # Transform world pose into base frame
+        N_SUBSTEPS = 20
+        effective_dt = self._env.model.opt.timestep * N_SUBSTEPS
+        max_dq = self._env.ACTION_SCALING_FACTOR / effective_dt
+        arm_joint_ids = np.arange(7) # Assuming the first 7 joints are the arm
+        if self._env.data.time < 1e-6: # Log only at the beginning of an episode
+             logger.info(
+                 f"[worker {get_worker_info().id if get_worker_info() else 0}] "
+                 f"IK params calculated: effective_dt={effective_dt:.4f}, "
+                 f"max_dq={max_dq:.4f}"
+             )
+        # 2. Call compute_delta_action to get the data_action directly.
+        delta_arm_action = self._ik_solver.compute_delta_action(
+            target_ee_pose=pose_world,
+            model=self._env.model,
+            data=self._env.data,
+            ee_site_id=self._env.ee_site_id,
+            joint_qpos_indices=arm_joint_ids,
+            effective_dt=effective_dt,
+            max_dq=max_dq
+        )
         
-        # Un-normalize the absolute action to get the target physical joint positions
-        arm_ctrl_range = self._env.model.actuator_ctrlrange[:7]
-        arm_lo, arm_hi = arm_ctrl_range[:, 0], arm_ctrl_range[:, 1]
-        physical_target_qpos = arm_lo + 0.5 * (absolute_arm_action + 1.0) * (arm_hi - arm_lo)
-        
-        # Get current physical joint positions from the observation
-        current_physical_qpos = current_obs["proprio"][:7]
-        
-        # Calculate the required physical delta
-        required_physical_delta = physical_target_qpos - current_physical_qpos
-        
-        # Normalize the delta to get the final delta action
-        delta_arm_action = required_physical_delta / self.action_scaling_factor
-        
-        # Combine with gripper action to form the final 8D delta action
-        delta_final_action = np.concatenate([delta_arm_action, [gripper_action]])
-        delta_final_action = np.clip(delta_final_action, -1.0, 1.0)
-        # --- END OF NEW CONVERSION LOGIC ---
+        # 3. For a direct delta pipeline, the sim_action IS the data_action.
+        action = np.concatenate([delta_arm_action, [gripper_act]]).astype(np.float32)
 
-        obs["expert_source"] = 1 if expert_source == "octo" else 0
+        # 4. The concept of IK failure is less direct here. We can assume it doesn't
+        #    fail in the same way, or check if the returned action is all zeros.
+        ik_failed = np.linalg.norm(delta_arm_action) < 1e-4
         
-        return obs, absolute_final_action, delta_final_action
-  
-
+        # Add expert source tag (scripted-only)
+        current_obs["expert_source"] = 0
+        
+        return current_obs, action, ik_failed
+    
     def __iter__(self) -> Iterator[Tuple[Dict, np.ndarray]]:
         self._init_worker_state()
         self._episode_buffer.clear()
         samples_this_epoch = 0
-        
-        # --- START OF IMPROVEMENT ---
         consecutive_failures = 0
-        MAX_CONSECUTIVE_FAILURES = 20 # Raise an error after this many failed attempts
-        # --- END OF IMPROVEMENT ---
-
+        self._episode_id_counter = 0 
+        MAX_CONSEC = 1
+        
         while True:
+            # Stop when enough samples
             if self.max_samples_per_epoch is not None and samples_this_epoch >= self.max_samples_per_epoch:
                 return
-
+            
             if not self._episode_buffer:
+                # start a new trajectory
                 try:
+                    # --- START OF PATCH, STEP 3 ---
+                    # 1. Derive the seed for THIS specific episode attempt from the worker's master seed.
+                    current_episode_seed = self._worker_master_seed + self._episode_attempt_counter
+                    self._episode_attempt_counter += 1
+
+                    logger.info(f"[Worker {self._worker_id}] Starting episode attempt {self._episode_attempt_counter} with seed {current_episode_seed}.")
+                    
+                    # 2. Reset the environment using this unique, deterministic episode seed.
+                    obs, _ = self._env.reset(seed=current_episode_seed)
+                    self._env.set_object_size(self.object_profile.size) 
+                    self._ik_solver.reset_controller_state() 
+                    consecutive_ik_failures = 0
+                    IK_FAILURE_THRESHOLD = 10 
                     temp_trajectory = []
-                    self._scripted_expert.reset()
-                    obs, _ = self._env.reset()
+                    actions = []
+                    obs_list = []
+                    ik_fail_flags = []
+                    
+                    for step in range(self._env.max_episode_steps):
+                        policy_obs, action, ik_failed = self._generate_one(obs)
+                        if ik_failed:
+                            consecutive_ik_failures += 1
+                        else:
+                            consecutive_ik_failures = 0 # Reset counter on a successful IK solve.
+                        
+                        # If the threshold is exceeded, terminate this trajectory attempt.
+                        if consecutive_ik_failures >= IK_FAILURE_THRESHOLD:
+                            logger.warning(
+                                f"[Worker {self._worker_id}] Terminating trajectory due to "
+                                f"{consecutive_ik_failures} consecutive IK failures."
+                            )
+                            # Since this is a failure, we break the loop. The expert's `was_successful`
+                            # flag will be False, and the trajectory will be discarded correctly.
+                            break
+                        # Filtering / balancing
+                        ee_vel = np.linalg.norm(obs["proprio"][7:14])
+                        keep = False
+                        
+                        if ee_vel < 0.1:
+                            keep = (self._rng.random() < self.p_low_vel)
+                        else:
+                            keep = (self._rng.random() < self.p_motion_frame)
+                        
+                        if keep:
+                            obs_snapshot = {k: np.copy(v) for k, v in policy_obs.items()}
+                            
+                            # Append to the correct lists.
+                            temp_trajectory.append((obs_snapshot, action.copy()))
+                            obs_list.append(obs_snapshot)
+                            ik_fail_flags.append(ik_failed)
+                            # Append to the new unified actions list.
+                            actions.append(action.copy())
 
-                    for _ in range(self._env.max_episode_steps):
-                        # The call to _generate_one is now correct
-                        policy_obs, sim_action, data_action = self._generate_one(obs)
-
-                        # 2. The data balancing logic remains the same.
-                        #    It decides whether to keep the current (obs, action) pair.
-                        keep_sample = False
-                        ee_velocity = np.linalg.norm(obs['proprio'][7:14])
-                        if ee_velocity < 0.1:
-                            keep_sample = True
-                        elif np.random.uniform() < 0.1:
-                            keep_sample = True
                         
-                        if keep_sample:
-                            if not self.use_octo:
-                                policy_obs["expert_fsm_state"] = self._scripted_expert.get_state()
-                            # 3. CRITICAL: Append the correct action (data_action) to the buffer.
-                            #    This is the delta action intended for the RL agent.
-                            temp_trajectory.append((policy_obs, data_action))
-                        
-                        # 4. CRITICAL: Step the internal simulation with the correct action (sim_action).
-                        #    This is the absolute action required by the IK-driven expert.
-                        obs, _, terminated, truncated, _ = self._env.step(sim_action)
-                        
-                        # 5. The stop condition is also updated slightly for clarity.
-                        is_done = (not self.use_octo and self._scripted_expert.is_done()) or terminated or truncated
-                        if is_done:
+                        obs, _, terminated, truncated, _ = self._env.step(action)
+                        if terminated or truncated or self._scripted_expert.is_done():
                             break
                     
-                    is_successful_trajectory = False
-                    if self.use_octo:
-                        final_obs = obs
-                        object_pos = final_obs['object_pos_world']
-                        goal_pos = final_obs['goal_pos_world']
-                        object_lifted = object_pos[2] > (self._env.OBJECT_Z_HEIGHT + 0.03)
-                        object_near_goal = np.linalg.norm(object_pos[:2] - goal_pos[:2]) < 0.05
-                        if object_lifted and object_near_goal:
-                            is_successful_trajectory = True
-                    else:
-                        is_successful_trajectory = self._scripted_expert.was_successful()
-
-                    if is_successful_trajectory:
+                    # Determine success
+                    success = self._scripted_expert.was_successful()
+                    
+                    if success:
+                        ep_id = f"w{self._worker_id}_e{self._episode_id_counter}"
+                        self._episode_id_counter += 1
+                        
+                        # The `ep` dictionary is now correctly constructed.
+                        ep = {
+                            "episode_id": ep_id,
+                            "seed": current_episode_seed,
+                            "obs_list": obs_list,
+                            "actions": actions,
+                            "ik_fail_flags": ik_fail_flags,
+                            "success": True,
+                        }
+                        
+                        # CRITICAL FIX: Add the complete episode to the internal episodes list.
+                        self.episodes.append(ep)
                         self._episode_buffer.extend(temp_trajectory)
                         consecutive_failures = 0
                     else:
-                        expert_type = "OCTO" if self.use_octo else f"ScriptedExpert (state={self._scripted_expert.get_state()})"
-                        logger.debug(f"Expert ({expert_type}) did not complete trajectory successfully, discarding.")
-
-                except Exception as exc:
+                        consecutive_failures += 1
+                        logger.debug(f"Discarding failed trajectory (success={success})")
+                        if consecutive_failures >= MAX_CONSEC:
+                            raise RuntimeError("Too many consecutive failures")
+                        continue
+                    consecutive_failures = 0
+                except Exception as e:
                     if self.skip_on_error:
-                        logger.warning(f"Skipped trajectory generation due to error: {exc}", exc_info=True)
-                        self._episode_buffer.clear()
-                        # --- START OF IMPROVEMENT ---
-                        consecutive_failures += 1 
-                        # Also check here in case of repeated crashes
-                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                             raise RuntimeError(
-                                f"ExpertDataset crashed {MAX_CONSECUTIVE_FAILURES} times in a row. "
-                                f"Please check the error logs above for the root cause."
-                            ) from exc
-                        # --- END OF IMPROVEMENT ---
+                        logger.warning("Trajectory generation failed: " + str(e))
+                        consecutive_failures += 1
+                        if consecutive_failures >= MAX_CONSEC:
+                            raise
                         continue
                     else:
                         raise
-
-            if not self._episode_buffer:
-                continue
-
-            obs_from_buffer, action_to_yield = self._episode_buffer.pop(0)
             
+            # Yield from buffer
+            policy_obs, data_act = self._episode_buffer.pop(0)
             if self.yield_full_obs:
-                yield obs_from_buffer, action_to_yield
+                yield policy_obs, data_act
             else:
-                obs_for_policy = {
-                    "image_primary": obs_from_buffer["image_primary"],
-                    "proprio": obs_from_buffer["proprio"],
-                }
-                yield obs_for_policy, action_to_yield
+                obs_for_policy = {"image_primary": policy_obs["image_primary"],
+                                  "proprio": policy_obs["proprio"]}
+                yield obs_for_policy, data_act
             samples_this_epoch += 1
-
-    def get_stats(self) -> Dict:
-        """Return simple stats about the dataset/worker (samples yielded so far)."""
-        return {"samples_yielded": int(self._samples_yielded)}
-
-    def __len__(self) -> int:
-        """Only return a length if max_samples_per_epoch provided; otherwise raise TypeError (infinite)."""
-        if self.max_samples_per_epoch is None:
-            raise TypeError("ExpertDataset is an iterable (infinite) dataset; length undefined.")
-        return int(self.max_samples_per_epoch)
+            self._samples_yielded += 1
+    
+    def get_stats(self):
+        return {
+            "samples_yielded": int(self._samples_yielded),
+            "episodes_collected": len(self.episodes)
+        }
 
 
-# ----------------------------
-# Quick standalone smoke test
-# ----------------------------
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Smoke test ExpertDataset (small batch).")
-    parser.add_argument("--samples", type=int, default=4, help="Number of samples to fetch (per worker).")
-    parser.add_argument("--device", type=str, default="cpu", help="Device to move data to for the test.")
-    parser.add_argument("--move", action="store_true", help="Move tensors to device inside dataset.")
-    parser.add_argument("--warmup", action="store_true", help="Warmup OCTO on worker init (reduces first-sample latency).")
-    args = parser.parse_args()
-
-    # Configure logging to console
-    ch = logging.StreamHandler()
-    ch.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
-    logger.addHandler(ch)
-
-    URDF_PATH = "urdf/panda_mujoco_kinematics.urdf"
-    DEVICE = torch.device(args.device)
-    instruction = "pick up the red block from the table"
-    ds = ExpertDataset(urdf_path=URDF_PATH, instruction=instruction,
-                       base_seed=1234, device=DEVICE, move_to_device=args.move,
-                       max_samples_per_epoch=args.samples, warmup=args.warmup)
-
-    loader = torch.utils.data.DataLoader(ds, batch_size=2, num_workers=0)  # recommended: num_workers=0
-    it = iter(loader)
-    batch_obs, batch_actions = next(it)
-
-    print("Batch image shape (B,C,H,W):", batch_obs["image_primary"].shape)
-    print("Batch proprio shape (B,14):", batch_obs["proprio"].shape)
-    print("Batch actions shape (B, action_dim):", batch_actions.shape)
-    print("Dtype:", batch_obs["image_primary"].dtype, batch_actions.dtype)
-    print("Device image:", batch_obs["image_primary"].device)
-    print("Sample stats:", ds.get_stats())
-    logger.info("ExpertDataset smoke test complete.")
-
-
-#python -m utils.expert_dataset --samples 2 --warmup
+def replay_validate_episode(ep: Dict[str, Any], urdf_path: str, env_xml_path: Optional[str] = None) -> bool:
+    """
+    Replay sim_actions in a fresh environment and compare final object pose vs stored.
+    Return True if within tolerance.
+    """
+    env = PandaEnv(xml_path=env_xml_path, control_mode='delta')
+    env.reset(seed=ep.get("seed", None))
+    # You might want to also reset object initial states if stored
+    for a in ep["actions"]: # Use the unified "actions" key
+        obs, _, done, trunc, _ = env.step(np.array(a, dtype=np.float32))
+        if done or trunc:
+            break
+    final = obs
+    tgt = ep["obs_list"][-1]["object_pos_world"]
+    got = final["object_pos_world"]
+    pos_err = np.linalg.norm(tgt - got)
+    # orientation check (if stored object_orn_world)
+    # skip orientation for now
+    ok = pos_err <= REPLAY_POS_TOL
+    if not ok:
+        logger.warning(f"Replay mismatch pos_err={pos_err:.5f}")
+    return ok

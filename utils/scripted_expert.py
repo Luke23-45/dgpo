@@ -24,14 +24,15 @@ class ExpertConfig:
     lift_duration_steps: int = 40
     move_to_goal_duration: int = 180
     prepare_place_duration: int = 60
-    descend_to_place_duration: int = 40
-    retract_duration_steps: int = 30
-
+    descend_to_place_duration: int = 50
+    retract_duration_steps: int = 60
+    cruise_velocity: float = 0.4  # meters per second
+    accel_decel_buffer_steps: int = 30 # Steps reserved for smooth start/end
     # --- Original physical parameters ---
     hover_height: float = 0.10
     grasp_offset_z: float = 0.025
     failure_timeout_steps: int = 250 # Increased global timeout per state
-    pos_tolerance: float = 0.02 # Still used for final checks
+    pos_tolerance: float = 0.025 # Still used for final checks
     
     workspace: dict = None
     descent_xy_offset: np.ndarray = np.array([0.00, 0.0, 0.0])   
@@ -42,11 +43,11 @@ class ExpertConfig:
     home_pose_7d: np.ndarray = np.array([0.5, 0.0, 0.7, 0.0, 1.0, 0.0, 0.0])
     orn_tolerance_rad: float = 0.05 
     max_lift_height: float = 0.65
+    lookahead_distance: float = 0.03
 
     def __post_init__(self):
         if self.workspace is None:
             self.workspace = {"x": (0.35, 0.85), "y": (-0.25, 0.25), "z": (0.30, 0.95)}
-
 
 
 class ScriptedExpert:
@@ -332,173 +333,168 @@ class ScriptedExpert:
             self._handle_failure()
 
         
-        elif self._state == "MOVE_TO_PRE_GRASP":
-            """
-            [HYBRID ROBUST VERSION]
-            Generates a smooth, interpolated trajectory but transitions as soon as the
-            physical goal is met, making it efficient for both short and long movements.
-            A timeout acts as a safety net to guarantee progression.
-            """
-            # === STATE ENTRY LOGIC (runs only ONCE on the first step) ===
+        if self._state == "MOVE_TO_PRE_GRASP":
             if self._wait_counter == 1:
-                # 1. Capture the starting position and orientation for interpolation.
                 self._start_pre_grasp_pos = ee_pos.copy()
                 self._start_pre_grasp_orn = R.from_quat(ee_pose_world[3:])
-                print("MOve to pregrasp!")
-
-                # 2. Calculate the FINAL destination POSITION and store it.
                 end_pos = np.array([cube_pos_world[0], cube_pos_world[1], object_top_z + self.cfg.hover_height])
                 self._end_pre_grasp_pos = end_pos
-                
-                # 3. Calculate the FINAL, ALIGNED orientation and store it.
                 final_aligned_quat = self._calculate_aligned_orientation(object_orn_world, ee_pose_world[3:])
                 self._end_pre_grasp_orn = R.from_quat(final_aligned_quat)
+                total_dist = np.linalg.norm(self._end_pre_grasp_pos - self._start_pre_grasp_pos)
+                travel_steps = int((total_dist / self.cfg.cruise_velocity) * 100)
+                self._adaptive_duration = max(20, travel_steps + self.cfg.accel_decel_buffer_steps)
 
-            # === CONTINUOUS LOGIC (runs EVERY step) ===
-
-            # 1. Calculate progress (0.0 to 1.0).
-            progress = min(self._wait_counter / self.cfg.move_to_pre_grasp_duration, 1.0)
-
-            # 2. Interpolate position (Lerp).
-            interp_pos = self._start_pre_grasp_pos + (self._end_pre_grasp_pos - self._start_pre_grasp_pos) * progress
-
-            # 3. Spherically interpolate orientation (Slerp).
-            key_rots = R.from_quat([self._start_pre_grasp_orn.as_quat(), self._end_pre_grasp_orn.as_quat()])
-            slerp = Slerp([0, 1], key_rots)
-            interp_orn_quat = slerp(progress).as_quat()
-
-            # 4. Set the robot's target to the smoothly interpolated pose for this timestep.
+            progress = min(self._wait_counter / self._adaptive_duration, 1.0)
+            eased_progress = 0.5 * (1.0 - np.cos(progress * np.pi))
+            interp_pos = self._start_pre_grasp_pos + (self._end_pre_grasp_pos - self._start_pre_grasp_pos) * eased_progress
+            slerp = Slerp([0, 1], R.from_quat([self._start_pre_grasp_orn.as_quat(), self._end_pre_grasp_orn.as_quat()]))
+            interp_orn_quat = slerp(eased_progress).as_quat()
             self._target_pose_7d = np.concatenate([interp_pos, interp_orn_quat])
             self._gripper_action = 1.0
 
-            # === HYBRID TRANSITION LOGIC ===
-
-            # Condition 1: Has the robot physically reached the FINAL destination?
-            # We check the actual EE pose against the final target, not the moving interpolated one.
             pos_error = np.linalg.norm(ee_pos - self._end_pre_grasp_pos)
-            
-            # Calculate angular distance to the FINAL target orientation.
             R_current = R.from_quat(ee_pose_world[3:])
             angular_distance = (self._end_pre_grasp_orn.inv() * R_current).magnitude()
-            
-            is_at_destination = (pos_error < self.cfg.pos_tolerance) and \
-                                (angular_distance < self.cfg.orn_tolerance_rad)
+            is_at_destination = (pos_error < self.cfg.pos_tolerance) and (angular_distance < self.cfg.orn_tolerance_rad)
+            is_timed_out = self._wait_counter > max(self._adaptive_duration, self.cfg.move_to_pre_grasp_duration)
 
-            # Condition 2: Has the maximum allowed time elapsed? (Fallback)
-            is_timed_out = self._wait_counter > self.cfg.move_to_pre_grasp_duration
-
-            # Transition if EITHER condition is met.
-            if is_at_destination or is_timed_out:
-                if is_timed_out and not is_at_destination:
-                    print(f"WARN: MOVE_TO_PRE_GRASP timed out. Pos Error: {pos_error:.3f}m, Orn Error: {angular_distance:.3f}rad")
-                
-                # Commit the final, correct orientation to the state machine's memory.
+            if is_at_destination:
                 self.current_grasp_orientation = self._end_pre_grasp_orn.as_quat()
                 self._advance_state("PREPARE_GRIPPER")
+            elif is_timed_out:
+                print(f"ERROR: MOVE_TO_PRE_GRASP timed out. Pos Error: {pos_error:.3f}m")
+                self._handle_failure()
 
-    
-    
         elif self._state == "PREPARE_GRIPPER":
             """
-            [ULTIMATE ROBUST & FAILSAFE VERSION]
-            This state verifies the robot's orientation. If it's already correct,
-            it simply holds the pose. If the previous state failed to orient properly,
-            this state executes a corrective rotation. It transitions only when both
-            the orientation is stable AND the gripper is physically open.
+            [DEFINITIVE FAILSAFE VERSION]
+            This state acts as a robust checkpoint. It verifies and, if necessary,
+            corrects the robot's orientation to the ideal grasp pose while holding
+            position. It transitions only after confirming BOTH a stable pose AND
+            a fully open gripper. A timeout in this state is treated as a grasp
+            failure, triggering a full retry of the pick sequence.
             """
             # === STATE ENTRY LOGIC (runs only ONCE on the first step) ===
             if self._wait_counter == 1:
-                # 1. ALWAYS calculate the DEFINITIVE target orientation. This is our "ground truth"
-                #    for what the orientation should be, regardless of how we got here.
+                # 1. ALWAYS calculate the definitive target orientation. This serves as our
+                #    uncompromising ground truth for verification and correction.
                 target_orn_quat = self._calculate_aligned_orientation(object_orn_world, ee_pose_world[3:])
                 self._target_orn = R.from_quat(target_orn_quat)
 
-                # 2. Store the current position to hold it steady during any potential rotation.
+                # 2. Store the current position to hold it absolutely steady.
                 self._hold_pos = ee_pos.copy()
-                print("PREPARE_GRIPPER")
                 
-                # 3. Assemble the full 7D target pose.
+                # 3. Assemble the full 7D target pose we will command.
                 self._stored_target_pose = np.concatenate([self._hold_pos, self._target_orn.as_quat()])
                 
-                # 4. Pre-calculate the descent target for the next state.
+                # 4. Pre-calculate the descent target for the subsequent state.
                 grasp_z = object_top_z - self.cfg.grasp_offset_z
                 descent_xy = cube_pos_world[:2] + self.cfg.descent_xy_offset[:2]
                 self._descent_target_pos = np.array([descent_xy[0], descent_xy[1], grasp_z])
 
-                # 5. Initialize a counter to check for orientation stability.
+                # 5. Initialize stability counter.
                 self._orientation_stable_counter = 0
 
             # === CONTINUOUS LOGIC (runs EVERY step) ===
             
-            # Command the robot to go to the STORED hold position and STORED target orientation.
-            # If already oriented correctly, this command will cause no movement.
-            # If orientation is wrong, this will command a corrective rotation.
+            # Command the robot to the target pose. This corrects orientation errors
+            # while holding the XY position, and does nothing if already aligned.
             self._target_pose_7d = self._stored_target_pose
             self._gripper_action = 1.0 # Command gripper to open
 
-            # === ROBUST HYBRID TRANSITION LOGIC ===
+            # === DUAL-CONDITION TRANSITION & FAILURE HANDLING ===
             
-            # Condition 1: Is the orientation correct and has it been stable for a few steps?
+            # Condition 1: Verify orientation is correct and stable.
             R_current = R.from_quat(ee_pose_world[3:])
             angular_distance = (self._target_orn.inv() * R_current).magnitude()
-
             if angular_distance < self.cfg.orn_tolerance_rad:
                 self._orientation_stable_counter += 1
             else:
-                self._orientation_stable_counter = 0 # Reset counter if orientation deviates
-            
-            # We require the orientation to be correct for 5 consecutive steps to be "stable".
+                self._orientation_stable_counter = 0
             is_oriented_and_stable = self._orientation_stable_counter > 5
 
-            # Condition 2: Is the gripper physically open?
+            # Condition 2: Verify gripper is physically open.
             is_gripper_open = np.all(gripper_qpos > self.cfg.gripper_open_threshold)
             
-            # Condition 3 (Safety Net): Has too much time passed?
+            # Check for success: Both conditions MUST be met.
+            is_ready_to_descend = is_oriented_and_stable and is_gripper_open
+            
+            # Check for failure: The timeout has been exceeded.
             is_timed_out = self._wait_counter > self.cfg.prepare_gripper_duration
 
-            # Transition only if (stable AND open) OR if the timeout is reached.
-            if (is_oriented_and_stable and is_gripper_open) or is_timed_out:
-                if is_timed_out:
-                    print("WARN: PREPARE_GRIPPER timed out. Forcing transition.")
-                
-                # Commit the final orientation before advancing.
+            if is_ready_to_descend:
+                # SUCCESS: Everything is perfect. Commit the state and advance.
                 self.current_grasp_orientation = self._target_orn.as_quat()
                 self._advance_state("DESCEND_TO_GRASP")
+            elif is_timed_out:
+                # FAILURE: We ran out of time. The preparation has failed.
+                print("ERROR: PREPARE_GRIPPER timed out. Could not achieve stable pose and open gripper.")
+                # Do not proceed. Trigger the global failure handler to initiate a retry.
+                self._handle_failure()
 
         elif self._state == "DESCEND_TO_GRASP":
             """
-            [ROBUST HYBRID VERSION]
-            Commands a straight descent to the pre-calculated grasp pose.
-            It transitions based on reaching the target position, making it efficient.
-            A timeout prevents it from getting stuck if the goal is unreachable.
+            [DEFINITIVE PATH-FOLLOWING VERSION]
+            This state defines a static geometric path from the start to the end pose.
+            It then generates a dynamic target point that moves along this path,
+            staying a small 'lookahead_distance' ahead of the robot's actual position.
+            This creates an adaptive, smooth, and stable trajectory that is not
+            dependent on a fixed duration, but on the robot's real performance.
             """
             # === STATE ENTRY LOGIC (runs only ONCE on the first step) ===
             if self._wait_counter == 1:
-                # All necessary variables (_descent_target_pos, current_grasp_orientation)
-                # have already been set by the previous states. No setup needed.
-                pass
+                # 1. Define the static PATH: Start, End, Direction, and total length.
+                self._path_start_pos = ee_pos.copy()
+                # _descent_target_pos was robustly calculated in the previous state.
+                self._path_end_pos = self._descent_target_pos
+                self._path_vector = self._path_end_pos - self._path_start_pos
+                self._path_length = np.linalg.norm(self._path_vector)
+                
+                # Normalize the path vector, handling the zero-length case.
+                if self._path_length > 1e-6:
+                    self._path_direction = self._path_vector / self._path_length
+                else:
+                    self._path_direction = np.zeros(3)
 
-            # === CONTINUOUS LOGIC (runs EVERY step) ===
+                # Initialize the robot's progress along the path.
+                self._current_path_progress = 0.0
+
+            # === CONTINUOUS LOGIC (Path Following) ===
+
+            # 1. Find the robot's current projection onto the path.
+            #    This tells us how far along the path the robot has actually traveled.
+            robot_vec = ee_pos - self._path_start_pos
+            dist_along_path = np.dot(robot_vec, self._path_direction)
             
-            # Command the robot to move to the fixed descent target while maintaining orientation.
-            self._target_pose_7d = np.concatenate([self._descent_target_pos, self.current_grasp_orientation])
-            self._gripper_action = 1.0  # Keep gripper open during descent.
+            # 2. The "Target Point" is a lookahead distance *ahead* of the robot's current spot on the path.
+            target_dist_on_path = dist_along_path + self.cfg.lookahead_distance
 
-            # === HYBRID TRANSITION LOGIC ===
+            # 3. The new commanded position is the point on the path at this new target distance.
+            #    We also ensure the target never goes past the end of the path.
+            self._current_path_progress = np.clip(target_dist_on_path, 0.0, self._path_length)
+            interp_pos = self._path_start_pos + self._path_direction * self._current_path_progress
 
-            # Condition 1 (Primary): Has the robot physically reached the descent target?
-            pos_error = np.linalg.norm(ee_pos - self._descent_target_pos)
+            # 4. Command the new target pose. Orientation is constant during descent.
+            self._target_pose_7d = np.concatenate([interp_pos, self.current_grasp_orientation])
+            self._gripper_action = 1.0
+
+            # === ROBUST TRANSITION & FAILURE HANDLING ===
+
+            # Condition for Success: Has the robot's actual position reached the end of the path?
+            pos_error = np.linalg.norm(ee_pos - self._path_end_pos)
             is_at_destination = pos_error < self.cfg.pos_tolerance
 
-            # Condition 2 (Safety Net): Has the maximum allowed time elapsed?
-            is_timed_out = self._wait_counter > self.cfg.descend_to_grasp_duration
+            # Condition for Failure: Has a generous timeout elapsed? This prevents getting stuck.
+            is_timed_out = self._wait_counter > (self.cfg.descend_to_grasp_duration + 40) # Use a generous fixed timeout
             
-            # Transition if EITHER condition is met.
-            if is_at_destination or is_timed_out:
-                if is_timed_out and not is_at_destination:
-                    print(f"WARN: DESCEND_TO_GRASP timed out. Final position error: {pos_error:.4f}m")
-                
+            if is_at_destination:
+                # SUCCESS: We have arrived. Advance to the grasp action.
                 self._advance_state("GRASP")
+            elif is_timed_out:
+                # FAILURE: We got stuck or something went wrong.
+                print(f"ERROR: DESCEND_TO_GRASP timed out. Final position error: {pos_error:.4f}m")
+                self._handle_failure()
 
         elif self._state == "GRASP":
             """
@@ -549,107 +545,149 @@ class ScriptedExpert:
 
         elif self._state == "LIFT":
             """
-            [ROBUST TRAJECTORY-BASED VERSION]
-            Performs a smooth, interpolated vertical lift to a safe height.
-            Crucially, it monitors the grasp status on EVERY step of the lift.
-            If the grasp is lost at any point, it immediately aborts and triggers
-            the failure handler.
+            [DEFINITIVE PATH-FOLLOWING VERSION]
+            Executes an adaptive, smooth vertical lift by following a moving target
+            point along a defined path. It continuously monitors the grasp for
+            integrity and transitions only upon successful arrival at the target height.
             """
             # === STATE ENTRY LOGIC (runs only ONCE on the first step) ===
             if self._wait_counter == 1:
-                # 1. Capture the starting position for the interpolation.
-                self._start_lift_pos = ee_pos.copy()
+                # 1. Define the static PATH for the lift.
+                self._path_start_pos = ee_pos.copy()
                 
-                # 2. Calculate the final lift position using the adaptive height.
+                # Calculate the final lift position using the adaptive height.
                 adaptive_h = self.adaptive_hover_height(ee_pos[:2], robot_base_pos_world[:2])
-                end_lift_pos = self._start_lift_pos + np.array([0, 0, adaptive_h])
-                self._end_lift_pos = self._clamp_to_workspace(end_lift_pos)
+                self._path_end_pos = self._clamp_to_workspace(self._path_start_pos + np.array([0, 0, adaptive_h]))
                 
+                self._path_vector = self._path_end_pos - self._path_start_pos
+                self._path_length = np.linalg.norm(self._path_vector)
+                
+                if self._path_length > 1e-6:
+                    self._path_direction = self._path_vector / self._path_length
+                else: # Handle the case of a zero-length lift
+                    self._path_direction = np.array([0, 0, 1.0])
+                    self._path_length = 0.0
+
             # === CONTINUOUS LOGIC & MONITORING (runs EVERY step) ===
 
-            # 1. FAIL FAST: Check if the grasp has been lost mid-lift.
-            if not is_grasped and self._wait_counter > 5: # Small grace period
+            # 1. FAIL FAST: Abort immediately if the grasp is lost.
+            if not is_grasped and self._wait_counter > 5:
                 print("ERROR: Grasp lost during LIFT state. Aborting.")
                 self._handle_failure()
-                # Return here to ensure we don't execute the rest of the logic on this frame
-                # The state will be changed by _handle_failure for the next step.
                 return self.get_target_pose(expert_obs)
 
-            # 2. Calculate the progress of the lift (0.0 to 1.0).
-            progress = min(self._wait_counter / self.cfg.lift_duration_steps, 1.0)
-
-            # 3. Linearly interpolate the position for a smooth vertical trajectory.
-            interp_pos = self._start_lift_pos + (self._end_lift_pos - self._start_lift_pos) * progress
+            # 2. Implement the Path-Following logic.
+            # Find the robot's current projection onto the vertical path.
+            robot_vec = ee_pos - self._path_start_pos
+            dist_along_path = np.dot(robot_vec, self._path_direction)
             
-            # 4. Command the interpolated pose. Orientation remains constant.
+            # The target point is a lookahead distance ahead of the robot's current progress.
+            target_dist_on_path = dist_along_path + self.cfg.lookahead_distance
+
+            # The new commanded position is the point on the path at this new target distance.
+            current_path_progress = np.clip(target_dist_on_path, 0.0, self._path_length)
+            interp_pos = self._path_start_pos + self._path_direction * current_path_progress
+            
+            # 3. Command the new target pose and maintain grip.
             self._target_pose_7d = np.concatenate([interp_pos, self.current_grasp_orientation])
-            self._gripper_action = -1.0  # Maintain grasp
+            self._gripper_action = -1.0
 
-            # === TRANSITION LOGIC ===
+            # === ROBUST TRANSITION & FAILURE HANDLING ===
+
+            # Condition for Success: Has the robot's actual position reached the end of the path?
+            pos_error = np.linalg.norm(ee_pos - self._path_end_pos)
+            is_at_destination = (pos_error < self.cfg.pos_tolerance) or (self._path_length == 0.0)
+
+            # Condition for Failure: Use the fixed duration as a generous timeout.
+            is_timed_out = self._wait_counter > (self.cfg.lift_duration_steps + 20)
             
-            # Transition only after the full, smooth lift duration has completed.
-            if self._wait_counter > self.cfg.lift_duration_steps:
-                # Final verification: is the grasp STILL held after the motion?
+            if is_at_destination:
+                # Final check before moving on.
                 if is_grasped:
                     self._advance_state("MOVE_TO_GOAL")
-                else:
-                    # This case handles if the grasp is lost on the very last step.
-                    print("ERROR: Grasp lost at the end of LIFT. Aborting.")
+                else: # Should be caught by fail-fast, but this is a final guarantee.
+                    print("ERROR: Grasp lost at the very end of LIFT. Aborting.")
                     self._handle_failure()
+            elif is_timed_out:
+                print(f"ERROR: LIFT state timed out. Final position error: {pos_error:.4f}m")
+                self._handle_failure()
 
         elif self._state == "MOVE_TO_GOAL":
             """
-            [ROBUST TRAJECTORY-BASED VERSION WITH CONTINUOUS MONITORING]
-            Executes a smooth, interpolated trajectory in both position and orientation
-            to move the object to the goal's hover position. It actively monitors the
-            grasp on EVERY step, aborting immediately if the object is dropped.
+            [DEFINITIVE ADAPTIVE PATH-FOLLOWING VERSION]
+            Executes a fully synchronized, adaptive trajectory in 6D space.
+            Position follows a moving target point along a path. Orientation is
+            spherically interpolated in sync with the positional progress.
+            Grasp is continuously monitored for a fully robust and efficient transport.
             """
             # === STATE ENTRY LOGIC (runs only ONCE on the first step) ===
             if self._wait_counter == 1:
-                # 1. Setup start and end points for the trajectory.
-                self._start_move_pos = ee_pos.copy()
-                self._start_move_orn = R.from_quat(self.current_grasp_orientation)
+                # 1. Define the static PATH for POSITION.
+                self._path_start_pos = ee_pos.copy()
+                goal_hover_z = goal_pos_world[2] + self.cfg.hover_height + object_half_height
+                self._path_end_pos = np.array([goal_pos_world[0], goal_pos_world[1], goal_hover_z])
+                self._path_vector = self._path_end_pos - self._path_start_pos
+                self._path_length = np.linalg.norm(self._path_vector)
+
+                if self._path_length > 1e-6:
+                    self._path_direction = self._path_vector / self._path_length
+                else:
+                    self._path_direction = np.zeros(3)
                 
-                # Calculate the target placement orientation.
+                # 2. Define the "PATH" for ORIENTATION.
+                self._start_move_orn = R.from_quat(self.current_grasp_orientation)
                 goal_orn_world = expert_obs["goal_orn_world"]
                 self._place_orn = R.from_quat(self._calculate_aligned_orientation(goal_orn_world, ee_pose_world[3:]))
                 
-                # Calculate the target hover position above the goal.
-                goal_hover_z = goal_pos_world[2] + self.cfg.hover_height + object_half_height
-                self._end_move_pos = np.array([goal_pos_world[0], goal_pos_world[1], goal_hover_z])
+                # 3. Create the Slerp interpolator once.
+                self._slerp = Slerp([0, 1], R.from_quat([self._start_move_orn.as_quat(), self._place_orn.as_quat()]))
 
             # === CONTINUOUS LOGIC & MONITORING (runs EVERY step) ===
 
-            # 1. FAIL FAST: Check if the grasp has been lost mid-transit.
-            if not is_grasped and self._wait_counter > 5: # Small grace period
+            # 1. FAIL FAST: Abort immediately if the grasp is lost.
+            if not is_grasped and self._wait_counter > 5:
                 print("ERROR: Grasp lost during MOVE_TO_GOAL state. Aborting.")
                 self._handle_failure()
-                # Use a recursive call to immediately get the next action after failure
                 return self.get_target_pose(expert_obs)
 
-            # 2. Calculate progress and interpolate the 7D pose.
-            progress = min(self._wait_counter / self.cfg.move_to_goal_duration, 1.0)
-            interp_pos = self._start_move_pos + (self._end_move_pos - self._start_move_pos) * progress
-            slerp = Slerp([0, 1], R.from_quat([self._start_move_orn.as_quat(), self._place_orn.as_quat()]))
-            interp_orn = slerp(progress).as_quat()
+            # 2. PATH-FOLLOWING for POSITION:
+            robot_vec = ee_pos - self._path_start_pos
+            dist_along_path = np.dot(robot_vec, self._path_direction)
+            target_dist_on_path = dist_along_path + self.cfg.lookahead_distance
+            current_path_progress = np.clip(target_dist_on_path, 0.0, self._path_length)
+            interp_pos = self._path_start_pos + self._path_direction * current_path_progress
+
+            # 3. SYNCHRONIZED INTERPOLATION for ORIENTATION:
+            # Calculate the completion ratio of the positional path.
+            path_completion_ratio = 0.0 if self._path_length < 1e-6 else np.clip(dist_along_path / self._path_length, 0.0, 1.0)
             
-            # 3. Command the interpolated pose and maintain grip.
+            # Use this ratio as the input to Slerp.
+            interp_orn = self._slerp(path_completion_ratio).as_quat()
+
+            # 4. Command the synchronized 7D pose and maintain grip.
             self._target_pose_7d = np.concatenate([interp_pos, interp_orn])
             self._gripper_action = -1.0
 
-            # === TRANSITION LOGIC ===
+            # === ROBUST TRANSITION & FAILURE HANDLING ===
 
-            # Transition after the full duration has passed.
-            if self._wait_counter > self.cfg.move_to_goal_duration:
-                # Final check: is the grasp still held after the long move?
+            # Condition for Success: Has the robot's actual position reached the end of the path?
+            pos_error = np.linalg.norm(ee_pos - self._path_end_pos)
+            is_at_destination = pos_error < self.cfg.pos_tolerance
+
+            # Condition for Failure: Use the fixed duration as a generous timeout.
+            is_timed_out = self._wait_counter > self.cfg.move_to_goal_duration
+            
+            if is_at_destination:
                 if is_grasped:
                     self.current_grasp_orientation = self._place_orn.as_quat()
                     self._advance_state("PREPARE_PLACE")
                 else:
                     print("ERROR: Grasp lost at the end of MOVE_TO_GOAL. Aborting.")
                     self._handle_failure()
+            elif is_timed_out:
+                print(f"ERROR: MOVE_TO_GOAL state timed out. Final position error: {pos_error:.4f}m")
+                self._handle_failure()
 
-  
         elif self._state == "PREPARE_PLACE":
             """
             [ROBUST STABILIZATION & VERIFICATION VERSION]
@@ -714,171 +752,246 @@ class ScriptedExpert:
 
         elif self._state == "DESCEND_TO_PLACE":
             """
-            [ROBUST PHYSICS-AWARE VERSION]
-            Executes a slow, smooth, interpolated descent to the target surface.
-            It transitions NOT based on time, but on physical confirmation that the
-            object has made contact and is supported (i.e., its vertical velocity is zero).
-            This makes the placement robust to variations in table height or object size.
+            [DEFINITIVE ADAPTIVE & PHYSICS-AWARE VERSION]
+            Executes a highly controlled, adaptive descent using a path-following
+            algorithm. The speed of descent is naturally governed by the robot's
+            ability to chase a lookahead target. The state transitions ONLY after
+            receiving physical confirmation from the simulation that the object has
+            made contact and is fully supported (vertical velocity is zero). This
+            provides the highest possible robustness against variations and errors.
             """
             # === STATE ENTRY LOGIC (runs only ONCE on the first step) ===
             if self._wait_counter == 1:
-                # 1. Capture the starting position for the smooth descent.
-                self._start_place_pos = ee_pos.copy()
-
-                # 2. Define the final target placement position on the surface.
+                # 1. Define the static PATH for the descent.
+                self._path_start_pos = ee_pos.copy()
                 tcp_placement_z = self.table_surface_z + self.object.size[2]
-                place_pos = np.array([goal_pos_world[0], goal_pos_world[1], tcp_placement_z])
-                self._end_place_pos = place_pos
+                self._path_end_pos = np.array([goal_pos_world[0], goal_pos_world[1], tcp_placement_z])
+                self._path_vector = self._path_end_pos - self._path_start_pos
+                self._path_length = np.linalg.norm(self._path_vector)
+
+                if self._path_length > 1e-6:
+                    self._path_direction = self._path_vector / self._path_length
+                else:
+                    self._path_direction = np.array([0, 0, -1.0]) # Assume downward if no path
+                    self._path_length = 0.0
 
             # === CONTINUOUS LOGIC & MONITORING (runs EVERY step) ===
-            
+
             # 1. FAIL FAST: Continuously monitor the grasp.
             if not is_grasped and self._wait_counter > 5:
-                print("ERROR: Grasp lost during DESCEND_TO_PLACE state. Aborting.")
+                print("ERROR: Grasp lost during DESCEND_TO_PLACE. Aborting.")
                 self._handle_failure()
                 return self.get_target_pose(expert_obs)
 
-            # 2. Generate the smooth, interpolated descent trajectory.
-            progress = min(self._wait_counter / self.cfg.descend_to_place_duration, 1.0)
-            interp_pos = self._start_place_pos + (self._end_place_pos - self._start_place_pos) * progress
-
-            # 3. Command the interpolated pose and maintain grip.
+            # 2. PATH-FOLLOWING LOGIC for a smooth, adaptive descent.
+            robot_vec = ee_pos - self._path_start_pos
+            dist_along_path = np.dot(robot_vec, self._path_direction)
+            target_dist_on_path = dist_along_path + self.cfg.lookahead_distance
+            current_path_progress = np.clip(target_dist_on_path, 0.0, self._path_length)
+            interp_pos = self._path_start_pos + self._path_direction * current_path_progress
+            
+            # 3. Command the new target pose and maintain grip.
             self._target_pose_7d = np.concatenate([interp_pos, self.current_grasp_orientation])
             self._gripper_action = -1.0
 
-            # === PHYSICS-BASED TRANSITION LOGIC ===
-            
-            # We need the object's velocity from the expert observation.
+            # === PHYSICS-BASED TRANSITION & FAILURE HANDLING ===
+
             object_vertical_velocity = expert_obs.get("object_vel", [0]*6)[2]
 
             # Condition 1 (Primary): Has the object made contact and is it supported?
-            # We check if the downward velocity has stopped.
-            # A small wait counter (e.g., > 5) prevents transitioning on initial contact bounce.
             contact_made_and_stable = self._wait_counter > 5 and abs(object_vertical_velocity) < 0.005
 
-            # Condition 2 (Safety Net): Has the maximum allowed time elapsed?
-            is_timed_out = self._wait_counter > (self.cfg.descend_to_place_duration + 20) # Add a buffer
-
-            # Transition if contact is stable OR if we've timed out.
+            # Condition 2 (Safety Net): Has a generous timeout elapsed?
+            is_timed_out = self._wait_counter > (self.cfg.descend_to_place_duration + 40) # Use a generous fixed timeout
+            
+            # Transition if contact is confirmed OR if we time out.
             if contact_made_and_stable or is_timed_out:
                 if is_timed_out and not contact_made_and_stable:
                     print(f"WARN: DESCEND_TO_PLACE timed out. Forcing release. Object Z Vel: {object_vertical_velocity:.4f}")
-                
-                # IMPORTANT: Before releasing, we must ensure the robot holds the final placement
-                # pose to prevent pulling the object away as the gripper opens.
-                # We will add a new state for this.
-                self._final_place_pose = self._target_pose_7d.copy()
+
+                # Store the absolute final pose we want to hold during the release sequence.
+                # It is safer to use the defined end of the path than the robot's current pose.
+                self._final_place_pose = np.concatenate([self._path_end_pos, self.current_grasp_orientation])
                 self._advance_state("AWAIT_STABLE_PLACEMENT")
+
+
         elif self._state == "AWAIT_STABLE_PLACEMENT":
             """
-            Holds the final placement pose for a few steps to allow physics to
-            settle, ensuring the object is fully supported before release.
+            [DEFINITIVE FAILSAFE & ROBUST VERIFICATION VERSION]
+            This state holds the arm at the final placement pose and waits for
+            physical confirmation that the object is stable. It uses a debounced
+            check on the object's vertical velocity, which is a more robust
+            indicator of stability than the full 6D velocity norm. A timeout
+            is correctly treated as a task failure, triggering a retry.
             """
-            # Command the robot to hold the FINAL, correct placement pose.
+            # === STATE ENTRY LOGIC ===
+            if self._wait_counter == 1:
+                self._object_stable_counter = 0
+
+            # === CONTINUOUS LOGIC & MONITORING ===
             self._target_pose_7d = self._final_place_pose
-            self._gripper_action = -1.0 # Keep holding
+            self._gripper_action = -1.0
+            if not is_grasped and self._wait_counter > 5:
+                print("ERROR: Grasp lost during AWAIT_STABLE_PLACEMENT. Aborting.")
+                self._handle_failure()
+                return self.get_target_pose(expert_obs)
 
-            object_is_stable = np.linalg.norm(expert_obs.get("object_vel", np.ones(6))) < 0.01
+            # === ROBUST, DEBOUNCED TRANSITION LOGIC ===
+            
+            # THE KEY CHANGE: Check only the vertical velocity.
+            # This is a much more stable indicator of whether the object is supported by the table.
+            object_vertical_velocity = expert_obs.get("object_vel", [0]*6)[2]
+            # Use a slightly more lenient threshold to account for controller noise.
+            object_is_currently_stable = abs(object_vertical_velocity) < 0.01 
 
-            if self._wait_counter > 5 and object_is_stable:
+            if object_is_currently_stable:
+                self._object_stable_counter += 1
+            else:
+                self._object_stable_counter = 0
+
+            is_confirmed_stable = self._object_stable_counter > 5
+            is_timed_out = self._wait_counter > 25
+
+            # THE SECOND KEY CHANGE: Timeout is now a FAILURE condition.
+            if is_confirmed_stable:
+                # SUCCESS: The object is verifiably stable. Proceed to release.
                 self._advance_state("RELEASE")
-            elif self._wait_counter > 25: # Timeout
-                print("WARN: AWAIT_STABLE_PLACEMENT timed out. Forcing release.")
-                self._advance_state("RELEASE")
+            elif is_timed_out:
+                # FAILURE: We could not confirm the object was stable.
+                print("ERROR: AWAIT_STABLE_PLACEMENT timed out. Object is not stable.")
+                # Do not proceed. Trigger the global failure handler.
+                self._handle_failure()
 
         elif self._state == "RELEASE":
             """
-            [ROBUST & FAILSAFE VERSION]
-            This state holds the arm perfectly still while opening the gripper.
-            It transitions to RETRACT only after receiving confirmation of TWO events:
-            1. The gripper joints are physically open.
-            2. The grasp contact has been fully broken (is_grasped is False).
-            This prevents the robot from dragging the object during retraction.
+            [DEFINITIVE SEQUENTIAL VERIFICATION VERSION]
+            This state ensures an impeccably clean release. It holds the arm
+            perfectly still while opening the gripper. It then waits for sequential
+            confirmation: first, that the gripper is physically open, and second,
+            that the physical contact with the object has been stably broken for
+            several consecutive steps. This completely eliminates any risk of
+            dragging the object upon retraction.
             """
             # === STATE ENTRY LOGIC (runs only ONCE on the first step) ===
             if self._wait_counter == 1:
-                # Store the current pose to ensure we hold it absolutely steady.
+                # 1. Store the pose to hold absolutely steady during release.
                 self._hold_pose_at_release = ee_pose_world.copy()
+                # 2. Initialize a counter to confirm the contact break is not a flicker.
+                self._contact_broken_counter = 0
 
             # === CONTINUOUS LOGIC (runs EVERY step) ===
             
-            # Command the robot to hold the stored pose with no changes.
+            # Command the robot to hold still and open the gripper.
             self._target_pose_7d = self._hold_pose_at_release
-            # Command the gripper to open.
             self._gripper_action = 1.0
 
-            # === DUAL-CONDITION TRANSITION LOGIC ===
+            # === SEQUENTIAL & DEBOUNCED TRANSITION LOGIC ===
 
-            # Condition 1: Are the gripper fingers physically wide open?
+            # Condition 1: Is the gripper mechanism fully open?
             is_gripper_fully_open = np.all(gripper_qpos > self.cfg.gripper_open_threshold)
+
+            # Condition 2: Has the physical contact with the object been broken?
+            # This is only checked AFTER the gripper is confirmed to be open.
+            if is_gripper_fully_open:
+                if not is_grasped:
+                    # If contact is broken, increment the stability counter.
+                    self._contact_broken_counter += 1
+                else:
+                    # If the signal flickers back, reset the counter.
+                    self._contact_broken_counter = 0
             
-            # Condition 2: Has the physical contact with the object been lost?
-            # We check for NOT is_grasped.
-            is_contact_broken = not is_grasped
+            # We require 3 consecutive steps of broken contact to be sure.
+            is_release_confirmed = self._contact_broken_counter > 3
 
-            # Condition 3 (Safety Net): Has too much time passed?
-            is_timed_out = self._wait_counter > 30 # A generous timeout for opening the gripper
+            # Condition 3 (Safety Net): Has a generous timeout elapsed?
+            is_timed_out = self._wait_counter > 30
 
-            # We need a small delay before checking, to give physics time to update.
-            # Transition only if BOTH physical conditions are met, OR if we time out.
-            if self._wait_counter > 5 and ((is_gripper_fully_open and is_contact_broken) or is_timed_out):
-                if is_timed_out:
-                    print("WARN: RELEASE state timed out waiting for contact to break. Forcing retract.")
-
+            # Transition if the debounced release is confirmed OR if we time out.
+            if is_release_confirmed or is_timed_out:
+                if is_timed_out and not is_release_confirmed:
+                    print("WARN: RELEASE state timed out. Forcing retract.")
+                
                 self._advance_state("RETRACT")
 
 
         elif self._state == "RETRACT":
             """
-            [ROBUST TRAJECTORY-BASED VERSION]
-            Executes a final, smooth, interpolated vertical motion to a safe
-            height away from the placed object. It transitions to the DONE state
-            only after physically arriving at the retract position, ensuring the
-            task is marked as successful only when truly complete.
+            [DEFINITIVE ADAPTIVE & SMOOTH VERSION]
+            Executes a final, smooth, and professional retraction. The duration is
+            adaptively calculated based on the retract distance and a desired cruise
+            velocity. The trajectory is eased to provide smooth acceleration and
+            deceleration. It transitions to DONE only after physically verifying
+            arrival at the safe retract position.
             """
             # === STATE ENTRY LOGIC (runs only ONCE on the first step) ===
             if self._wait_counter == 1:
-                # 1. Capture the starting position for the interpolation.
+                # 1. Define the start and end of the path.
                 self._start_retract_pos = ee_pos.copy()
-                
-                # 2. Calculate the final destination pose.
                 end_retract_pos = self._start_retract_pos + np.array([0, 0, self.cfg.hover_height])
                 self._end_retract_pos = self._clamp_to_workspace(end_retract_pos)
+                
+                # 2. Calculate the adaptive duration for this specific move.
+                total_dist = np.linalg.norm(self._end_retract_pos - self._start_retract_pos)
+                # Time = Distance / Speed. Convert to steps (assuming 100Hz).
+                travel_steps = int((total_dist / self.cfg.cruise_velocity) * 100)
+                self._adaptive_duration = travel_steps + self.cfg.accel_decel_buffer_steps
+                
+                # Ensure a minimum duration for very short moves.
+                if self._adaptive_duration < 20:
+                    self._adaptive_duration = 20
             
             # === CONTINUOUS LOGIC (runs EVERY step) ===
 
-            # 1. Calculate the progress of the retraction (0.0 to 1.0).
-            progress = min(self._wait_counter / self.cfg.retract_duration_steps, 1.0)
+            # 1. Calculate progress using the adaptive duration and apply easing.
+            progress = min(self._wait_counter / self._adaptive_duration, 1.0)
+            eased_progress = 0.5 * (1.0 - np.cos(progress * np.pi))
 
-            # 2. Linearly interpolate the position for a smooth vertical trajectory.
-            interp_pos = self._start_retract_pos + (self._end_retract_pos - self._start_retract_pos) * progress
+            # 2. Interpolate the position for a smooth vertical trajectory.
+            interp_pos = self._start_retract_pos + (self._end_retract_pos - self._start_retract_pos) * eased_progress
             
-            # 3. Command the interpolated pose. Orientation remains constant.
+            # 3. Command the interpolated pose.
             self._target_pose_7d = np.concatenate([interp_pos, self.current_grasp_orientation])
             self._gripper_action = 1.0  # Keep gripper open.
 
             # === HYBRID TRANSITION LOGIC ===
             
-            # Condition 1 (Primary): Has the robot physically reached the retract destination?
+            # The timeout is the larger of our adaptive plan or the global config.
+            timeout = max(self._adaptive_duration, self.cfg.retract_duration_steps)
+            
             pos_error = np.linalg.norm(ee_pos - self._end_retract_pos)
             is_at_destination = pos_error < self.cfg.pos_tolerance
-
-            # Condition 2 (Safety Net): Has the maximum allowed time elapsed?
-            is_timed_out = self._wait_counter > self.cfg.retract_duration_steps
+            is_timed_out = self._wait_counter > timeout
 
             if is_at_destination or is_timed_out:
                 if is_timed_out and not is_at_destination:
                     print(f"WARN: RETRACT state timed out. Final pos error: {pos_error:.4f}m")
                 
-                # The task is now officially complete and successful.
+                # Set success flag ONLY after the final action is verifiably complete.
                 self.succeeded = True
                 self._advance_state("DONE")
 
       
         elif self._state == "DONE":
-            if self._target_pose_7d is None: # First time entering DONE
-                self._target_pose_7d = np.concatenate([ee_pos, self._downward_quat])
-            # Hold final position
+            """
+            [DEFINITIVE TERMINAL STATE]
+            This is the final, quiescent state. Its only purpose is to command the
+            robot to hold its final, intended pose from the successful RETRACT
+            maneuver. This ensures absolute stability and prevents any post-task
+            drift or unnecessary motion until the episode is reset.
+            """
+            # === STATE ENTRY LOGIC (runs only ONCE on the first step) ===
+            if self._wait_counter == 1:
+                # 1. The ideal final pose is the destination of the previous RETRACT state.
+                #    We retrieve it from our state variables to ensure perfect continuity.
+                #    No new calculation is needed.
+                self._final_hold_pose = np.concatenate([self._end_retract_pos, self.current_grasp_orientation])
+
+            # === CONTINUOUS LOGIC (runs EVERY step) ===
+            
+            # 1. Continuously command the robot to hold the final pose.
+            self._target_pose_7d = self._final_hold_pose
+            
+            # 2. Keep the gripper open.
             self._gripper_action = 1.0
             
         # Fallback to prevent crashes
