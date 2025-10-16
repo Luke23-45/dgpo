@@ -216,6 +216,7 @@ class PandaEnv(gym.Env):
         self.enable_domain_randomization = enable_domain_randomization
         self.dr_config = dr_config or DomainRandomizationConfig()
         self.ACTION_SCALING_FACTOR = action_scaling_factor
+        self.proprio_dim = 7 + 7 + 2 + 6 
 
         # 4. Consolidated Block: Cache all MuJoCo IDs and initialize state
         #    This block runs AFTER the model is loaded and BEFORE spaces are defined.
@@ -530,7 +531,7 @@ class PandaEnv(gym.Env):
         # 1. Select a random high-quality "exemplar" shot from our curated list.
         chosen_shot = self.np_random.choice(self.dr_config.camera_shots)
 
-        print(f"Camera Short: {chosen_shot}")
+        # print(f"Camera Short: {chosen_shot}")
         base_cam_pos = np.array(chosen_shot.pos)
         base_target_pos = np.array(chosen_shot.target)
 
@@ -1036,6 +1037,8 @@ class PandaEnv(gym.Env):
         
         self.timestep = 0
         mujoco.mj_resetData(self.model, self.data)
+        self.data.ctrl[:] = 0
+        print(f"seed - {seed}")
         
         # FIX #4: Ensure grasp state is reset at the start of every episode
         self._is_physically_grasped = False
@@ -1084,8 +1087,8 @@ class PandaEnv(gym.Env):
             max_y_offset=MAX_Y_SHIFT
         )
 
-        if (x_new, y_new) != (x0, y0):
-            print(f"WARN: object position compensated: ({x0:.3f}, {y0:.3f}) → ({x_new:.3f}, {y_new:.3f})")
+        # if (x_new, y_new) != (x0, y0):
+        #     print(f"WARN: object position compensated: ({x0:.3f}, {y0:.3f}) → ({x_new:.3f}, {y_new:.3f})")
 
         object_pos[0] = x_new
         object_pos[1] = y_new

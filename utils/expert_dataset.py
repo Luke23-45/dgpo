@@ -18,6 +18,7 @@ Features:
 """
 
 from __future__ import annotations
+import copy
 import pickle
 import os
 import time
@@ -30,6 +31,7 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset, Dataset, get_worker_info
 from scipy.spatial.transform import Rotation as R
+from utils.lmdb_utils import open_lmdb_env, close_lmdb_env
 
 import mujoco
 
@@ -120,18 +122,34 @@ class ExpertDatasetWriter:
         with open(path, "wb") as f:
             pickle.dump(self.episodes, f)
     
+    # def _save_lmdb(self, path: str):
+    #     map_size = 10 * (1024**3)  # 10 GB initial map size, can be increased
+    #     env = lmdb.open(path, map_size=map_size, subdir=False, readonly=False, lock=False)
+    #     with env.begin(write=True) as txn:
+    #         for idx, ep in enumerate(self.episodes):
+    #             key = f"{idx:08d}".encode("ascii")
+    #             # Serialize the entire episode dictionary into a binary blob using pickle
+    #             val = pickle.dumps(ep)
+    #             txn.put(key, val)
+    #     env.sync()
+    #     env.close()
     def _save_lmdb(self, path: str):
-        map_size = 10 * (1024**3)  # 10 GB initial map size, can be increased
-        env = lmdb.open(path, map_size=map_size, subdir=False, readonly=False, lock=False)
-        with env.begin(write=True) as txn:
-            for idx, ep in enumerate(self.episodes):
-                key = f"{idx:08d}".encode("ascii")
-                # Serialize the entire episode dictionary into a binary blob using pickle
-                val = pickle.dumps(ep)
-                txn.put(key, val)
-        env.sync()
-        env.close()
-    
+        # Ensure parent dir exists (do NOT create the .lmdb file as a directory)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        # Use our robust helper — on Windows subdir=False is required for single-file lmdb
+        env = open_lmdb_env(path, readonly=False, lock=True, map_size_gb=10.0, subdir=False)
+        try:
+            with env.begin(write=True) as txn:
+                for idx, ep in enumerate(self.episodes):
+                    key = f"{idx:08d}".encode("ascii")
+                    val = pickle.dumps(ep)
+                    txn.put(key, val)
+            # durable flush
+            env.sync()
+            logger.info(f"LMDB successfully written: {path} (episodes={len(self.episodes)})")
+        finally:
+            close_lmdb_env(env)
     @staticmethod
     def _np_encoder(obj):
         if isinstance(obj, np.ndarray):
@@ -141,66 +159,183 @@ class ExpertDatasetWriter:
 
 class ExpertTrajectoryDataset(Dataset):
     """
-    Loader for the on-disk expert demos produced by ExpertDatasetWriter.
-    Each __getitem__ returns (obs_dict, data_action) as used by diffusion BC training.
-    Uses lazy LMDB initialization to avoid pickling env issues in DataLoader workers.
+    State-of-the-art loader for expert demos.
+
+    Features:
+    - Loads data from LMDB or pickle files.
+    - Slices full episodes into structured chunks of (observation_horizon, action_horizon).
+    - Correctly handles multi-view images (primary and wrist).
+    - Designed for use with diffusion policy training.
     """
-    def __init__(self, demo_path: str):
+    def __init__(self, demo_path: str, observation_horizon: int, action_horizon: int):
         self.demo_path = demo_path
+        self.observation_horizon = observation_horizon
+        self.action_horizon = action_horizon
         self.is_lmdb = lmdb and demo_path.endswith(".lmdb")
-        self.episodes = []  # will hold in-memory or index pointers
-        self._env = None
-        self._txn = None
+
         
+        # In-memory cache for loaded episodes (especially for pickle mode)
+        self._episode_cache = {} 
+        self._lmdb_env = None
+        self._lmdb_txn = None
+
+        # --- Build a chunk-aware index map ---
+        # First, we need to get the length of each episode.
+        episode_lengths = []
         if self.is_lmdb:
-            # open env lazily later
-            pass
+            # For LMDB, we read the index from the transaction length
+            env = open_lmdb_env(self.demo_path, readonly=True, lock=False, readahead=False)
+            with env.begin() as txn:
+                num_episodes = txn.stat()['entries']
+                for i in range(num_episodes):
+                    key = f"{i:08d}".encode("ascii")
+                    blob = txn.get(key)
+                    ep = pickle.loads(blob)
+                    episode_lengths.append(len(ep["actions"]))
+            env.close()
         else:
-            # Pickle fallback: load entire episodes
-            import pickle
+            # For pickle, we load the whole file once
             with open(demo_path, "rb") as f:
                 self.episodes = pickle.load(f)
-        # Build flat index: mapping global index -> (episode_idx, step_idx)
+            episode_lengths = [len(ep["actions"]) for ep in self.episodes]
+
         self.index_map = []
-        for ep_i, ep in enumerate(self.episodes):
-            L = len(ep["actions"])
-            for t in range(L):
-                self.index_map.append((ep_i, t))
-        logger.info(f"Loaded expert demos: {len(self.episodes)} episodes, {len(self.index_map)} total steps.")
-    
+        for ep_idx, ep_len in enumerate(episode_lengths):
+            # A valid chunk starts at an index `t` where there are enough past
+            # observations and enough future actions.
+            # First possible start index `t`: self.observation_horizon - 1
+            # Last possible start index `t`: ep_len - self.action_horizon
+            start_idx = self.observation_horizon - 1
+            end_idx = ep_len - self.action_horizon
+            for t in range(start_idx, end_idx + 1):
+                self.index_map.append((ep_idx, t))
+        
+        logger.info(
+            f"Loaded expert demos: {len(episode_lengths)} episodes, "
+            f"{len(self.index_map)} total valid chunks."
+        )
+
     def __len__(self):
         return len(self.index_map)
+
+    # def _get_episode(self, ep_idx: int) -> Dict[str, Any]:
+    #     """Helper to get an episode, using cache if available."""
+    #     if ep_idx in self._episode_cache:
+    #         return self._episode_cache[ep_idx]
+        
+    #     if self.is_lmdb:
+    #         if self._lmdb_env is None:
+    #             self._lmdb_env = lmdb.open(self.demo_path, readonly=True, lock=False, readahead=False, meminit=False)
+    #             self._lmdb_txn = self._lmdb_env.begin(write=False)
+    #         key = f"{ep_idx:08d}".encode("ascii")
+    #         blob = self._lmdb_txn.get(key)
+    #         ep = pickle.loads(blob)
+    #         self._episode_cache[ep_idx] = ep # Cache the loaded episode
+    #         return ep
+    #     else:
+    #         # For pickle, all episodes are already in memory
+    #         return self.episodes[ep_idx]
+
+    def _get_episode(self, ep_idx: int) -> Dict[str, Any]:
+        if ep_idx in self._episode_cache:
+            return self._episode_cache[ep_idx]
+
+        if self.is_lmdb:
+            # lazily open environment once per process
+            if self._lmdb_env is None:
+                # readahead=False improves concurrency; lock=False avoids writer locks for readers
+                self._lmdb_env = open_lmdb_env(self.demo_path, readonly=True, lock=False, readahead=False, subdir=False)
+            with self._lmdb_env.begin(write=False) as txn:
+                key = f"{ep_idx:08d}".encode("ascii")
+                blob = txn.get(key)
+                if blob is None:
+                    raise KeyError(f"Missing LMDB key {key!r} in {self.demo_path}")
+                ep = pickle.loads(blob)
+                self._episode_cache[ep_idx] = ep
+                return ep
+        else:
+            return self.episodes[ep_idx]
     
     def _init_lmdb(self):
         if self._env is None:
             self._env = lmdb.open(self.demo_path, readonly=True, lock=False, readahead=False, meminit=False)
             self._txn = self._env.begin(write=False)
-    
-    def __getitem__(self, idx: int):
-        ep_i, t = self.index_map[idx]
-        ep = self.episodes[ep_i] if not self.is_lmdb else None
-        if self.is_lmdb:
-            self._init_lmdb()
-            key = f"{ep_i:08d}".encode("ascii")
-            blob = self._txn.get(key)
-            assert blob is not None, f"Missing LMDB key {key}"
-            ep = pickle.loads(blob)
+    def __del__(self):
+        if getattr(self, "_lmdb_env", None) is not None:
+            close_lmdb_env(self._lmdb_env)
+            self._lmdb_env = None
+  
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+        ep_idx, t = self.index_map[idx]
+        ep = self._get_episode(ep_idx)
         
-        obs = ep["obs_list"][t]
-        data_action = np.array(ep["actions"][t], dtype=np.float32)
-        # Convert necessary observation items to torch tensors
-        torch_obs = {
-            "image_primary": torch.from_numpy(obs["image_primary"]),
-            "proprio": torch.from_numpy(obs["proprio"]),
+        # --- Slicing Logic for Chunks ---
+        obs_start_idx = t - self.observation_horizon + 1
+        obs_end_idx = t + 1
+        action_start_idx = t
+        action_end_idx = t + self.action_horizon
+
+        # Slice the observation and action lists for the chunk
+        obs_chunk_list = ep["obs_list"][obs_start_idx:obs_end_idx]
+        action_chunk = np.array(ep["actions"][action_start_idx:action_end_idx], dtype=np.float32)
+
+        # --- Stack Multi-View Images and Proprioception ---
+        # This creates the final chunked numpy arrays
+        obs_chunk = {
+            "image_primary": np.stack([o["image_primary"] for o in obs_chunk_list]),
+            "image_wrist": np.stack([o["image_wrist"] for o in obs_chunk_list]),
+            "proprio": np.stack([o["proprio"] for o in obs_chunk_list]),
         }
-        return torch_obs, torch.from_numpy(data_action)
+        
+        return obs_chunk, action_chunk
     
     @staticmethod
-    def collate_fn(batch):
-        imgs = torch.stack([b[0]["image_primary"] for b in batch], dim=0)
-        proprios = torch.stack([b[0]["proprio"] for b in batch], dim=0)
-        actions = torch.stack([b[1] for b in batch], dim=0)
-        return {"image_primary": imgs, "proprio": proprios}, actions
+    def collate_fn(batch: List[Tuple[Dict[str, np.ndarray], np.ndarray]]):
+        """
+        Collates a batch of chunked data into a single PyTorch tensor dictionary.
+        Input shape (example):
+          - obs["image_primary"]: (B, H_obs, H, W, C)
+          - action: (B, H_act, A_dim)
+        """
+        obs_batch = {}
+        # Get all observation keys from the first sample (e.g., 'image_primary', 'image_wrist', 'proprio')
+        obs_keys = batch[0][0].keys()
+        
+        for key in obs_keys:
+            # Stack all observations for this key across the batch dimension
+            obs_batch[key] = torch.from_numpy(np.stack([sample[0][key] for sample in batch]))
+
+        # Stack all action chunks across the batch dimension
+        action_batch = torch.from_numpy(np.stack([sample[1] for sample in batch]))
+        
+        return obs_batch, action_batch
+    
+def collate_fn(batch: List[Tuple[Dict[str, np.ndarray], np.ndarray]]):
+    """
+    Collates a batch of chunked data into a single PyTorch tensor dictionary.
+    Input shape (example):
+      - sample[0] (obs): Dict with arrays like (H_obs, H, W, C)
+      - sample[1] (action): Array like (H_act, A_dim)
+    Returns:
+      - obs_batch: Dict with tensors like (B, H_obs, H, W, C)
+      - action_batch: Tensor like (B, H_act, A_dim)
+    """
+    if not batch:
+        return {}, torch.empty(0)
+
+    obs_batch = {}
+    # Get all observation keys from the first sample
+    obs_keys = batch[0][0].keys()
+    
+    for key in obs_keys:
+        # Stack all observations for this key across the batch dimension
+        # Converts numpy arrays to torch tensors automatically
+        obs_batch[key] = torch.from_numpy(np.stack([sample[0][key] for sample in batch]))
+
+    # Stack all action chunks across the batch dimension
+    action_batch = torch.from_numpy(np.stack([sample[1] for sample in batch]))
+    
+    return obs_batch, action_batch
 
 
 class ExpertDataset(IterableDataset):
@@ -376,129 +511,181 @@ class ExpertDataset(IterableDataset):
         current_obs["expert_source"] = 0
         
         return current_obs, action, ik_failed
-    
+        
     def __iter__(self) -> Iterator[Tuple[Dict, np.ndarray]]:
+        """
+        Robust iterator for ExpertDataset.
+
+        Guarantees:
+          - deterministic per-worker RNG (via self._rng)
+          - at least one sample kept from any successful trajectory
+          - safe copying of numpy arrays to avoid shallow-copy bugs
+          - consistent episode dict keys ("actions", "obs_list", "ik_fail_flags")
+        """
+        # Ensure worker state is initialized (this must set self._worker_id, self._worker_master_seed, self._rng)
         self._init_worker_state()
+
+        # defensive inits
         self._episode_buffer.clear()
         samples_this_epoch = 0
         consecutive_failures = 0
-        self._episode_id_counter = 0 
-        MAX_CONSEC = 1
-        
+        episode_attempt_counter = 0
+        MAX_CONSEC = 25
+
         while True:
-            # Stop when enough samples
+            # stop condition
             if self.max_samples_per_epoch is not None and samples_this_epoch >= self.max_samples_per_epoch:
                 return
-            
-            if not self._episode_buffer:
-                # start a new trajectory
-                try:
-                    # --- START OF PATCH, STEP 3 ---
-                    # 1. Derive the seed for THIS specific episode attempt from the worker's master seed.
-                    current_episode_seed = self._worker_master_seed + self._episode_attempt_counter
-                    self._episode_attempt_counter += 1
 
-                    logger.info(f"[Worker {self._worker_id}] Starting episode attempt {self._episode_attempt_counter} with seed {current_episode_seed}.")
-                    
-                    # 2. Reset the environment using this unique, deterministic episode seed.
+            # if buffer empty, generate a new episode
+            if not self._episode_buffer:
+                try:
+                    # deterministic per-episode seed derived from master seed
+                    current_episode_seed = (self._worker_master_seed + episode_attempt_counter) & 0x7FFFFFFF
+                    episode_attempt_counter += 1
+                    logger.debug(f"[worker {getattr(self,'_worker_id',0)}] Starting episode attempt seed={current_episode_seed}")
+
+                    # reset env & expert
                     obs, _ = self._env.reset(seed=current_episode_seed)
-                    self._env.set_object_size(self.object_profile.size) 
-                    self._ik_solver.reset_controller_state() 
-                    consecutive_ik_failures = 0
-                    IK_FAILURE_THRESHOLD = 10 
-                    temp_trajectory = []
-                    actions = []
-                    obs_list = []
-                    ik_fail_flags = []
-                    
+                    self._env.set_object_size(self.object_profile.size)
+                    self._scripted_expert.reset()
+                    if hasattr(self._ik_solver, "reset_controller_state"):
+                        self._ik_solver.reset_controller_state()
+
+                    # collect the full (unfiltered) trajectory in memory for possible fallback
+                    unfiltered_obs: List[Dict[str, np.ndarray]] = []
+                    unfiltered_actions: List[np.ndarray] = []
+                    unfiltered_ik_flags: List[bool] = []
+
                     for step in range(self._env.max_episode_steps):
                         policy_obs, action, ik_failed = self._generate_one(obs)
-                        if ik_failed:
-                            consecutive_ik_failures += 1
-                        else:
-                            consecutive_ik_failures = 0 # Reset counter on a successful IK solve.
-                        
-                        # If the threshold is exceeded, terminate this trajectory attempt.
-                        if consecutive_ik_failures >= IK_FAILURE_THRESHOLD:
-                            logger.warning(
-                                f"[Worker {self._worker_id}] Terminating trajectory due to "
-                                f"{consecutive_ik_failures} consecutive IK failures."
-                            )
-                            # Since this is a failure, we break the loop. The expert's `was_successful`
-                            # flag will be False, and the trajectory will be discarded correctly.
-                            break
-                        # Filtering / balancing
-                        ee_vel = np.linalg.norm(obs["proprio"][7:14])
-                        keep = False
-                        
-                        if ee_vel < 0.1:
-                            keep = (self._rng.random() < self.p_low_vel)
-                        else:
-                            keep = (self._rng.random() < self.p_motion_frame)
-                        
-                        if keep:
-                            obs_snapshot = {k: np.copy(v) for k, v in policy_obs.items()}
-                            
-                            # Append to the correct lists.
-                            temp_trajectory.append((obs_snapshot, action.copy()))
-                            obs_list.append(obs_snapshot)
-                            ik_fail_flags.append(ik_failed)
-                            # Append to the new unified actions list.
-                            actions.append(action.copy())
 
-                        
+                        # convert and copy immediately to avoid aliasing
+                        obs_snapshot = {k: (np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v))
+                                        for k, v in policy_obs.items()}
+                        action_arr = np.asarray(action, dtype=np.float32).copy()
+
+                        unfiltered_obs.append(obs_snapshot)
+                        unfiltered_actions.append(action_arr)
+                        unfiltered_ik_flags.append(bool(ik_failed))
+
+                        # step simulator with sim_act (absolute action used to step)
                         obs, _, terminated, truncated, _ = self._env.step(action)
                         if terminated or truncated or self._scripted_expert.is_done():
                             break
-                    
-                    # Determine success
-                    success = self._scripted_expert.was_successful()
-                    
-                    if success:
-                        ep_id = f"w{self._worker_id}_e{self._episode_id_counter}"
-                        self._episode_id_counter += 1
-                        
-                        # The `ep` dictionary is now correctly constructed.
-                        ep = {
-                            "episode_id": ep_id,
-                            "seed": current_episode_seed,
-                            "obs_list": obs_list,
-                            "actions": actions,
-                            "ik_fail_flags": ik_fail_flags,
-                            "success": True,
-                        }
-                        
-                        # CRITICAL FIX: Add the complete episode to the internal episodes list.
-                        self.episodes.append(ep)
-                        self._episode_buffer.extend(temp_trajectory)
-                        consecutive_failures = 0
+
+                    # determine success using the same logic as dataset (scripted_expert or env-based)
+                    # prefer scripted_expert.was_successful() if available
+                    try:
+                        is_success = self._scripted_expert.was_successful()
+                    except Exception:
+                        # fallback: basic object-lift & near-goal test
+                        final = obs
+                        objp = final["object_pos_world"]
+                        goalp = final["goal_pos_world"]
+                        is_lifted = objp[2] > (self._env.OBJECT_Z_HEIGHT + 0.03)
+                        is_near_goal = np.linalg.norm(objp[:2] - goalp[:2]) < 0.05
+                        is_success = bool(is_lifted and is_near_goal)
+
+                    # If successful, filter frames for storage (balanced selection)
+                    if is_success:
+                        filtered: List[Tuple[Dict, np.ndarray]] = []
+                        for step_idx, (step_obs, step_action) in enumerate(zip(unfiltered_obs, unfiltered_actions)):
+                            ee_vel = np.linalg.norm(step_obs["proprio"][7:14])
+                            if ee_vel < 0.1:
+                                keep = (self._rng.random() < self.p_low_vel)
+                            else:
+                                keep = (self._rng.random() < self.p_motion_frame)
+                            if keep:
+                                # store copy-safe snapshots
+                                filtered.append(( {k: np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v)
+                                                  for k, v in step_obs.items()},
+                                                  step_action.copy() ))
+
+                        # fallback: if empty, keep most "active" frame (highest joint delta magnitude)
+                        if not filtered and unfiltered_actions:
+                            # robustly compute magnitudes (exclude gripper scalar if present)
+                            try:
+                                mags = []
+                                for a in unfiltered_actions:
+                                    a = np.asarray(a, dtype=np.float32)
+                                    if a.size >= 2:
+                                        mags.append(np.linalg.norm(a[:-1]))  # assume last is gripper
+                                    else:
+                                        mags.append(np.linalg.norm(a))
+                                best_idx = int(np.argmax(mags))
+                            except Exception:
+                                best_idx = -1
+                            logger.warning(
+                                "Successful trajectory entirely filtered by stochastic selector; "
+                                f"keeping fallback frame idx={best_idx} (worker={getattr(self,'_worker_id',0)})"
+                            )
+                            fb_obs = {k: np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v)
+                                      for k, v in unfiltered_obs[best_idx].items()}
+                            fb_act = np.asarray(unfiltered_actions[best_idx], dtype=np.float32).copy()
+                            filtered.append((fb_obs, fb_act))
+
+                        # Acceptance
+                        if filtered:
+                            # append to the in-memory episode buffer which will be yielded
+                            self._episode_buffer.extend(filtered)
+
+                            # Build full episode dict (store unfiltered trajectory for offline writer)
+                            ep_id = f"w{getattr(self,'_worker_id',0)}_e{self._episode_id_counter}"
+                            episode_dict = {
+                                "episode_id": ep_id,
+                                "seed": int(current_episode_seed),
+                                "obs_list": [{k: (np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v))
+                                              for k, v in o.items()} for o in unfiltered_obs],
+                                "actions": [np.asarray(a, dtype=np.float32).copy() for a in unfiltered_actions],
+                                "ik_fail_flags": list(unfiltered_ik_flags),
+                                "success": True,
+                            }
+                            self.episodes.append(episode_dict)
+                            self._episode_id_counter += 1
+                            consecutive_failures = 0
+                        else:
+                            # defensive: should not happen due to fallback
+                            consecutive_failures += 1
+                            logger.error("Filtered trajectory unexpectedly empty after fallback.")
+                            if consecutive_failures >= MAX_CONSEC:
+                                raise RuntimeError("Too many consecutive failures")
+                            continue
                     else:
+                        # Failed trajectory: log & increment counter
                         consecutive_failures += 1
-                        logger.debug(f"Discarding failed trajectory (success={success})")
+                        logger.debug(f"Discarding failed trajectory (worker={getattr(self,'_worker_id',0)}). Consecutive failures: {consecutive_failures}")
                         if consecutive_failures >= MAX_CONSEC:
                             raise RuntimeError("Too many consecutive failures")
                         continue
-                    consecutive_failures = 0
-                except Exception as e:
+
+                except Exception as exc:
+                    # robust error handling
                     if self.skip_on_error:
-                        logger.warning("Trajectory generation failed: " + str(e))
+                        logger.warning(f"Episode generation exception (worker={getattr(self,'_worker_id',0)}): {exc}", exc_info=True)
                         consecutive_failures += 1
                         if consecutive_failures >= MAX_CONSEC:
-                            raise
+                            raise RuntimeError(f"ExpertDataset crashed {MAX_CONSEC} times in a row.") from exc
                         continue
                     else:
                         raise
-            
-            # Yield from buffer
-            policy_obs, data_act = self._episode_buffer.pop(0)
-            if self.yield_full_obs:
-                yield policy_obs, data_act
-            else:
-                obs_for_policy = {"image_primary": policy_obs["image_primary"],
-                                  "proprio": policy_obs["proprio"]}
-                yield obs_for_policy, data_act
+
+            # Yield samples from the episode buffer one-by-one
+            if not self._episode_buffer:
+                continue
+
+            obs_from_buffer, action_to_yield = self._episode_buffer.pop(0)
+            # increment counters
             samples_this_epoch += 1
             self._samples_yielded += 1
+
+            if self.yield_full_obs:
+                yield obs_from_buffer, action_to_yield
+            else:
+                obs_for_policy = {"image_primary": obs_from_buffer["image_primary"],
+                                  "proprio": obs_from_buffer["proprio"]}
+                yield obs_for_policy, action_to_yield
+
     
     def get_stats(self):
         return {
@@ -514,7 +701,28 @@ def replay_validate_episode(ep: Dict[str, Any], urdf_path: str, env_xml_path: Op
     """
     env = PandaEnv(xml_path=env_xml_path, control_mode='delta')
     env.reset(seed=ep.get("seed", None))
-    # You might want to also reset object initial states if stored
+    if ep.get("obs_list"):
+        try:
+            # Restore position
+            init_obj_pos = np.array(ep["obs_list"][0]["object_pos_world"], dtype=np.float32)
+            obj_body_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "object")
+            if obj_body_id != -1:
+                env.data.xpos[obj_body_id] = init_obj_pos
+            
+            # Restore orientation (if available)
+            if "object_orn_world" in ep["obs_list"][0]:
+                init_obj_orn_xyzw = np.array(ep["obs_list"][0]["object_orn_world"], dtype=np.float32)
+                # Convert to MuJoCo's wxyz format
+                init_obj_orn_wxyz = np.array([init_obj_orn_xyzw[3], init_obj_orn_xyzw[0], init_obj_orn_xyzw[1], init_obj_orn_xyzw[2]])
+                obj_joint_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
+                if obj_joint_id != -1:
+                    qpos_adr = env.model.jnt_qposadr[obj_joint_id]
+                    env.data.qpos[qpos_adr + 3 : qpos_adr + 7] = init_obj_orn_wxyz
+
+            # Apply changes to the simulation state
+            mujoco.mj_forward(env.model, env.data)
+        except (KeyError, IndexError) as e:
+            logger.warning(f"Could not restore initial object state for replay: {e}")
     for a in ep["actions"]: # Use the unified "actions" key
         obs, _, done, trunc, _ = env.step(np.array(a, dtype=np.float32))
         if done or trunc:

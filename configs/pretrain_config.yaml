@@ -1,0 +1,97 @@
+# FILE: configs/pretrain_config.yaml
+#
+# Definitive, Production-Grade Configuration for pretrain_diffusion.py
+# ---
+
+# ===================================================================
+# 1. RUN MANAGEMENT & OUTPUT
+# ===================================================================
+# Directory where the training artifacts (checkpoints, logs) will be saved.
+output_dir: "runs/diffusion_pretrain/run_1"
+
+# The master seed for the training run (model initialization, data shuffling, etc.).
+# Using the same seed as the data generation is a good practice for consistency.
+seed: 42
+
+# Device to train on. 'cuda' is highly recommended for performance.
+device: cpu   
+
+
+# ===================================================================
+# 2. DATASET CONFIGURATION
+# ===================================================================
+dataset:
+  # CRITICAL: Paste the full path to your generated dataset file here.
+  # e.g., "data/demos/expert_expert_run_v1_20k_samples_....lmdb"
+  path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/demos/expert_expert_run_v1_20k_samples_2939e707515a1a6963254bc55001a1b0.lmdb"
+  
+  # Batch size for training. Adjust based on your GPU memory.
+  # Powers of 2 are recommended. 128 is a good starting point for a 24GB GPU.
+  batch_size: 128
+  
+  # Number of parallel workers for loading data.
+  # Set to (num_cpu_cores - 1) for best performance. 4-8 is a good range.
+  num_workers: 0
+
+
+# ===================================================================
+# 3. MODEL ARCHITECTURE
+# ===================================================================
+model:
+  # The action dimension must match your environment (7 arm joints + 1 gripper).
+  action_dim: 64
+  
+  # The dimension of the conditioning vector. This is a key hyperparameter.
+  # It must match the output dimension of your feature extractor.
+  # Let's assume a simple proprio-only model for now.
+  # The proprio dim is 22. We can pad this to a rounder number like 32.
+  cond_dim: 32 # Must be >= 22 (proprio_dim)
+
+  # Architecture of the SimpleMLPDenoiser backbone.
+  hidden: 256
+  denoiser_layers: 4
+  
+  # --- STATE-OF-THE-ART UPGRADE: Define observation/action horizons ---
+  # These MUST match the configuration of your ExpertTrajectoryDataset.
+  observation_horizon: 4
+  action_horizon: 8
+
+
+# ===================================================================
+# 4. DIFFUSION SCHEDULER
+# ===================================================================
+scheduler:
+  # 'cosine' schedule is often slightly better than 'linear' for performance.
+  type: cosine
+  
+  # Number of timesteps in the full diffusion process. 100 is a standard, effective value.
+  T: 100
+
+
+# ===================================================================
+# 5. TRAINING HYPERPARAMETERS
+# ===================================================================
+training:
+  # Number of full passes over the entire dataset.
+  # For a 20k dataset, 200-500 epochs is a good range to ensure convergence.
+  epochs: 200
+  
+  # Learning rate for the AdamW optimizer.
+  lr: 1e-4
+  
+  # A small amount of weight decay can help regularization.
+  weight_decay: 1e-6
+  
+  # Exponential Moving Average (EMA) of model weights.
+  # HIGHLY RECOMMENDED for diffusion models as it improves stability and final performance.
+  # A value close to 1 is standard.
+  ema_decay: 0.999
+  
+  # Use Automatic Mixed Precision (AMP). Provides significant speedup on modern GPUs.
+  amp: true
+  
+  # How often to log training loss to the console and TensorBoard.
+  log_interval_steps: 50
+  
+  # How often to save a full checkpoint of the model.
+  save_interval_epochs: 25

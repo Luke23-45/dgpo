@@ -799,10 +799,14 @@ class ScriptedExpert:
             object_vertical_velocity = expert_obs.get("object_vel", [0]*6)[2]
 
             # Condition 1 (Primary): Has the object made contact and is it supported?
-            contact_made_and_stable = self._wait_counter > 5 and abs(object_vertical_velocity) < 0.005
+            contact_made_and_stable = self._wait_counter > 5 and abs(object_vertical_velocity) < 0.025
+            print(f"object_vertical_velocity in decent to place- {object_vertical_velocity}")
 
             # Condition 2 (Safety Net): Has a generous timeout elapsed?
             is_timed_out = self._wait_counter > (self.cfg.descend_to_place_duration + 40) # Use a generous fixed timeout
+
+            if contact_made_and_stable:
+                print("contact_made_and_stable in decend")
             
             # Transition if contact is confirmed OR if we time out.
             if contact_made_and_stable or is_timed_out:
@@ -842,14 +846,16 @@ class ScriptedExpert:
             # This is a much more stable indicator of whether the object is supported by the table.
             object_vertical_velocity = expert_obs.get("object_vel", [0]*6)[2]
             # Use a slightly more lenient threshold to account for controller noise.
-            object_is_currently_stable = abs(object_vertical_velocity) < 0.01 
+            object_is_currently_stable = abs(object_vertical_velocity) < 0.025 
+
+            print(f"abs(object_vertical_velocity) in AWAIT_STABLE_PLACEMENT- {abs(object_vertical_velocity)}")
 
             if object_is_currently_stable:
                 self._object_stable_counter += 1
             else:
                 self._object_stable_counter = 0
 
-            is_confirmed_stable = self._object_stable_counter > 5
+            is_confirmed_stable = self._object_stable_counter > 2
             is_timed_out = self._wait_counter > 25
 
             # THE SECOND KEY CHANGE: Timeout is now a FAILURE condition.
