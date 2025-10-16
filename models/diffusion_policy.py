@@ -1,380 +1,626 @@
+# FILE: models/diffusion_policy.py
 """
-diffusion_policy.py
+State-of-the-art diffusion policy (Transformer-conditioned) for multi-view,
+temporally-chunked robotic manipulation data.
 
-Modular conditional diffusion policy for continuous-action robotic control.
+Design notes:
+ - Input conditioning: multi-view image sequences (primary & wrist) and proprio
+   sequence. Shapes expected by API are documented in each method.
+ - Action representation: sequences of joint-deltas (H_a x D_a). Policy predicts
+   noise over flattened action sequence, or returns sampled denoised actions.
+ - Denoiser: Transformer encoder that accepts tokenized action-sequence tokens
+   and cross-attends / conditions on observation tokens (via concatenation).
+ - Scheduler: flexible noise schedule (linear / cosine).
+ - EMA teacher: optional Exponential Moving Average copy for stable sampling.
+ - Logging & diagnostics: shaped returns, device-aware.
 
-Key features:
-- PyTorch-based denoiser (plug-in backbone)
-- Pluggable noise scheduler (linear / cosine)
-- EMA teacher utility (enable/disable)
-- Sampling: ddpm-step loop, plus deterministic one-step/low-step option (for RL exploitation)
-- Approximate log-probability (Gaussian proxy) to integrate with PPO (see docstring)
-- Clear type hints, docstrings, and extension points
-
-Usage (high-level):
-    policy = DiffusionPolicy(observation_dim=obs_dim, action_dim=act_dim, denoiser=MyDenoiser(), scheduler='linear')
-    # pretraining: call policy.compute_loss(batch_actions, cond)
-    # sampling (stochastic): a = policy.sample(cond, steps=50)
-    # deterministic exploitation: a_det = policy.sample_deterministic(cond)  # uses fewer steps or DDIM-like path
-    # approximate log-prob for PPO: lp = policy.log_prob_approx(a, cond)
-
-Notes about log_prob_approx:
-- Exact log-prob of diffusion policies is non-trivial. For integration into PPO (which needs
-  a density or surrogate for the importance ratio), we provide a well-grounded *Gaussian proxy*:
-  assume the denoiser produces a mean action mu(cond) and an (implicit) variance sigma^2 (derived
-  from the noise schedule). Then we approximate log p(a|cond) ~ -0.5 * ||(a - mu)/sigma||^2 + const.
-- This is a pragmatic choice used in several hybrid works. If you require exact likelihoods,
-  consider an energy-based or flows-based wrapper (left as extension point).
+Important: This implementation favors clarity, robustness, and modularity.
+Swap the VisionEncoder or Transformer components with heavier backbones later.
 """
+
 from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional, Tuple, Dict, Any
 
 import math
-import time
-from dataclasses import dataclass
-from typing import Callable, Optional, Tuple, Dict, Any
-
+import copy
+import logging
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-# ----------------------------
-# Scheduler utilities
-# ----------------------------
+
+# -------------------------
+# Utilities
+# -------------------------
+def exists(x):
+    return x is not None
+
+def default(val, d):
+    return val if exists(val) else d
+
+# small stable projection helper
+def l2_normalize(x: torch.Tensor, dim: int = -1, eps: float = 1e-6):
+    return x / (x.norm(p=2, dim=dim, keepdim=True).clamp(min=eps))
+
+
+# -------------------------
+# Noise scheduler
+# -------------------------
 @dataclass
+class NoiseSchedulerConfig:
+    beta_start: float = 1e-4
+    beta_end: float = 0.02
+    schedule: str = "linear"  # or "cosine"
+    timesteps: int = 100
+
+
 class NoiseScheduler:
     """
-    Noise schedule handler.
+    Implements forward diffusion schedule and helper alphas for DDPM/DDIM sampling.
 
-    Attributes:
-        betas: Tensor of shape (T,) with β_t.
-        alphas: Tensor α_t = 1 - β_t.
-        alpha_bars: Tensor of cumulative product \bar{α}_t.
-        T: number of diffusion steps.
+    - q_sample: sample x_t given x_0 and noise eps
+    - predict_x0_from_xt: closed-form
+    - ddim_step: one DDIM reverse step (deterministic/stochastic with eta)
     """
-    betas: torch.Tensor
-    alphas: torch.Tensor
-    alpha_bars: torch.Tensor
-    T: int
+    def __init__(self, cfg: NoiseSchedulerConfig):
+        self.cfg = cfg
+        self.T = int(cfg.timesteps)
+        if cfg.schedule == "linear":
+            self.betas = torch.linspace(cfg.beta_start, cfg.beta_end, self.T)
+        elif cfg.schedule == "cosine":
+            # cosine schedule ala Nichol & Dhariwal
+            timesteps = self.T
+            s = 0.008
+            steps = torch.arange(timesteps + 1, dtype=torch.float64)
+            alphas_cumprod = torch.cos(((steps / timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
+            alphas_cumprod = (alphas_cumprod / alphas_cumprod[0]).float()
+            self.betas = (1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])).clamp(min=1e-6)
+            self.betas = self.betas.float()
+        else:
+            raise ValueError("Unknown schedule: " + str(cfg.schedule))
 
-    @staticmethod
-    def linear(beta_start: float, beta_end: float, T: int, device: torch.device) -> "NoiseScheduler":
-        betas = torch.linspace(beta_start, beta_end, T, device=device)
-        alphas = 1.0 - betas
-        alpha_bars = torch.cumprod(alphas, dim=0)
-        return NoiseScheduler(betas=betas, alphas=alphas, alpha_bars=alpha_bars, T=T)
+        self.betas = self.betas.clone()
+        self.alphas = 1.0 - self.betas
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.alphas_cumprod_prev = torch.cat([torch.tensor([1.0], dtype=self.alphas_cumprod.dtype), self.alphas_cumprod[:-1]])
+        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
+        self.posterior_variance = (self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod))
 
-    @staticmethod
-    def cosine(T: int, device: torch.device, s: float = 0.008) -> "NoiseScheduler":
-        # Cosine schedule from Nichol & Dhariwal
-        ts = torch.arange(0, T + 1, device=device, dtype=torch.float64) / T
-        alphas_cum = torch.cos(((ts + s) / (1 + s)) * math.pi / 2) ** 2
-        alpha_bars = alphas_cum[1:] / alphas_cum[0]
-        # derive betas from alpha_bars
-        alphas = torch.zeros_like(alpha_bars)
-        betas = torch.zeros_like(alpha_bars)
-        alphas[0] = alpha_bars[0]
-        betas[0] = 1.0 - alphas[0]
-        for t in range(1, T):
-            alphas[t] = alpha_bars[t] / alpha_bars[t - 1]
-            betas[t] = 1.0 - alphas[t]
-        return NoiseScheduler(betas=betas.float(), alphas=alphas.float(), alpha_bars=alpha_bars.float(), T=T)
+    def q_sample(self, x0: torch.Tensor, t: torch.LongTensor, noise: torch.Tensor):
+        """
+        Sample x_t given x0: x_t = sqrt(alpha_cumprod[t]) * x0 + sqrt(1 - alpha_cumprod[t]) * noise
+        x0: (B, D)
+        t: (B,) long
+        noise: (B, D)
+        """
+        assert x0.shape == noise.shape
+        device = x0.device
+        acp = self.sqrt_alphas_cumprod.to(device)[t].unsqueeze(-1)
+        scm = self.sqrt_one_minus_alphas_cumprod.to(device)[t].unsqueeze(-1)
+        return acp * x0 + scm * noise
+
+    def get_alpha_terms(self, t: torch.LongTensor, device=None):
+        device = device or t.device
+        return {
+            "alpha": self.alphas.to(device)[t].unsqueeze(-1),
+            "alpha_cumprod": self.alphas_cumprod.to(device)[t].unsqueeze(-1),
+            "sqrt_alpha_cumprod": self.sqrt_alphas_cumprod.to(device)[t].unsqueeze(-1),
+            "sqrt_one_minus_alpha_cumprod": self.sqrt_one_minus_alphas_cumprod.to(device)[t].unsqueeze(-1),
+            "beta": self.betas.to(device)[t].unsqueeze(-1)
+        }
+
+    def predict_x0_from_eps(self, xt: torch.Tensor, t: torch.LongTensor, eps: torch.Tensor):
+        terms = self.get_alpha_terms(t, device=xt.device)
+        sqrt_alpha_cumprod = terms["sqrt_alpha_cumprod"]
+        sqrt_one_minus_alpha_cumprod = terms["sqrt_one_minus_alpha_cumprod"]
+        x0_pred = (xt - sqrt_one_minus_alpha_cumprod * eps) / sqrt_alpha_cumprod
+        return x0_pred
+
+    def ddim_step(self, xt: torch.Tensor, t: int, t_next: int, eps: torch.Tensor, eta: float = 0.0):
+        """
+        One DDIM step taking xt -> x_{t_next} deterministically if eta=0.
+        xt: (B, D)
+        t, t_next: scalars (int timestep indices)
+        eps: predicted noise at time t (B, D)
+        Returns x_{t_next}.
+        """
+        # use terms computed as tensors
+        device = xt.device
+        alpha_t = self.alphas_cumprod[t]
+        alpha_t_next = self.alphas_cumprod[t_next]
+
+        sqrt_alpha_t = math.sqrt(alpha_t)
+        sqrt_alpha_t_next = math.sqrt(alpha_t_next)
+        sqrt_one_minus_alpha_t = math.sqrt(max(1.0 - alpha_t, 1e-20))
+
+        # predict x0
+        x0_pred = (xt - sqrt_one_minus_alpha_t * eps) / sqrt_alpha_t
+
+        # direction pointing to xt
+        sigma_t = eta * math.sqrt((1 - alpha_t_next) / (1 - alpha_t)) * math.sqrt(1 - alpha_t / alpha_t_next)
+        # compute the mean predicted xt_next (no noise)
+        dir_xt = math.sqrt(1 - alpha_t_next) * eps
+        x_next_mean = sqrt_alpha_t_next * x0_pred + dir_xt * (math.sqrt(1 - alpha_t_next))
+        if sigma_t == 0.0:
+            return x_next_mean
+        else:
+            noise = torch.randn_like(xt)
+            return x_next_mean + sigma_t * noise
 
 
-# ----------------------------
+# -------------------------
+# Vision encoder (simple, replaceable)
+# -------------------------
+class VisionEncoder(nn.Module):
+    """
+    Lightweight CNN-based image encoder.
+
+    Input: images shaped (B, H_o, C, H_img, W_img)
+    Output: features shaped (B, H_o, D_v)
+    """
+    def __init__(self, in_channels: int = 3, features_dim: int = 64):
+        super().__init__()
+        self.features_dim = features_dim
+        # Basic conv stack - easy to replace with stronger backbone (ResNet/ViT)
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=7, stride=3, padding=3),
+            nn.GELU(),
+            nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.GELU(),
+            nn.Conv2d(64, features_dim, kernel_size=3, stride=2, padding=1),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, H_o, C, H_img, W_img)
+        returns (B, H_o, D_v)
+        """
+        B, H_o = x.shape[0], x.shape[1]
+        # collapse batch and time for CNN forward
+        x = x.view(B * H_o, x.shape[2], x.shape[3], x.shape[4])
+        feat = self.conv(x).view(B, H_o, -1)  # (B, H_o, features_dim)
+        return feat
+
+
+# -------------------------
+# Temporal encoder (small Transformer)
+# -------------------------
+class TemporalTransformer(nn.Module):
+    """
+    Encodes sequence of observational tokens (B, H_o, D_cond) -> (B, H_o, D_model)
+    Uses standard TransformerEncoder layers.
+    """
+    def __init__(self, d_input: int, d_model: int = 256, n_layers: int = 3, n_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.input_proj = nn.Linear(d_input, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=n_heads, batch_first=True, dropout=dropout)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.out_proj = nn.Linear(d_model, d_model)
+
+    def forward(self, seq: torch.Tensor) -> torch.Tensor:
+        """
+        seq: (B, H_o, D_input)
+        returns: (B, H_o, D_model)
+        """
+        x = self.input_proj(seq)
+        x = self.transformer(x)
+        x = self.out_proj(x)
+        return x
+
+
+# -------------------------
+# Denoiser (Transformer-based, conditioned)
+# -------------------------
+class TransformerDenoiser(nn.Module):
+    """
+    Denoiser that takes the noisy action sequence (B, H_a, D_a) and sequence
+    conditioning tokens (B, H_o, D_cond_model) and predicts noise for each
+    action token: output (B, H_a, D_a).
+
+    Implementation: Project action tokens and cond tokens to a common embedding
+    space, concatenate them (cond first, then action tokens), run through a
+    Transformer encoder, and finally project action token positions back to
+    D_a noise predictions.
+    """
+    def __init__(self, action_dim: int, action_horizon: int, cond_dim: int, d_model: int = 256, n_layers: int = 6, n_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        self.action_dim = action_dim
+        self.action_horizon = action_horizon
+        self.cond_dim = cond_dim
+        self.d_model = d_model
+
+        # token projections
+        self.act_proj = nn.Linear(action_dim, d_model)
+        self.cond_proj = nn.Linear(cond_dim, d_model)
+
+        # positional embeddings for total sequence (cond_len + action_len)
+        self.pos_emb = nn.Parameter(torch.randn(1, 1024, d_model) * 0.02)  # support up to 1024 tokens (safe)
+
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=n_heads, batch_first=True, dropout=dropout)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.out_proj = nn.Linear(d_model, action_dim)
+
+        # small time embedding for diffusion timestep
+        self.time_mlp = nn.Sequential(
+            nn.Linear(1, d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, d_model)
+        )
+
+    def forward(self, noisy_actions: torch.Tensor, cond_seq: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+        """
+        noisy_actions: (B, H_a, D_a)
+        cond_seq: (B, H_o, D_cond)  --> already produced by temporal encoder
+        timesteps: (B,) long or float timesteps
+        returns: predicted noise (B, H_a, D_a)
+        """
+        B = noisy_actions.shape[0]
+        device = noisy_actions.device
+        H_o = cond_seq.shape[1]
+        H_a = noisy_actions.shape[1]
+        assert H_a == self.action_horizon, f"Expected H_a={self.action_horizon}, got {H_a}"
+
+        # project tokens
+        act_tokens = self.act_proj(noisy_actions)  # (B, H_a, d_model)
+        cond_tokens = self.cond_proj(cond_seq)     # (B, H_o, d_model)
+
+        # time embedding and add to both token sets (broadcast)
+        t_emb = self.time_mlp(timesteps.float().unsqueeze(-1))  # (B, d_model)
+        t_emb = t_emb.unsqueeze(1)  # (B, 1, d_model)
+        act_tokens = act_tokens + t_emb
+        cond_tokens = cond_tokens + t_emb
+
+        # concat cond then actions
+        seq = torch.cat([cond_tokens, act_tokens], dim=1)  # (B, H_o + H_a, d_model)
+        seq_len = seq.shape[1]
+        # add positional embeddings (slice)
+        if seq_len > self.pos_emb.shape[1]:
+            raise ValueError("Sequence too long for positional embeddings; increase pos_emb length.")
+        seq = seq + self.pos_emb[:, :seq_len, :].to(device)
+
+        # transformer
+        out = self.transformer(seq)  # (B, H_o + H_a, d_model)
+
+        # take the action token positions and project back to action dim
+        action_out = out[:, H_o:, :]  # (B, H_a, d_model)
+        noise_pred = self.out_proj(action_out)  # (B, H_a, D_a)
+        return noise_pred
+
+
+# -------------------------
 # EMA helper
-# ----------------------------
+# -------------------------
 class EMA:
     """
-    Simple Exponential Moving Average for model weights.
-
-    Typical usage:
-        ema = EMA(model, decay=0.9999)
-        ema.update(model)  # call after each optimizer.step()
-        ema.store(); ema.copy_to(model);  # to evaluate ema weights
-        ema.restore()
+    Exponential Moving Average for model weights.
     """
-    def __init__(self, model: nn.Module, decay: float = 0.9999, device: Optional[torch.device] = None):
+    def __init__(self, model: nn.Module, decay: float = 0.9999):
+        self.ema_model = copy.deepcopy(model).eval()
+        for p in self.ema_model.parameters():
+            p.requires_grad_(False)
         self.decay = decay
-        self.model = model
-        self.shadow: Dict[str, torch.Tensor] = {}
-        self.backup: Dict[str, torch.Tensor] = {}
-        self.device = device
-
-        # initialize shadow to model params
-        for name, p in model.state_dict().items():
-            self.shadow[name] = p.detach().clone().to(device) if device is not None else p.detach().clone()
+        self.collected = False
 
     def update(self, model: nn.Module):
         with torch.no_grad():
-            for name, p in model.state_dict().items():
-                assert name in self.shadow
-                self.shadow[name].mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
+            msd = model.state_dict()
+            for k, v in self.ema_model.state_dict().items():
+                if v.dtype.is_floating_point:
+                    v.copy_(v * self.decay + msd[k].to(v.device) * (1.0 - self.decay))
+                else:
+                    v.copy_(msd[k].to(v.device))
 
-    def store(self):
-        self.backup = {k: v.clone() for k, v in self.model.state_dict().items()}
+    def state_dict(self):
+        return self.ema_model.state_dict()
 
-    def copy_to(self, model: nn.Module):
-        model.load_state_dict(self.shadow)
-
-    def restore(self):
-        if self.backup:
-            self.model.load_state_dict(self.backup)
-            self.backup = {}
+    def load_state_dict(self, sd):
+        self.ema_model.load_state_dict(sd)
 
 
-# ----------------------------
-# Base denoiser interface
-# ----------------------------
-class BaseDenoiser(nn.Module):
-    """
-    Minimal base interface that any denoiser backbone should implement.
-
-    Must implement forward(x_t, t, cond) -> predicted_noise (epsilon).
-    - x_t: noisy actions (B, action_dim)
-    - t: integer timesteps (B,) or scalar
-    - cond: conditioning data (dict or tensor). Typical: {'image': ..., 'proprio': ...}
-    """
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x_t: torch.Tensor, t: torch.Tensor, cond: Any) -> torch.Tensor:
-        raise NotImplementedError("Implement forward(x_t, t, cond) returning predicted noise epsilon")
-
-
-# ----------------------------
-# Simple MLP denoiser (reference backbone)
-# ----------------------------
-class SimpleMLPDenoiser(BaseDenoiser):
-    """
-    A simple MLP denoiser for low-dimensional actions. Useful as a baseline and unit-testable.
-    """
-    def __init__(self, action_dim: int, cond_dim: int, hidden: int = 512, n_layers: int = 3):
-        super().__init__()
-        layers = []
-        in_dim = action_dim + cond_dim + 1  # +1 for timestep scalar
-        for i in range(n_layers):
-            layers.append(nn.Linear(in_dim if i == 0 else hidden, hidden))
-            layers.append(nn.ReLU(inplace=True))
-        layers.append(nn.Linear(hidden, action_dim))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x_t: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        # cond is expected as (B, cond_dim)
-        # t may be scalar or tensor; map to normalized scalar and concat
-        if t.dim() == 0:
-            t = t.unsqueeze(0).expand(x_t.shape[0])
-        t_norm = (t.float() / 1e3).unsqueeze(-1)  # coarse normalization
-        inp = torch.cat([x_t, cond, t_norm], dim=-1)
-        return self.net(inp)
-
-
-# ----------------------------
-# Diffusion policy
-# ----------------------------
+# -------------------------
+# High-level DiffusionPolicy class
+# -------------------------
 class DiffusionPolicy(nn.Module):
     """
-    DiffusionPolicy: wraps a denoiser + scheduler to provide training loss and sampling APIs.
+    Top-level diffusion policy wrapper.
 
-    Args:
-        denoiser: nn.Module implementing BaseDenoiser.forward(x_t, t, cond) -> predicted noise
-        action_dim: int
-        cond_embed_fn: Callable that maps conditioning dict -> tensor (B, cond_dim)
-        scheduler: NoiseScheduler instance
-        device: torch.device
-        ema_decay: optional float; if provided, EMA object is created
+    Constructor args:
+      - image_channels: channels per image (usually 3)
+      - image_feat_dim: per-image feature dim output by vision encoder
+      - proprio_dim: dims of proprio vector per timestep (D_p)
+      - H_o: observation horizon
+      - H_a: action horizon
+      - action_dim: per-step action dimension (D_a)
+      - scheduler_cfg: NoiseSchedulerConfig instance
+      - model dims: d_model, n_layers, ...
+      - ema_decay: if provided, create EMA teacher
+
+    Key API:
+      - compute_loss(actions, obs_dict) -> (loss, diagnostics)
+          actions: (B, H_a, D_a)
+          obs_dict: keys 'image_primary', 'image_wrist', 'proprio'
+            image tensors expected as FloatTensor / uint8 normalized to [0,255]
+            with shape (B, H_o, H, W, C) (matches ExpertTrajectoryDataset collate)
+      - sample(obs_dict, steps=None, eta=0.0, use_ema=True) -> sampled_actions (B, H_a, D_a)
+      - save(path) / load(path)
+      - log_prob_proxy(actions, obs_dict) -> approximate log-prob (not exact)
     """
     def __init__(
         self,
-        denoiser: BaseDenoiser,
-        action_dim: int,
-        cond_embed_fn: Callable[[Any], torch.Tensor],
-        scheduler: NoiseScheduler,
-        device: Optional[torch.device] = None,
-        ema_decay: Optional[float] = None,
+        *,
+        image_channels: int = 3,
+        image_feat_dim: int = 64,
+        proprio_dim: int = 22,
+        H_o: int = 2,
+        H_a: int = 8,
+        action_dim: int = 8,
+        scheduler_cfg: NoiseSchedulerConfig = NoiseSchedulerConfig(),
+        d_model: int = 256,
+        denoiser_layers: int = 6,
+        denoiser_heads: int = 8,
+        denoiser_dropout: float = 0.1,
+        ema_decay: Optional[float] = 0.999,
+        device: Optional[torch.device] = None
     ):
         super().__init__()
-        self.denoiser = denoiser.to(device) if device is not None else denoiser
+        self.device = default(device, torch.device("cpu"))
+        # store dims
+        self.image_channels = image_channels
+        self.image_feat_dim = image_feat_dim
+        self.proprio_dim = proprio_dim
+        self.H_o = H_o
+        self.H_a = H_a
         self.action_dim = action_dim
-        self.cond_embed_fn = cond_embed_fn
-        self.scheduler = scheduler
-        self.device = device or torch.device("cpu")
-        self.register_buffer("_betas", scheduler.betas)
-        self.register_buffer("_alphas", scheduler.alphas)
-        self.register_buffer("_alpha_bars", scheduler.alpha_bars)
-        self.T = scheduler.T
+        self.d_model = d_model
 
-        self.ema: Optional[EMA] = None
-        if ema_decay is not None and ema_decay > 0.0:
-            self.ema = EMA(self, decay=ema_decay, device=device)
+        # components
+        self.vision = VisionEncoder(in_channels=image_channels, features_dim=image_feat_dim)
+        # cond dimension per timestep: primary + wrist + proprio
+        cond_dim = (2 * image_feat_dim) + proprio_dim
+        self.temporal = TemporalTransformer(d_input=cond_dim, d_model=d_model, n_layers=3, n_heads=4, dropout=0.1)
 
-    # ----------------------
-    # Training forward / loss
-    # ----------------------
-    def forward(self, a0: torch.Tensor, cond: Any) -> Tuple[torch.Tensor, torch.Tensor]:
+        self.denoiser = TransformerDenoiser(action_dim=action_dim, action_horizon=H_a, cond_dim=d_model, d_model=d_model, n_layers=denoiser_layers, n_heads=denoiser_heads, dropout=denoiser_dropout)
+
+        # noise scheduler
+        self.scheduler_cfg = scheduler_cfg
+        self.scheduler = NoiseScheduler(scheduler_cfg)
+
+        # EMA teacher
+        self.ema = EMA(self, decay=ema_decay) if ema_decay is not None and ema_decay > 0.0 else None
+
+        # to device
+        self.to(self.device)
+
+        logger.info(f"DiffusionPolicy initialized: H_o={H_o}, H_a={H_a}, action_dim={action_dim}, device={self.device}")
+
+    # -------------------------
+    # Conditioning helpers
+    # -------------------------
+    def _prepare_images(self, img_tensor: torch.Tensor) -> torch.Tensor:
         """
-        Compute the diffusion training loss (standard denoising objective).
-
-        Args:
-            a0: clean actions tensor (B, action_dim), expected normalized (e.g., [-1,1]).
-            cond: conditioning input passed to cond_embed_fn
-
-        Returns:
-            loss (mean over batch), per-sample loss tensor (B,)
+        Ensure images are float tensors normalized to [-1,1] or [0,1] as required.
+        img_tensor shape expectations (B, H_o, H, W, C) with channel-last (numpy-style).
+        We'll convert to (B, H_o, C, H, W) and float32 / normalize to [0,1].
         """
-        B = a0.shape[0]
-        device = self.device
-        # Sample random timesteps
-        t = torch.randint(0, self.T, (B,), device=device).long()
-        betas = self._betas.to(device)[t]  # (B,)
-        alpha_bars = self._alpha_bars.to(device)[t]  # (B,)
-        sqrt_alpha_bars = torch.sqrt(alpha_bars).unsqueeze(-1)  # (B,1)
-        sqrt_one_minus_ab = torch.sqrt(1.0 - alpha_bars).unsqueeze(-1)
-
-        noise = torch.randn_like(a0, device=device)
-        x_t = sqrt_alpha_bars * a0 + sqrt_one_minus_ab * noise  # noisy action
-        cond_embed = self.cond_embed_fn(cond).to(device)  # (B, cond_dim)
-        eps_pred = self.denoiser(x_t, t, cond_embed)
-        per_sample = F.mse_loss(eps_pred, noise, reduction="none").mean(dim=-1)
-        loss = per_sample.mean()
-        return loss, per_sample.detach()
-
-    # ----------------------
-    # Sampling utilities
-    # ----------------------
-    @torch.no_grad()
-    def sample(self, cond: Any, steps: int = 50, batch_size: Optional[int] = None, clipped: bool = True) -> torch.Tensor:
-        """
-        Stochastic sampling (DDPM-like) from p(a|cond).
-
-        Args:
-            cond: conditioning input (accepted by cond_embed_fn)
-            steps: number of diffusion steps to run (<= self.T). Lower steps = faster, less fidelity.
-            batch_size: optional; if cond already batched, ignore
-            clipped: whether to clip final action in [-1,1]
-
-        Returns:
-            a0: sampled action tensor (B, action_dim)
-        """
-        device = self.device
-        cond_embed = self.cond_embed_fn(cond).to(device)
-        if isinstance(cond_embed, torch.Tensor):
-            B = cond_embed.shape[0]
+        if img_tensor is None:
+            raise ValueError("Image tensor is required.")
+        if not torch.is_tensor(img_tensor):
+            img_tensor = torch.as_tensor(img_tensor)
+        # input may be uint8 or float
+        img = img_tensor.float()
+        # channel-last -> channel-first
+        if img.dim() == 5:  # (B, H_o, H, W, C)
+            img = img.permute(0, 1, 4, 2, 3).contiguous()
+        elif img.dim() == 4 and img.shape[1] in (1, 3):  # (B, C, H, W) - single timestep
+            # expand time dimension
+            img = img.unsqueeze(1)
         else:
-            raise ValueError("cond_embed_fn must return a Tensor shaped (B, cond_dim)")
-        # Setup timesteps to iterate (linearly spaced over T)
-        # Choose t_indices descending from T-1 -> 0 with 'steps' number
-        if steps >= self.T:
-            t_indices = torch.arange(self.T - 1, -1, -1, device=device)
+            raise ValueError(f"Unexpected image tensor shape {img.shape}. Expected (B,H_o,H,W,C).")
+        img = img / 255.0
+        return img.to(self.device)
+
+    def _cond_embed(self, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Create sequence conditioning tokens of shape (B, H_o, d_model).
+        obs keys:
+          - image_primary: (B, H_o, H, W, C) (numpy-style)
+          - image_wrist: (B, H_o, H, W, C)
+          - proprio: (B, H_o, D_p)
+        """
+        # validate
+        if "image_primary" not in obs or "image_wrist" not in obs or "proprio" not in obs:
+            raise KeyError("Observation dict must contain keys 'image_primary','image_wrist','proprio'")
+
+        img_p = self._prepare_images(obs["image_primary"])  # (B,H_o,C,H,W)
+        img_w = self._prepare_images(obs["image_wrist"])
+        proprio = torch.as_tensor(obs["proprio"], dtype=torch.float32, device=self.device)
+        if proprio.dim() == 2:
+            # shape (B, D_p) -> replicate across H_o
+            proprio = proprio.unsqueeze(1).repeat(1, self.H_o, 1)
+        # ensure shapes
+        B = proprio.shape[0]
+        assert proprio.shape[1] == self.H_o, f"Expected proprio horizon {self.H_o}, got {proprio.shape[1]}"
+
+        # vision features
+        feat_p = self.vision(img_p)  # (B, H_o, D_v)
+        feat_w = self.vision(img_w)  # (B, H_o, D_v)
+
+        # concat
+        cond_seq = torch.cat([feat_p, feat_w, proprio.to(self.device)], dim=-1)  # (B, H_o, D_cond)
+        cond_emb = self.temporal(cond_seq)  # (B, H_o, d_model)
+        return cond_emb
+
+    # -------------------------
+    # Loss / forward (training)
+    # -------------------------
+    def compute_loss(self, actions: torch.Tensor, obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """
+        Compute diffusion MSE loss for a batch.
+
+        actions: torch.Tensor shaped (B, H_a, D_a) or (B, H_a*D_a)
+        obs: dict with keys image_primary, image_wrist, proprio (see _cond_embed)
+
+        Returns: (loss, diagnostics)
+        """
+        # to tensor
+        if not torch.is_tensor(actions):
+            actions = torch.as_tensor(actions, dtype=torch.float32, device=self.device)
+        # normalize shape to (B, H_a, D_a)
+        if actions.dim() == 2:
+            B = actions.shape[0]
+            actions = actions.view(B, self.H_a, self.action_dim)
+        elif actions.dim() == 3:
+            pass
         else:
-            t_indices = torch.round(torch.linspace(self.T - 1, 0, steps)).long().to(device)
+            raise ValueError("actions must be shape (B, H_a, D_a) or (B, H_a*D_a)")
 
-        x_t = torch.randn((B, self.action_dim), device=device)  # start from prior
-        for t in t_indices:
-            t_tensor = torch.full((B,), int(t.item()), device=device, dtype=torch.long)
-            alpha_t = self._alphas[t].to(device)
-            alpha_bar_t = self._alpha_bars[t].to(device)
-            sqrt_recip_alpha = (1.0 / torch.sqrt(alpha_t)).to(device)
-            # predict noise
-            eps_pred = self.denoiser(x_t, t_tensor, cond_embed)
-            # compute model mean μ_θ
-            coef = (1 - alpha_t) / torch.sqrt(1.0 - alpha_bar_t)
-            mu = sqrt_recip_alpha * (x_t - coef * eps_pred)
-            # variance for diffusion step (simple choice)
-            if t > 0:
-                beta_t = self._betas[t].to(device)
-                sigma = torch.sqrt(beta_t).to(device)
-                noise = torch.randn_like(x_t) * sigma
-                x_prev = mu + noise
-            else:
-                x_prev = mu
-            x_t = x_prev
-        a0 = x_t
-        if clipped:
-            a0 = torch.clamp(a0, -1.0, 1.0)
-        return a0.detach()
+        B = actions.shape[0]
+        device = actions.device
 
-    @torch.no_grad()
-    def sample_deterministic(self, cond: Any, steps: int = 10) -> torch.Tensor:
-        """
-        Deterministic sampling path (DDIM-ish): set noise to zero when possible.
-        Useful for exploitation in RL where we want low-variance actions.
+        # flatten for noise sampling and scheduler shape; but we keep (B,H_a,D_a) for denoiser
+        x0 = actions.to(self.device)
 
-        Args:
-            cond: conditioning input
-            steps: number of steps (small, e.g., 1 or 10). If steps==1, this behaves like a single-step
-                   denoising using a deterministic map (approx).
-        """
-        device = self.device
-        cond_embed = self.cond_embed_fn(cond).to(device)
-        B = cond_embed.shape[0]
-        if steps >= self.T:
-            t_indices = torch.arange(self.T - 1, -1, -1, device=device)
-        else:
-            t_indices = torch.round(torch.linspace(self.T - 1, 0, steps)).long().to(device)
+        # sample random noise
+        eps = torch.randn_like(x0, device=self.device)
+        # sample random t for each sample
+        t = torch.randint(0, self.scheduler.T, (B,), dtype=torch.long, device=self.device)
+        # sample x_t
+        xt = self.scheduler.q_sample(x0=x0.view(B, -1), t=t, noise=eps.view(B, -1)).view_as(x0)
 
-        x_t = torch.randn((B, self.action_dim), device=device) * 0.001  # small init noise
-        for t in t_indices:
-            t_tensor = torch.full((B,), int(t.item()), device=device, dtype=torch.long)
-            eps_pred = self.denoiser(x_t, t_tensor, cond_embed)
-            sqrt_recip_alpha = 1.0 / torch.sqrt(self._alphas[int(t)].to(device))
-            coef = (1 - self._alphas[int(t)].to(device)) / torch.sqrt(1.0 - self._alpha_bars[int(t)].to(device))
-            mu = sqrt_recip_alpha * (x_t - coef * eps_pred)
-            x_t = mu  # deterministic (no noise)
-        a0 = torch.clamp(x_t, -1.0, 1.0)
-        return a0.detach()
+        # condition
+        cond_seq = self._cond_embed(obs)  # (B, H_o, d_model)
 
-    # ----------------------
-    # Approximate log-probability
-    # ----------------------
-    def log_prob_approx(self, a: torch.Tensor, cond: Any, sigma_floor: float = 1e-3) -> torch.Tensor:
-        """
-        Approximate log p(a | cond) by a Gaussian proxy centered at the one-step deterministic
-        denoised action mu(cond), with variance derived from the scheduler's final step.
+        # denoiser predicts eps
+        eps_pred = self.denoiser(noisy_actions=xt, cond_seq=cond_seq, timesteps=t)
 
-        Rationale:
-          - exact diffusion marginal likelihood is intractable to compute efficiently for large models
-          - using the final denoiser as a mean estimator and the scheduler-derived variance is
-            a pragmatic approximation often used for RL integration (see comments in repo).
+        loss = F.mse_loss(eps_pred, eps)
 
-        Args:
-            a: (B, action_dim)
-            cond: conditioning input
-            sigma_floor: minimal std to avoid numerical issues
-
-        Returns:
-            logp: (B,) approximated log probability (natural log)
-        """
-        device = self.device
-        mu = self.sample_deterministic(cond, steps=1).to(device)  # one-step denoised mean
-        # approximate variance: use average beta at t=0 or effective noise at final step
-        beta_0 = float(self._betas[0].item())
-        sigma = max(sigma_floor, math.sqrt(beta_0))
-        var = sigma * sigma
-        # compute Gaussian log-prob (elementwise)
-        diff = (a.to(device) - mu).view(a.shape[0], -1)
-        logp = -0.5 * (diff * diff).sum(dim=-1) / var
-        # add normalization const
-        D = a.shape[-1]
-        logp = logp - 0.5 * D * math.log(2 * math.pi * var)
-        return logp
-
-    # ----------------------
-    # EMA helpers
-    # ----------------------
-    def maybe_update_ema(self):
-        if self.ema is not None:
-            self.ema.update(self)
-
-    def state_dict_for_save(self) -> Dict[str, Any]:
-        # Save denoiser params and scheduler hyperparams
-        return {
-            "denoiser_state": self.denoiser.state_dict(),
-            "action_dim": self.action_dim,
-            "scheduler_T": self.T,
-            "betas": self._betas.cpu().numpy(),
+        diagnostics = {
+            "loss": loss.item(),
+            "t_mean": float(t.float().mean().item()),
         }
 
-    def load_state_dict_from_checkpoint(self, ckpt: Dict[str, Any]):
-        self.denoiser.load_state_dict(ckpt["denoiser_state"])
+        # update EMA teacher if present
+        if self.ema is not None and self.training:
+            self.ema.update(self)
+
+        return loss, diagnostics
+
+    def forward(self, actions: torch.Tensor, obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """
+        alias to compute_loss for convenience in training loops.
+        """
+        return self.compute_loss(actions, obs)
+
+    # -------------------------
+    # Sampling / inference
+    # -------------------------
+    @torch.no_grad()
+    def sample(self, obs: Dict[str, torch.Tensor], steps: Optional[int] = None, eta: float = 0.0, use_ema: bool = True, return_intermediates: bool = False) -> torch.Tensor:
+        """
+        Sample an action sequence conditioned on obs.
+
+        obs: dict with keys same as _cond_embed
+        steps: number of diffusion steps to run (<= scheduler.T). If None, uses scheduler.T.
+        eta: DDIM stochasticity parameter (0.0 deterministic)
+        use_ema: whether to use EMA teacher for denoiser (if available)
+        return_intermediates: if True return list of intermediate x_t for debugging
+
+        Returns: sampled_actions (B, H_a, D_a)
+        """
+        self.eval()
+        # choose model for sampling
+        model = None
+        if use_ema and self.ema is not None:
+            # use ema model for stability
+            model = self.ema.ema_model
+        else:
+            model = self
+
+        # prepare conditioning
+        cond_seq = self._cond_embed(obs)  # (B, H_o, d_model)
+        B = cond_seq.shape[0]
+        device = cond_seq.device
+
+        T = self.scheduler.T if steps is None else int(min(steps, self.scheduler.T))
+        # build timesteps list for ddim (descending)
+        timesteps = list(range(self.scheduler.T - 1, -1, -max(1, self.scheduler.T // T)))
+        # initial sample x_T ~ N(0, I)
+        x_t = torch.randn((B, self.H_a, self.action_dim), device=device)
+
+        intermediates = []
+        for i, t in enumerate(timesteps):
+            t_tensor = torch.full((B,), t, dtype=torch.long, device=device)
+            eps_pred = model.denoiser(noisy_actions=x_t, cond_seq=cond_seq, timesteps=t_tensor)
+            # if using ddim deterministic step
+            t_next = timesteps[i + 1] if (i + 1) < len(timesteps) else 0
+            x_t = self.scheduler.ddim_step(xt=x_t.view(B, -1), t=t, t_next=t_next, eps=eps_pred.view(B, -1), eta=eta)
+            x_t = x_t.view(B, self.H_a, self.action_dim)
+            if return_intermediates:
+                intermediates.append(x_t.clone())
+
+        # final predicted x0
+        # ensure shape
+        sampled = x_t
+        self.train()  # reset training flag (no state changes done)
+        if return_intermediates:
+            return sampled, intermediates
+        return sampled
+
+    # -------------------------
+    # Log-prob proxy (approximate)
+    # -------------------------
+    def log_prob_proxy(self, actions: torch.Tensor, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Approximate log-probability of actions under the learned policy.
+        This is NOT an exact log-prob for diffusion models; it's a practical proxy:
+        - Run a single-step denoising forward: compute predicted noise `eps_pred` at t=1..T,
+          reconstruct x0 and compute gaussian log-likelihood under predicted residual variance.
+        - Here we use a heuristic: assume unit variance and compute negative MSE as a proxy.
+        Returns (B,) approximate log-prob (higher is better).
+        """
+        if not torch.is_tensor(actions):
+            actions = torch.as_tensor(actions, dtype=torch.float32, device=self.device)
+        # compute conditioning
+        cond_seq = self._cond_embed(obs)
+        B = actions.shape[0]
+        # use mid timestep T//2 as proxy
+        t = torch.full((B,), self.scheduler.T // 2, dtype=torch.long, device=self.device)
+        xt = self.scheduler.q_sample(actions, t=t, noise=torch.randn_like(actions, device=self.device))
+        eps_pred = self.denoiser(noisy_actions=xt, cond_seq=cond_seq, timesteps=t)
+        mse = F.mse_loss(eps_pred, (xt - actions) / self.scheduler.sqrt_one_minus_alphas_cumprod[t].to(self.device).unsqueeze(-1), reduction='none')
+        # reduce per sample
+        per_sample_mse = mse.view(mse.shape[0], -1).mean(dim=1)
+        logp_proxy = -per_sample_mse  # higher better
+        return logp_proxy
+
+    # -------------------------
+    # Save / load utilities
+    # -------------------------
+    def save(self, path: str):
+        """
+        Save policy weights and optional EMA state.
+        """
+        payload = {
+            "model_state": self.state_dict(),
+            "scheduler_cfg": self.scheduler_cfg.__dict__,
+        }
+        if self.ema is not None:
+            payload["ema_state"] = self.ema.state_dict()
+            payload["ema_decay"] = self.ema.decay
+        torch.save(payload, path)
+        logger.info(f"Saved DiffusionPolicy to {path}")
+
+    def load(self, path: str, map_location: Optional[str] = None):
+        payload = torch.load(path, map_location=map_location)
+        self.load_state_dict(payload["model_state"])
+        if "ema_state" in payload and self.ema is not None:
+            self.ema.load_state_dict(payload["ema_state"])
+        logger.info(f"Loaded DiffusionPolicy from {path}")
