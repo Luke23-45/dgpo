@@ -22,7 +22,7 @@ def open_lmdb_env(
     path: str,
     readonly: bool = False,
     lock: bool = False,
-    map_size_gb: float = 10.0,
+    map_size_gb: float = 14.0,
     readahead: bool = True,
     subdir: bool = None,
 ) -> lmdb.Environment:

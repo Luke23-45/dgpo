@@ -800,13 +800,13 @@ class ScriptedExpert:
 
             # Condition 1 (Primary): Has the object made contact and is it supported?
             contact_made_and_stable = self._wait_counter > 5 and abs(object_vertical_velocity) < 0.025
-            print(f"object_vertical_velocity in decent to place- {object_vertical_velocity}")
+            # print(f"object_vertical_velocity in decent to place- {object_vertical_velocity}")
 
             # Condition 2 (Safety Net): Has a generous timeout elapsed?
             is_timed_out = self._wait_counter > (self.cfg.descend_to_place_duration + 40) # Use a generous fixed timeout
 
-            if contact_made_and_stable:
-                print("contact_made_and_stable in decend")
+            # if contact_made_and_stable:
+            #     print("contact_made_and_stable in decend")
             
             # Transition if contact is confirmed OR if we time out.
             if contact_made_and_stable or is_timed_out:
@@ -848,7 +848,7 @@ class ScriptedExpert:
             # Use a slightly more lenient threshold to account for controller noise.
             object_is_currently_stable = abs(object_vertical_velocity) < 0.025 
 
-            print(f"abs(object_vertical_velocity) in AWAIT_STABLE_PLACEMENT- {abs(object_vertical_velocity)}")
+            # print(f"abs(object_vertical_velocity) in AWAIT_STABLE_PLACEMENT- {abs(object_vertical_velocity)}")
 
             if object_is_currently_stable:
                 self._object_stable_counter += 1

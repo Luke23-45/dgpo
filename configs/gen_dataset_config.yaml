@@ -23,12 +23,12 @@ seed: 42
 # ===================================================================
 # The total number of *samples* (timesteps) to generate and save after filtering.
 # A good starting point for a high-quality dataset is 20,000 - 50,000 samples.
-# num_samples: 20000
-num_samples: 1000
+# num_samples: 50000 
+num_samples: 25000 
 # Number of parallel worker processes to spawn.
 # A good rule of thumb is to set this to the number of available CPU cores minus one or two.
 # For debugging, set to 0 to run in the main thread.
-num_workers: 0 # e.g., for a 10-core CPU
+num_workers: 2 # e.g., for a 10-core CPU
 
 # Seed offsets are used to guarantee unique seeds across workers and shards.
 # These defaults are large primes and are very safe.

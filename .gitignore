@@ -55,7 +55,7 @@ dgpo_project.zip
 # --- MuJoCo / Robotics Specific ---
 # Exclude the entire menagerie of robot assets, as it's a separate repo.
 # We assume it is cloned as a submodule or manually.
-mujoco_menagerie/
+
 
 # Exclude the downloaded OCTO model repository
 octo/
