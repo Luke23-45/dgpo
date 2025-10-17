@@ -1,0 +1,86 @@
+# FILE: configs/pretrain_diffusion_config.yaml
+#
+# Definitive, State-of-the-Art Hydra Configuration for the Final pretrain_diffusion.py
+# ---
+#tensorboard --logdir C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\2025-10-17\21-01-06
+# Hydra specific settings
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# ===================================================================
+# 1. RUN MANAGEMENT & REPRODUCIBILITY
+# ===================================================================
+seed: 42
+device: "cpu" # Change to "cuda" when you have a GPU
+resume_checkpoint: null # Set to a path to resume, e.g., "outputs/YYYY-MM-DD/HH-MM-SS/checkpoints/last.pth"
+
+# ===================================================================
+# 2. LOGGING
+# ===================================================================
+logging:
+  use_wandb: false
+  wandb_project: "dgpo_diffusion_pretrain"
+  wandb_run_name: null
+  log_interval_steps: 50
+  val_interval_epochs: 5 #5
+
+# ===================================================================
+# 3. DATASET
+# ===================================================================
+dataset:
+  path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/demos/expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb"
+  val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/demos/expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb"
+  batch_size: 16
+  num_workers: 0
+
+# ===================================================================
+# 4. MODEL ARCHITECTURE (Matches the SOTA diffusion_policy.py constructor)
+# ===================================================================
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  
+  # This is the feature dimension PER IMAGE from the ResNetEncoder
+  image_feat_dim: 256
+  
+  # This is the main embedding dimension for the Transformer blocks
+  d_model: 256
+  
+  # Parameters for the DiffusionTransformer (Denoiser)
+  denoiser_layers: 6
+  denoiser_heads: 8
+
+# ===================================================================
+# 5. DIFFUSION SCHEDULER
+# ===================================================================
+scheduler:
+  schedule_type: "cosine"
+  timesteps: 100
+  beta_start: 1.0e-4
+  beta_end: 0.02
+
+# ===================================================================
+# 6. OPTIMIZER & TRAINING
+# ===================================================================
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  grad_clip_norm: 1.0
+
+training:
+  epochs: 5 # 500 for the end training
+  use_amp: false # Must be false for CPU
+  ema_decay: 0.999
+
+  # Probability of dropping conditioning for Classifier-Free Guidance training
+  cfg_p_uncond: 0.1
+
+# ===================================================================
+# 7. VALIDATION
+# ===================================================================
+validation:
+  # Guidance scale for sampling during validation and diagnostics
+  guidance_scale: 1.5
+  sampling_steps: 50

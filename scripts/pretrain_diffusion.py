@@ -36,7 +36,10 @@ Key Features:
 To Run:
     # Ensure you have a corresponding Hydra config file (e.g., in configs/pretrain_diffusion.yaml)
     python pretrain_diffusion.py
+    
 """
+
+
 
 # -------------------------
 # 1. Imports
@@ -59,6 +62,8 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import torch.nn.functional as F
+import random
 
 # Optional, for enhanced logging
 try:
@@ -155,7 +160,7 @@ class DiffusionPretrainer:
         )
 
         # --- Setup AMP ---
-        self.scaler = torch.cuda.amp.GradScaler(enabled=cfg.training.use_amp)
+        self.scaler = torch.amp.GradScaler(device=self.device.type, enabled=cfg.training.use_amp)
 
         # --- State Tracking ---
         self.global_step = 0
@@ -175,12 +180,13 @@ class DiffusionPretrainer:
             observation_horizon=self.cfg.model.observation_horizon,
             action_horizon=self.cfg.model.action_horizon,
         )
+        pin_memory_enabled = (self.device.type == 'cuda')
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.cfg.dataset.batch_size,
             shuffle=True,
             num_workers=self.cfg.dataset.num_workers,
-            pin_memory=True,
+            pin_memory=pin_memory_enabled,
             collate_fn=collate_fn,
             drop_last=True,
         )
@@ -197,6 +203,7 @@ class DiffusionPretrainer:
                 batch_size=self.cfg.dataset.batch_size,
                 shuffle=False,
                 num_workers=self.cfg.dataset.num_workers,
+                pin_memory=pin_memory_enabled,
                 collate_fn=collate_fn,
             )
         return train_loader, val_loader
@@ -218,16 +225,23 @@ class DiffusionPretrainer:
 
         model_cfg = self.cfg.model
         policy = DiffusionPolicy(
+            # Core dimensions
             proprio_dim=proprio_dim,
             H_o=model_cfg.observation_horizon,
             H_a=model_cfg.action_horizon,
             action_dim=model_cfg.action_dim,
-            image_channels=model_cfg.vision_encoder.image_channels,
-            image_feat_dim=model_cfg.vision_encoder.features_dim,
+            
+            # Architectural dimensions from the model config
+            image_feat_dim=model_cfg.image_feat_dim,
+            d_model=model_cfg.d_model,
+            
+            # Denoiser-specific hyperparameters
+            denoiser_layers=model_cfg.denoiser_layers,
+            denoiser_heads=model_cfg.denoiser_heads,
+            
+            # Scheduler and training parameters
             scheduler_cfg=scheduler_cfg,
-            d_model=model_cfg.temporal_transformer.d_model,
-            denoiser_layers=model_cfg.denoiser.n_layers,
-            denoiser_heads=model_cfg.denoiser.n_heads,
+            cfg_p_uncond=self.cfg.training.cfg_p_uncond,
             ema_decay=self.cfg.training.ema_decay,
             device=self.device,
         )
@@ -265,11 +279,11 @@ class DiffusionPretrainer:
         )
         for obs_chunk, action_chunk in progress_bar:
             # Move data to the correct device
-            obs_chunk = {k: v.to(self.device) for k, v in obs_chunk.items()}
-            action_chunk = action_chunk.to(self.device)
+            obs_chunk = {k: v.to(self.device).float() for k, v in obs_chunk.items()}
+            action_chunk = action_chunk.to(self.device).float()
 
             self.optimizer.zero_grad()
-            with torch.cuda.amp.autocast(enabled=self.cfg.training.use_amp):
+            with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.cfg.training.use_amp):
                 loss, diagnostics = self.policy.compute_loss(action_chunk, obs_chunk)
 
             self.scaler.scale(loss).backward()
@@ -311,10 +325,10 @@ class DiffusionPretrainer:
 
         with torch.no_grad():
             for obs_chunk, action_chunk in progress_bar:
-                obs_chunk = {k: v.to(self.device) for k, v in obs_chunk.items()}
-                action_chunk = action_chunk.to(self.device)
+                obs_chunk = {k: v.to(self.device).float() for k, v in obs_chunk.items()}
+                action_chunk = action_chunk.to(self.device).float()
 
-                with torch.cuda.amp.autocast(enabled=self.cfg.training.use_amp):
+                with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.cfg.training.use_amp):
                     loss, _ = self.policy.compute_loss(action_chunk, obs_chunk)
                     # Get a deterministic prediction for quantitative metrics
                     predicted_action = self.policy.sample(obs_chunk, steps=10, use_ema=True)
@@ -368,9 +382,8 @@ class DiffusionPretrainer:
         log.info("Generating diagnostic denoising rollout...")
         # Get a single sample from the validation set
         obs_chunk, action_chunk = next(iter(self.val_loader))
-        obs_sample = {k: v[:1].to(self.device) for k, v in obs_chunk.items()}
-        action_gt = action_chunk[:1].to(self.device)
-
+        obs_sample = {k: v[:1].to(self.device).float() for k, v in obs_chunk.items()}
+        action_gt = action_chunk[:1].to(self.device).float()
         # Get the denoising trajectory
         with torch.no_grad():
             _, intermediates = self.policy.sample(

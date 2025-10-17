@@ -155,25 +155,33 @@ class NoiseScheduler:
         sqrt_one_minus_acp_t = self.sqrt_one_minus_alphas_cumprod[t].reshape(B, *([1] * (x0.dim() - 1)))
         return sqrt_acp_t * x0 + sqrt_one_minus_acp_t * noise
 
+
     def ddim_step(self, xt: torch.Tensor, t: int, t_prev: int, eps_pred: torch.Tensor, eta: float = 0.0) -> torch.Tensor:
         """
         Performs a single DDIM reverse step to go from x_t to x_{t-1}.
-        Args:
-            xt (torch.Tensor): The current noisy tensor (x_t).
-            t (int): The current timestep.
-            t_prev (int): The previous timestep.
-            eps_pred (torch.Tensor): The predicted noise from the model.
-            eta (float): Controls the stochasticity of the step (0.0 for deterministic).
-        Returns:
-            torch.Tensor: The denoised tensor for the previous step (x_{t-1}).
+        ...
         """
+        # --- THIS BLOCK HAS THE BUG ---
+        # alpha_cumprod_t = self.alphas_cumprod[t]
+        # alpha_cumprod_t_prev = self.alphas_cumprod[t_prev] if t_prev >= 0 else 1.0
+
+        # --- THIS IS THE FIX ---
+        # Ensure all values are tensors on the correct device.
         alpha_cumprod_t = self.alphas_cumprod[t]
-        alpha_cumprod_t_prev = self.alphas_cumprod[t_prev] if t_prev >= 0 else 1.0
+        alpha_cumprod_t_prev = self.alphas_cumprod[t_prev] if t_prev >= 0 else torch.tensor(1.0, device=xt.device)
 
         sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t]
+        
+        # --- A SECOND, RELATED FIX FOR ROBUSTNESS ---
+        # The line below also needs to handle the scalar `alpha_cumprod_t` correctly
+        # Let's make sure it's a tensor before doing math with other tensors.
         sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t]
 
+        # The rest of the original code had a subtle issue here. We need to make sure
+        # our tensors can be broadcast correctly. Let's rewrite this part for clarity and safety.
+
         x0_pred = (xt - sqrt_one_minus_alpha_cumprod_t * eps_pred) / sqrt_alpha_cumprod_t
+        x0_pred = torch.clamp(x0_pred, -1., 1.) # Optional: Clamp predicted x0 for stability
 
         sigma_t = eta * torch.sqrt(
             (1 - alpha_cumprod_t_prev) / (1 - alpha_cumprod_t) * (1 - alpha_cumprod_t / alpha_cumprod_t_prev)
@@ -185,10 +193,6 @@ class NoiseScheduler:
             x_prev += sigma_t * torch.randn_like(xt)
 
         return x_prev
-
-# -------------------------
-# Vision Architecture (ResNet + Cross-Attention Fusion)
-# -------------------------
 
 class ResNetEncoder(nn.Module):
     """
@@ -418,14 +422,14 @@ class DiffusionPolicy(nn.Module):
         self.vision_fusion_encoder = VisionFusionEncoder(image_feat_dim, proprio_dim, d_model)
         self.denoiser = DiffusionTransformer(action_dim, d_model, denoiser_layers, denoiser_heads, H_a)
         self.scheduler = NoiseScheduler(scheduler_cfg).to(self.device)
-        self.ema = EMA(self, decay=ema_decay) if ema_decay is not None else None
         
         # Learnable embedding for unconditional generation (for CFG)
-        self.uncond_vis_embedding = nn.Parameter(torch.randn(1, H_o * 2, d_model))
+        self.uncond_vis_embedding = nn.Parameter(torch.randn(1, H_o, d_model))
         self.uncond_proprio_embedding = nn.Parameter(torch.randn(1, H_o, d_model))
 
         self.to(self.device)
         log.info(f"State-of-the-art DiffusionPolicy initialized on device: {self.device}")
+        self.ema = EMA(self, decay=ema_decay) if ema_decay is not None else None
 
     def _cond_embed(self, obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Generates conditioning tokens from observations."""

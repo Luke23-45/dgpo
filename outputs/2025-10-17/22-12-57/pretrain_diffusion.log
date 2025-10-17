@@ -1,0 +1,73 @@
+[2025-10-17 22:12:57,883][__main__][INFO] - ----------- Configuration -----------
+[2025-10-17 22:12:57,895][__main__][INFO] - seed: 42
+device: cpu
+resume_checkpoint: null
+logging:
+  use_wandb: false
+  wandb_project: dgpo_diffusion_pretrain
+  wandb_run_name: null
+  log_interval_steps: 50
+  val_interval_epochs: 5
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/demos/expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/demos/expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb
+  batch_size: 16
+  num_workers: 0
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 256
+  d_model: 256
+  denoiser_layers: 6
+  denoiser_heads: 8
+scheduler:
+  schedule_type: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+optimizer:
+  lr: 0.0001
+  weight_decay: 1.0e-06
+  grad_clip_norm: 1.0
+training:
+  epochs: 5
+  use_amp: false
+  ema_decay: 0.999
+  cfg_p_uncond: 0.1
+validation:
+  guidance_scale: 1.5
+  sampling_steps: 50
+
+[2025-10-17 22:12:57,901][__main__][INFO] - ------------------------------------
+[2025-10-17 22:12:57,924][__main__][INFO] - Global seed set to 42
+[2025-10-17 22:12:57,925][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\2025-10-17\22-12-57
+[2025-10-17 22:12:57,940][__main__][INFO] - Building datasets...
+[2025-10-17 22:12:57,946][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\demos\expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb | mode=RO | file-mode
+[2025-10-17 22:13:01,592][utils.expert_dataset][INFO] - Loaded expert demos: 7 episodes, 1793 total valid chunks.
+[2025-10-17 22:13:01,618][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\demos\expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb | mode=RO | file-mode
+[2025-10-17 22:13:03,082][utils.expert_dataset][INFO] - Loaded expert demos: 7 episodes, 1793 total valid chunks.
+[2025-10-17 22:13:03,126][__main__][INFO] - Building diffusion policy model...
+[2025-10-17 22:13:03,144][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\demos\expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb | mode=RO | file-mode
+[2025-10-17 22:13:03,651][__main__][INFO] - Inferred proprioception dimension: 22
+[2025-10-17 22:13:05,030][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-17 22:13:05,282][__main__][INFO] - Starting training...
+[2025-10-17 22:55:35,783][__main__][INFO] - Running validation for epoch 5...
+[2025-10-17 22:55:35,801][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\demos\expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb | mode=RO | file-mode
+[2025-10-17 22:55:43,038][__main__][ERROR] - An error occurred during training.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\pretrain_diffusion.py", line 457, in main
+    trainer.run()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\pretrain_diffusion.py", line 432, in run
+    self._validate_one_epoch(epoch)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\pretrain_diffusion.py", line 334, in _validate_one_epoch
+    predicted_action = self.policy.sample(obs_chunk, steps=10, use_ema=True)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\_contextlib.py", line 120, in decorate_context
+    return func(*args, **kwargs)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\models\diffusion_policy.py", line 492, in sample
+    x_t = self.scheduler.ddim_step(x_t, t, t_prev, eps_pred)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\models\diffusion_policy.py", line 183, in ddim_step
+    x_prev = torch.sqrt(alpha_cumprod_t_prev) * x0_pred + pred_dir_xt
+TypeError: sqrt(): argument 'input' (position 1) must be Tensor, not float
+[2025-10-17 22:55:43,887][lmdb_utils][INFO] -  LMDB environment closed successfully.
+[2025-10-17 22:55:43,891][lmdb_utils][INFO] -  LMDB environment closed successfully.

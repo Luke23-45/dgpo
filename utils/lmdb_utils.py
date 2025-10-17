@@ -22,7 +22,7 @@ def open_lmdb_env(
     path: str,
     readonly: bool = False,
     lock: bool = False,
-    map_size_gb: float = 14.0,
+    map_size_gb: float = 1.0,
     readahead: bool = True,
     subdir: bool = None,
 ) -> lmdb.Environment:
@@ -72,12 +72,12 @@ def open_lmdb_env(
             max_dbs=1,
         )
         logger.info(
-            f"✅ Opened LMDB at {path} | mode={'RO' if readonly else 'RW'} | "
+            f" Opened LMDB at {path} | mode={'RO' if readonly else 'RW'} | "
             f"{'dir' if subdir else 'file'}-mode"
         )
         return env
     except lmdb.Error as e:
-        logger.error(f"❌ Failed to open LMDB at {path}: {e}")
+        logger.error(f" Failed to open LMDB at {path}: {e}")
         raise
 
 
@@ -87,6 +87,6 @@ def close_lmdb_env(env: lmdb.Environment):
         return
     try:
         env.close()
-        logger.info("✅ LMDB environment closed successfully.")
+        logger.info(" LMDB environment closed successfully.")
     except Exception as e:
-        logger.warning(f"⚠️ LMDB close warning: {e}")
+        logger.warning(f" LMDB close warning: {e}")

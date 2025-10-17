@@ -138,7 +138,7 @@ class ExpertDatasetWriter:
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         # Use our robust helper — on Windows subdir=False is required for single-file lmdb
-        env = open_lmdb_env(path, readonly=False, lock=True, map_size_gb=14.0, subdir=False)
+        env = open_lmdb_env(path, readonly=False, lock=True, map_size_gb=1.0, subdir=False)
         try:
             with env.begin(write=True) as txn:
                 for idx, ep in enumerate(self.episodes):

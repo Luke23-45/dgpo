@@ -1,0 +1,69 @@
+[2025-10-18 01:32:24,468][__main__][INFO] - ----------- RL Fine-tuning Configuration -----------
+seed: 42
+device: cpu
+pretrained_policy_path: notes/checkpoints/best.pth
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/demos/expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb
+  num_workers: 0
+environment:
+  xml_path: envs/panda_pick_place.xml
+  n_envs: 1
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 256
+  d_model: 256
+  denoiser_layers: 6
+  denoiser_heads: 8
+scheduler:
+  schedule_type: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+training:
+  total_timesteps: 2000
+  curriculum_total_episodes: 2000
+rl_algorithm:
+  buffer_size: 200000
+  learning_starts: 1000
+  batch_size: 256
+  gamma: 0.98
+  tau: 0.005
+  policy_delay: 2
+  policy_noise: 0.2
+  noise_clip: 0.5
+  exploration_noise: 0.1
+  guidance_scale: 1.5
+optimizer:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+logging:
+  use_wandb: false
+  wandb_project: dgpo_rl_finetune
+  wandb_run_name: null
+  log_interval_steps: 100
+  eval_freq: 1000
+  n_eval_episodes: 5
+  video_log_freq: 1
+
+[2025-10-18 01:32:24,476][__main__][INFO] - Global seed set to 42
+[2025-10-18 01:32:24,476][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\2025-10-18\01-32-24
+[2025-10-18 01:32:24,483][__main__][INFO] - Initializing 1 vectorized environments...
+[2025-10-18 01:32:26,644][__main__][ERROR] - An error occurred during RL fine-tuning.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 434, in main
+    trainer = RLFineTuner(cfg)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 187, in __init__
+    self.env = self._make_vec_env()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 253, in _make_vec_env
+    return DummyVecEnv([make_env(0)])
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\stable_baselines3\common\vec_env\dummy_vec_env.py", line 31, in __init__
+    self.envs = [_patch_env(fn()) for fn in env_fns]
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\stable_baselines3\common\vec_env\dummy_vec_env.py", line 31, in <listcomp>
+    self.envs = [_patch_env(fn()) for fn in env_fns]
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 245, in _init
+    env = HERGoalEnvWrapper(env, reward_type='binary')
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\envs\panda_env_wrapper.py", line 77, in __init__
+    raise ValueError(f"Achieved goal key '{achieved_goal_key}' not in environment observation space.")
+ValueError: Achieved goal key 'object_pos_world' not in environment observation space.

@@ -11,7 +11,7 @@ output_dir: "data/demos"
 
 # A descriptive name for this specific generation run.
 # The final filename will include this name and a hash of this config.
-run_name: "expert_run_v1_20k_samples"
+run_name: "expert_run_v2_20k_samples"
 
 # The master seed for the entire generation process. All other seeds are derived
 # deterministically from this, ensuring full reproducibility.
@@ -24,7 +24,7 @@ seed: 42
 # The total number of *samples* (timesteps) to generate and save after filtering.
 # A good starting point for a high-quality dataset is 20,000 - 50,000 samples.
 # num_samples: 50000 
-num_samples: 25000 
+num_samples: 40000 
 # Number of parallel worker processes to spawn.
 # A good rule of thumb is to set this to the number of available CPU cores minus one or two.
 # For debugging, set to 0 to run in the main thread.
