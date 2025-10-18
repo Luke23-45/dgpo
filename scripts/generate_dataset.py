@@ -1,461 +1,630 @@
-#!/usr/bin/env python3
-"""
-generate_dataset.py - Robust LMDB-sharded dataset generator.
+# FILE: generate_dataset.py
+# (State-of-the-Art, Hydra-Configurable, Resumable, Validated, Sharded LMDB Generator)
 
-Key features:
- - Per-worker LMDB shard files (workers stream episodes to disk; we never send big objects via pipes)
- - Single-process mode also supported
- - Resume support (will not overwrite existing shard files unless forced)
- - Deterministic per-worker seeding
- - Replay validation optional (runs post-merge, using replay_validate_episode)
- - Lightweight per-worker JSON status summary written on completion
- - Strong logging and error handling (Windows-friendly)
- Usage:
-    python generate_dataset.py --config configs/gen_dataset.yaml
-    python scripts/generate_dataset.py --config configs/gen_dataset_config.yaml
-    python -m scripts.generate_dataset --config configs/gen_dataset_config.yaml
+"""
+State-of-the-art script for generating large-scale, high-quality expert demonstration
+datasets for robotic manipulation tasks using multiprocessing, LMDB, and Hydra.
+
+This version is engineered for maximum robustness, fault tolerance, and data quality.
+
+Key SOTA Features:
+  - **Hydra Configuration**: Uses Hydra for standardized and flexible configuration
+    management, consistent with the pretraining and RL scripts[cite: 747, 804].
+  - **Sharded Parallelism**: Distributes data generation across multiple worker
+    processes, each writing to an isolated shard directory to prevent conflicts.
+  - **Granular Checkpointing & Resumability**: Workers periodically save their state
+    (episodes saved, seeds used, LMDB index). The script can be interrupted and
+    resumed, continuing generation exactly where each worker left off, minimizing
+    lost work due to crashes or interruptions.
+  - **Integrated Data Validation**: Ensures data quality by:
+    1. Checking the expert's own success flag (`ScriptedExpert.was_successful()`).
+    2. Performing physics-based replay validation (`replay_validate_episode`)
+       to verify trajectory plausibility .
+    Only episodes passing *both* checks are saved.
+  - **Atomic File Operations**: Uses atomic writes (write-to-temp then rename) for
+    checkpoints and summaries to prevent corruption if interrupted during saving.
+  - **Comprehensive Metadata**: Saves the full Hydra config, run details, worker
+    statistics (attempted, validated, saved episodes), and validation settings.
+  - **Efficient LMDB Storage**: Leverages LMDB for fast read access during training,
+    writing episodes in batches for performance [cite: 362-366].
+  - **Robust Error Handling**: Workers log errors and report failure status, allowing
+    the main process to identify and report issues.
 """
 
 from __future__ import annotations
 import os
 import sys
 import time
-import yaml
+import yaml # Still needed if loading non-hydra configs within ExpertDataset maybe
 import logging
 import hashlib
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
 import multiprocessing as mp
-from utils.scripted_expert import ExpertConfig
-
 import numpy as np
 from tqdm import tqdm
+import pickle
+import random
+import shutil # For atomic rename
+from typing import Optional, Any, List, Dict, Tuple
+# Third-party
+import hydra
+from omegaconf import DictConfig, OmegaConf, open_dict
+from dataclasses import dataclass
+# Project imports
+# Ensure ROOT points correctly relative to this script's location if moved
+try:
+    ROOT = Path(__file__).resolve().parents[1]
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from utils.expert_dataset import ExpertDataset, replay_validate_episode
+    from utils.scripted_expert import ExpertConfig
+    from utils.lmdb_utils import open_lmdb_env, close_lmdb_env # Use robust LMDB helpers
+except ImportError as e:
+    print(f"Error importing project modules. Ensure PYTHONPATH is set correctly or script is run from the project root. {e}")
+    sys.exit(1)
 
-# project imports (assume project root is parent of scripts/)
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from utils.expert_dataset import ExpertDataset, replay_validate_episode
-
-# Optional import: lmdb. If not present we fallback to per-worker pickle shards (less ideal).
 try:
     import lmdb
-except Exception:
+except ImportError:
+    print("Error: python-lmdb is required. Please install it: pip install lmdb")
     lmdb = None
+    sys.exit(1)
 
-logger = logging.getLogger("generate_dataset")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
-
-
-def load_config(path: str) -> Dict[str, Any]:
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+# Setup logger
+log = logging.getLogger(__name__) # Hydra typically configures logging handlers
 
 
-def compute_file_hash(filepath: str, algo: str = "sha1") -> Optional[str]:
-    p = Path(filepath)
-    if not p.exists():
-        return None
-    h = hashlib.new(algo)
-    with open(p, "rb") as f:
-        while True:
-            chunk = f.read(8192)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
+# === Atomic File Operations ===
 
-
-# ---------------------------
-# LMDB helper for streaming writes
-# ---------------------------
-def open_lmdb_writer(shard_dir: Path, map_size: int = 12 * 1024**3, subdir: bool = True):
-    """
-    Opens an LMDB environment for writing into a directory (shard_dir).
-    Returns the env and a write transaction helper function: put_episode(txn, key_idx, episode_bytes).
-    """
-    # Ensure directory exists (LMDB expects a directory when subdir=True).
-    shard_dir.mkdir(parents=True, exist_ok=True)
-
-    if lmdb is None:
-        raise RuntimeError("lmdb not available; please install python-lmdb for shard writing.")
-
-    env = lmdb.open(str(shard_dir), map_size=map_size, subdir=subdir, readonly=False, lock=True)
-    return env
-
-
-def worker_stream_write_lmdb(env, base_key_idx: int, episodes_iter):
-    """
-    Stream writes episodes_iter (an iterable of episode dicts) into env starting at base_key_idx.
-    We expect episodes_iter yields serializable (pickle) episodes; we will pickle them here.
-    Returns final key index (next free index) and count written.
-    """
-    import pickle
-
-    idx = int(base_key_idx)
-    count = 0
+def atomic_write_json(data: dict, path: Path):
+    """Writes JSON data atomically to avoid corruption."""
+    temp_path = path.with_suffix(path.suffix + ".tmp")
     try:
-        with env.begin(write=True) as txn:
-            for ep in episodes_iter:
-                key = f"{idx:08d}".encode("ascii")
-                val = pickle.dumps(ep, protocol=pickle.HIGHEST_PROTOCOL)
-                txn.put(key, val)
-                idx += 1
-                count += 1
-                # Keep transaction small enough: commit periodically if many writes
-                if (count % 256) == 0:
-                    txn.commit()
-                    txn = env.begin(write=True)
-            # final commit is done by context manager exit
+        with open(temp_path, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_path, path) # Atomic rename
     except Exception:
-        # Try to close env cleanly
-        try:
-            env.close()
-        except Exception:
-            pass
+        if temp_path.exists():
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
         raise
-    return idx, count
 
-
-# ---------------------------
-# Worker function (runs in separate process)
-# ---------------------------
-def worker_loop_fn(
-    worker_id: int,
-    cfg: Dict[str, Any],
-    shard_dir: str,
-    shard_map_size: int,
-    samples_per_worker: int,
-    summary_path: str,
-):
-    """
-    Worker entrypoint.
-    Streams episodes produced by ExpertDataset into an LMDB shard (shard_dir).
-    Writes a small JSON summary to summary_path on completion (status, counts, error).
-    """
+def atomic_write_pickle(data: Any, path: Path):
+    """Writes pickled data atomically."""
+    temp_path = path.with_suffix(path.suffix + ".tmp")
     try:
-        log_prefix = f"[worker {worker_id}]"
-        logging.info(f"{log_prefix} starting. seed base={cfg.get('seed',0)} target={samples_per_worker} shard={shard_dir}")
+        with open(temp_path, "wb") as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(temp_path, path)
+    except Exception:
+        if temp_path.exists():
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        raise
 
-        # Build dataset instance for this worker
-        expert_cfg = cfg.get("expert_config", {})
-        base_seed = int(cfg.get("seed", 0)) if cfg.get("seed") is not None else int(time.time())
-        seed_for_worker = base_seed + worker_id * cfg.get("worker_seed_offset", 10000) + cfg.get("shard_idx", 0) * cfg.get("shard_seed_offset", 1000000)
-        expert_config_dict = cfg.get("expert_config", {})
+# === Worker Checkpoint Management ===
+
+CHECKPOINT_FILENAME = "worker_checkpoint.pkl"
+SUMMARY_FILENAME = "worker_summary.json"
+
+@dataclass
+class WorkerState:
+    """State saved by workers for resuming."""
+    worker_id: int
+    episodes_generated_attempted: int = 0
+    episodes_validated_saved: int = 0
+    lmdb_key_index: int = 0
+    last_expert_dataset_seed: Optional[int] = None
+    numpy_rng_state: Optional[Any] = None
+    random_rng_state: Optional[Any] = None
+    # Note: torch RNG state not needed if not using torch directly in worker
+
+def save_worker_checkpoint(state: WorkerState, shard_dir: Path):
+    """Saves the worker state atomically."""
+    atomic_write_pickle(state, shard_dir / CHECKPOINT_FILENAME)
+
+def load_worker_checkpoint(shard_dir: Path) -> Optional[WorkerState]:
+    """Loads worker state if checkpoint exists."""
+    ckpt_path = shard_dir / CHECKPOINT_FILENAME
+    if ckpt_path.exists():
+        try:
+            with open(ckpt_path, "rb") as f:
+                state = pickle.load(f)
+            if isinstance(state, WorkerState):
+                log.info(f"Loaded checkpoint from {ckpt_path}")
+                return state
+            else:
+                log.warning(f"Invalid checkpoint format found at {ckpt_path}. Ignoring.")
+        except Exception as e:
+            log.warning(f"Could not load checkpoint from {ckpt_path}: {e}. Ignoring.")
+    return None
+
+def save_worker_summary(summary: dict, shard_dir: Path):
+    """Saves the final worker summary atomically."""
+    atomic_write_json(summary, shard_dir / SUMMARY_FILENAME)
+
+def load_worker_summary(shard_dir: Path) -> Optional[dict]:
+    """Loads worker summary if it exists."""
+    summary_path = shard_dir / SUMMARY_FILENAME
+    if summary_path.exists():
+        try:
+            with open(summary_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            log.warning(f"Could not load summary from {summary_path}: {e}. Ignoring.")
+    return None
+
+
+# === Worker Function ===
+
+def worker_process_fn(worker_id: int, cfg: DictConfig, shard_dir: Path, target_samples: int):
+    """
+    The main function executed by each worker process.
+    Generates episodes, validates them, saves valid ones to a shard LMDB,
+    and periodically checkpoints its state for resumability.
+    """
+    log_prefix = f"[Worker {worker_id}]"
+    start_time = time.time()
+    worker_state = WorkerState(worker_id=worker_id)
+    rng = None # Initialize later based on checkpoint/seed
+
+    try:
+        log.info(f"{log_prefix} Starting. Target Samples={target_samples}. Shard Dir={shard_dir}")
+        shard_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- Resume Logic ---
+        loaded_checkpoint = load_worker_checkpoint(shard_dir)
+        if loaded_checkpoint:
+            worker_state = loaded_checkpoint
+            log.info(f"{log_prefix} Resuming from checkpoint: {worker_state.episodes_validated_saved} episodes saved.")
+            # Restore RNG states
+            if worker_state.numpy_rng_state:
+                np.random.set_state(worker_state.numpy_rng_state)
+            if worker_state.random_rng_state:
+                random.setstate(worker_state.random_rng_state)
+            # Create RNG *after* potential state restoration
+            rng = np.random.default_rng(np.random.randint(0, 2**32 -1))
+
+        # --- Initialize RNG if not resuming ---
+        if rng is None:
+            base_seed = int(cfg.seed)
+            worker_base_seed = base_seed + worker_id * cfg.get("worker_seed_offset", 10000)
+            log.info(f"{log_prefix} Initializing with base seed {worker_base_seed}")
+            np.random.seed(worker_base_seed)
+            random.seed(worker_base_seed + 1)
+            rng = np.random.default_rng(worker_base_seed + 2)
+            # The ExpertDataset will use its own internal seeding derived from `expert_start_seed`
+
+        # --- LMDB Initialization ---
+        # Use robust helper with subdir=True (creates data.mdb and lock.mdb in shard_dir)
+        lmdb_env = open_lmdb_env(
+            str(shard_dir),
+            map_size_gb=cfg.lmdb.shard_map_size_gb,
+            readonly=False,
+            lock=True,
+            subdir=True # Critical for isolated shards
+        )
+
+        # --- ExpertDataset Initialization ---
+        # Determine the seed for ExpertDataset
+        expert_start_seed = worker_state.last_expert_dataset_seed
+        if expert_start_seed is None: # If not resuming or first run
+             # Calculate the initial seed deterministically
+             expert_start_seed = base_seed + worker_id * cfg.get("worker_seed_offset", 10000)
+
+        # Calculate how many more samples this worker needs to generate *from scratch*
+        # Note: ExpertDataset uses max_samples_per_epoch as a *stopping condition* for generation attempts
+        # We need to track validated/saved episodes separately.
+        # Let ExpertDataset run until it thinks it has generated enough attempts.
+        # We rely on the outer loop check `worker_state.episodes_validated_saved < target_samples`
+        dataset_target_attempts = target_samples * cfg.generation.get("attempt_oversampling_factor", 1.5)
+        expert_config_dict = {}
         expert_config_instance = ExpertConfig(**expert_config_dict)
 
         ds = ExpertDataset(
-            urdf_path=cfg["urdf_path"],
-            env_xml_path=cfg.get("xml_path"),
-            base_seed=seed_for_worker,
-            max_samples_per_epoch=samples_per_worker,
-            skip_on_error=cfg.get("skip_on_error", True),
-            
-            # 3. Pass the INSTANCE, not the dictionary.
+            urdf_path=cfg.env.urdf_path,
+            env_xml_path=cfg.env.xml_path,
+            base_seed=expert_start_seed, # Seed for the generator's internal RNG manager
+            max_samples_per_epoch=int(dataset_target_attempts), # Target generation *attempts*
+            skip_on_error=True,
             scripted_cfg=expert_config_instance,
-            
-            object_size=tuple(np.array(cfg.get("object_size", [0.04,0.04,0.04])).tolist()),
-            object_grasp_width=float(cfg.get("grasp_width", 0.6)),
-            action_scaling_factor=float(cfg.get("action_scaling_factor", 0.5)),
-            warmup=bool(cfg.get("warmup", True)),
-            yield_full_obs=True,
+            warmup=True,
+            yield_full_obs=True, 
         )
 
-        # open lmdb env for writing
-        shard_path = Path(shard_dir)
-        if lmdb is None:
-            # fallback: write per-episode pickles (one file), but this is less ideal.
-            raise RuntimeError("LMDB is required for worker streaming. Install lmdb.")
-        env = open_lmdb_writer(shard_path, map_size=shard_map_size, subdir=True)
+        episodes_to_write_buf: List[Dict] = []
+        save_interval = cfg.generation.save_interval_episodes
+        checkpoint_interval = cfg.generation.checkpoint_interval_episodes
 
-        # We'll stream episodes as they appear: ds yields observation/action pairs *per sample*
-        # But episodes appear in ds.episodes only after a full episode is generated.
-        # So we iterate over the dataset to trigger episode collection, and whenever ds.episodes
-        # has new episodes, we write them and clear ds.episodes to bound memory usage.
-        written = 0
-        key_idx = 0
-        last_saved_count = 0
+        pbar = tqdm(
+            initial=worker_state.episodes_validated_saved,
+            total=target_samples,
+            desc=f"Worker {worker_id} (Validated)",
+            leave=False,
+            position=worker_id
+        )
 
-        # Provide a safety generator: we will periodically flush episodes if ds.episodes grows.
-        # iterate dataset (it yields individual samples) but episodes are stored to ds.episodes list.
-        # We monitor ds.episodes and write any new episodes to LMDB immediately.
-        pbar = tqdm(total=samples_per_worker, desc=f"Worker {worker_id}", leave=False)
-        samples_seen = 0
+        dataset_iterator = iter(ds)
 
-        for _ in ds:
-            samples_seen += 1
-            pbar.update(1)
-            # whenever an episode is added to ds.episodes, ds._episode_id_counter increments.
-            # We'll detect extra episodes beyond last_saved_count
-            if len(ds.episodes) > last_saved_count:
-                # new episodes to flush
-                new_eps = ds.episodes[last_saved_count:]
-                # write new_eps to LMDB
-                key_idx, wrote = worker_stream_write_lmdb(env, key_idx, new_eps)
-                written += wrote
-                last_saved_count += wrote
-                # To limit memory, zero-out the flushed episodes indexes
-                # Keep only episodes that are not yet flushed (none)
-                # We can clear the entire list safely if all were flushed
-                # but to be safe, keep only any remaining (should be none)
-                ds.episodes = ds.episodes[last_saved_count:]
+        # --- Main Generation Loop ---
+        while worker_state.episodes_validated_saved < target_samples:
+            try:
+                # ================================================================= #
+                # FIX 1 (cont.): Call next() on the PERSISTENT iterator.
+                # This correctly advances the generator to produce the next sample.
+                # ================================================================= #
+                next(dataset_iterator)
+            except StopIteration:
+                log.info(f"{log_prefix} ExpertDataset iterator finished.")
+                break # ExpertDataset reached its internal target
+
+            num_generated_in_ds = len(ds.episodes)
+            if num_generated_in_ds > 0: # Check if there are any episodes to process
+                newly_generated_eps = ds.episodes
+                
+                for ep in newly_generated_eps:
+                    worker_state.episodes_generated_attempted += 1
+                    ep_success = ep.get("success", False)
+
+                    # --- Validation ---
+                    validation_passed = False
+                    if ep_success:
+                        if cfg.generation.enable_replay_validation:
+                            try:
+                                replay_ok = replay_validate_episode(
+                                    ep,
+                                    urdf_path=cfg.env.urdf_path,
+                                    env_xml_path=cfg.env.xml_path
+                                )
+                                if replay_ok:
+                                    validation_passed = True
+                                else:
+                                    log.debug(f"{log_prefix} Episode failed replay validation.")
+                            except Exception as val_err:
+                                log.warning(f"{log_prefix} Replay validation failed: {val_err}")
+                        else:
+                            validation_passed = True
+                    
+                    # --- Add to Write Buffer ---
+                    if validation_passed:
+                        episodes_to_write_buf.append(ep)
+                        pbar.update(1)
+                        if worker_state.episodes_validated_saved + len(episodes_to_write_buf) >= target_samples:
+                             break
+
+                # ================================================================= #
+                # FIX 2: Explicitly clear the ExpertDataset's internal episode list
+                # to prevent unbounded memory growth.
+                # ================================================================= #
+                ds.episodes.clear()
+
+                # --- Periodic Saving & Checkpointing ---
+                if len(episodes_to_write_buf) >= save_interval:
+                    with lmdb_env.begin(write=True) as txn:
+                        for ep_to_save in episodes_to_write_buf:
+                            key = f"{worker_state.lmdb_key_index:08d}".encode("ascii")
+                            val = pickle.dumps(ep_to_save, protocol=pickle.HIGHEST_PROTOCOL)
+                            txn.put(key, val)
+                            worker_state.lmdb_key_index += 1
+                    
+                    num_written = len(episodes_to_write_buf)
+                    worker_state.episodes_validated_saved += num_written
+                    episodes_to_write_buf.clear()
+                    
+                    if worker_state.episodes_validated_saved % checkpoint_interval < num_written:
+                        worker_state.last_expert_dataset_seed = ds.get_last_seed()
+                        worker_state.numpy_rng_state = np.random.get_state()
+                        worker_state.random_rng_state = random.getstate()
+                        save_worker_checkpoint(worker_state, shard_dir)
+                        log.debug(f"{log_prefix} Saved checkpoint.")
+            
+            if worker_state.episodes_validated_saved >= target_samples:
+                break
+
+        # --- Final Write & Checkpoint ---
+        if episodes_to_write_buf:
+            log.info(f"{log_prefix} Writing final {len(episodes_to_write_buf)} episodes...")
+            with lmdb_env.begin(write=True) as txn:
+                for ep_to_save in episodes_to_write_buf:
+                    key = f"{worker_state.lmdb_key_index:08d}".encode("ascii")
+                    val = pickle.dumps(ep_to_save, protocol=pickle.HIGHEST_PROTOCOL)
+                    txn.put(key, val)
+                    worker_state.lmdb_key_index += 1
+            worker_state.episodes_validated_saved += len(episodes_to_write_buf)
+            episodes_to_write_buf.clear()
+
+        # Update and save final state in checkpoint before closing
+        worker_state.last_expert_dataset_seed = ds.get_last_seed()
+        worker_state.numpy_rng_state = np.random.get_state()
+        worker_state.random_rng_state = random.getstate()
+        save_worker_checkpoint(worker_state, shard_dir)
+
+        # --- Cleanup ---
         pbar.close()
+        close_lmdb_env(lmdb_env) # Use robust helper
 
-        # After iteration, there may be remaining episodes to flush (rare)
-        if len(ds.episodes) > 0:
-            key_idx, wrote = worker_stream_write_lmdb(env, key_idx, ds.episodes)
-            written += wrote
-
-        env.sync()
-        env.close()
-
+        end_time = time.time()
         summary = {
             "worker_id": worker_id,
             "status": "ok",
-            "written_episodes": written,
-            "samples_seen": samples_seen,
-            "shard_path": str(shard_path),
-            "seed_used": int(seed_for_worker),
+            "episodes_attempted": worker_state.episodes_generated_attempted,
+            "episodes_validated_saved": worker_state.episodes_validated_saved,
+            "lmdb_keys_written": worker_state.lmdb_key_index,
+            "duration_seconds": round(end_time - start_time, 2),
+            "shard_path": str(shard_dir),
+            "last_seed": worker_state.last_expert_dataset_seed,
         }
-        with open(summary_path, "w") as f:
-            json.dump(summary, f, indent=2)
-
-        logging.info(f"{log_prefix} finished. wrote {written} episodes to {shard_path}")
+        save_worker_summary(summary, shard_dir)
+        log.info(f"{log_prefix} Finished successfully. Saved {worker_state.episodes_validated_saved} valid episodes.")
 
     except Exception as e:
-        logging.exception(f"[worker {worker_id}] failed: {e}")
+        end_time = time.time()
+        log.exception(f"{log_prefix} FAILED with error: {e}")
         summary = {
             "worker_id": worker_id,
             "status": "error",
             "error": str(e),
+            "episodes_attempted": worker_state.episodes_generated_attempted,
+            "episodes_validated_saved": worker_state.episodes_validated_saved,
+            "duration_seconds": round(end_time - start_time, 2),
+            "shard_path": str(shard_dir),
         }
+        # Attempt to save error summary
         try:
-            with open(summary_path, "w") as f:
-                json.dump(summary, f, indent=2)
-        except Exception:
-            pass
-        # Reraise to make sure the process exits non-zero for debugging
-        raise
+            save_worker_summary(summary, shard_dir)
+        except Exception as summary_e:
+            log.error(f"{log_prefix} CRITICAL: Failed to save error summary: {summary_e}")
+        # Ensure LMDB is closed if it was opened
+        if 'lmdb_env' in locals() and lmdb_env is not None:
+             close_lmdb_env(lmdb_env)
+        raise # Re-raise exception to signal failure to the main process
 
+# === Merge Function ===
 
-# ---------------------------
-# Merge shards into a final dataset (single LMDB)
-# ---------------------------
-def merge_shards_to_lmdb(shard_dirs: List[Path], out_dir: Path, map_size: int = 16 * 1024**3):
-    """
-    Read each shard LMDB and merge its episodes into a single LMDB in out_dir.
-    Keys are reindexed sequentially.
-    """
-    import pickle
-    if lmdb is None:
-        raise RuntimeError("lmdb not available; merging requires python-lmdb.")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_env = lmdb.open(str(out_dir), map_size=map_size, subdir=True, readonly=False, lock=True)
-    nxt = 0
+def merge_shards_fn(shard_dirs: List[Path], out_file: Path, final_map_size_gb: float):
+    """Merges LMDB shards into a single final LMDB file."""
+    log.info(f"Starting merge of {len(shard_dirs)} shards into {out_file}...")
+    
+    # Ensure parent directory exists
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Open output LMDB (use robust helper, subdir=False for single file)
+    out_env = open_lmdb_env(
+        str(out_file),
+        map_size_gb=final_map_size_gb,
+        readonly=False,
+        lock=True,
+        subdir=False # Final dataset is a single file
+    )
+    
+    total_merged_count = 0
     try:
         with out_env.begin(write=True) as out_txn:
-            for sd in shard_dirs:
-                # open shard in readonly mode
-                env = lmdb.open(str(sd), subdir=True, readonly=True, lock=False)
-                with env.begin() as txn:
-                    cursor = txn.cursor()
-                    for k, v in cursor:
-                        key = f"{nxt:08d}".encode("ascii")
-                        out_txn.put(key, v)
-                        nxt += 1
-                        # commit periodically to limit transaction size
-                        if (nxt % 512) == 0:
-                            out_txn.commit()
-                            out_txn = out_env.begin(write=True)
-                env.close()
-            # final commit by context manager
+            for shard_dir in tqdm(shard_dirs, desc="Merging Shards"):
+                shard_summary = load_worker_summary(shard_dir)
+                if not shard_summary or shard_summary.get("status") != "ok":
+                    log.warning(f"Skipping invalid or incomplete shard: {shard_dir}")
+                    continue
+
+                log.debug(f"Merging shard: {shard_dir}")
+                shard_env = open_lmdb_env(str(shard_dir), readonly=True, lock=False, subdir=True)
+                shard_merged_count = 0
+                try:
+                    with shard_env.begin() as shard_txn:
+                        cursor = shard_txn.cursor()
+                        for _key, value in cursor:
+                            # Generate new sequential key for the merged DB
+                            merged_key = f"{total_merged_count:08d}".encode("ascii")
+                            out_txn.put(merged_key, value)
+                            total_merged_count += 1
+                            shard_merged_count += 1
+                finally:
+                    close_lmdb_env(shard_env) # Close shard env
+                
+                # Verify count matches summary
+                expected_count = shard_summary.get("lmdb_keys_written", -1)
+                if shard_merged_count != expected_count:
+                     log.warning(f"Shard {shard_dir.name} merge count mismatch! Expected {expected_count}, got {shard_merged_count}.")
+
     finally:
+        # Ensure final LMDB is synced and closed
+        log.info("Syncing final LMDB...")
         out_env.sync()
-        out_env.close()
-    return nxt
+        close_lmdb_env(out_env)
+        
+    log.info(f"Merge complete. Total episodes merged: {total_merged_count}")
+    return total_merged_count
 
+# === Metadata Function ===
 
-# ---------------------------
-# Replay filter helper (unchanged semantics)
-# ---------------------------
-def replay_filter(episodes_shard_dirs: List[Path], cfg: Dict[str, Any], tmp_extract_limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    """
-    Optionally replay-validate each episode by streaming episodes from shards.
-    Returns a list of validated episodes (as Python dicts) — note this may be large.
-    Use with caution; better to do filtering during writing if you need to save memory.
-    """
-    import pickle
-    validated = []
-    tol = cfg.get("replay_tol", 0.03)
-    for sd in episodes_shard_dirs:
-        if lmdb is None:
-            continue
-        env = lmdb.open(str(sd), subdir=True, readonly=True, lock=False)
-        with env.begin() as txn:
-            cursor = txn.cursor()
-            for k, v in cursor:
-                ep = pickle.loads(v)
-                ok = replay_validate_episode(ep, cfg["urdf_path"], cfg.get("xml_path", None))
-                if ok:
-                    validated.append(ep)
-                else:
-                    logger.warning(f"Dropping episode id={ep.get('episode_id')} from shard={sd} due to replay mismatch")
-                if tmp_extract_limit is not None and len(validated) >= tmp_extract_limit:
-                    break
-            env.close()
-    return validated
-
-
-# ---------------------------
-# CLI main
-# ---------------------------
-def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="Robust dataset generation (LMDB-sharded)")
-    parser.add_argument("--config", required=True, help="YAML config")
-    parser.add_argument("--out_dir", default=None, help="Final output directory (overrides config)")
-    parser.add_argument("--resume", action="store_true", help="Resume mode (do not clobber existing shards)")
-    args = parser.parse_args()
-
-    cfg = load_config(args.config)
-    out_dir = Path(args.out_dir) if args.out_dir else Path(cfg["output_dir"])
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # metadata
+def save_metadata_fn(cfg: DictConfig, output_dir: Path, run_name: str, worker_summaries: List[Dict], total_merged_count: Optional[int]):
+    """Saves final metadata for the dataset generation run."""
     metadata = {
-        "config": cfg,
-        "urdf_hash": compute_file_hash(cfg.get("urdf_path", "")),
-        "xml_hash": compute_file_hash(cfg.get("xml_path", "")),
-        "timestamp_start": time.time(),
+        "run_name": run_name,
+        "timestamp_start": time.strftime("%Y-%m-%d_%H:%M:%S"), # Approximate start
+        "config": OmegaConf.to_container(cfg, resolve=True),
+        "total_episodes_merged": total_merged_count,
+        "workers": worker_summaries,
+        # Add git hash?
     }
+    metadata_path = output_dir / f"expert_{run_name}_metadata.json"
+    atomic_write_json(metadata, metadata_path)
+    log.info(f"Saved final metadata to {metadata_path}")
 
-    num_workers = int(cfg.get("num_workers", 0))
-    total_samples = int(cfg["num_samples"])
-    shard_idx = int(cfg.get("shard_idx", 0))
-    num_shards = int(cfg.get("num_shards", 1))
-    base_seed = int(cfg.get("seed", 0)) if cfg.get("seed") is not None else 0
 
-    shards_dir = out_dir / "shards"
-    shards_dir.mkdir(parents=True, exist_ok=True)
+# === Main Orchestrator ===
 
-    # Per-worker samples (ceil division)
-    if num_workers > 0:
-        samples_per_worker = (total_samples + num_workers - 1) // num_workers
-    else:
-        samples_per_worker = total_samples
+@hydra.main(version_base=None, config_path="../configs", config_name="gen_dataset_config")
+def main(cfg: DictConfig):
+    """Main function orchestrated by Hydra."""
+    if lmdb is None:
+        log.error("python-lmdb is not installed. Cannot generate dataset. Exiting.")
+        sys.exit(1)
 
-    # LMDB map sizes (configurable)
-    shard_map_size = int(cfg.get("shard_map_size_bytes", 12 * 1024**3))
-    final_map_size = int(cfg.get("final_map_size_bytes", 12 * 1024**3))
+    start_time = time.time()
+    # Hydra automatically creates and manages the output directory
+    output_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
+    log.info(f"Starting dataset generation run. Output Dir: {output_dir}")
+    log.info("----------- Configuration -----------")
+    log.info(OmegaConf.to_yaml(cfg))
+    log.info("------------------------------------")
 
-    # For Windows and safety, prefer 'spawn'
-    ctx = mp.get_context("spawn")
+    run_name = cfg.run_name if cfg.run_name else output_dir.name
+    num_workers = int(cfg.generation.parallel.num_workers)
+    total_samples_target = int(cfg.generation.num_samples)
+    resume = cfg.resume
 
-    worker_processes = []
-    summary_paths = []
-    shard_paths = []
+    shards_base_dir = output_dir / "shards"
+    shards_base_dir.mkdir(parents=True, exist_ok=True)
 
-    if num_workers > 0:
-        # Launch worker processes (each writes its own shard directory)
-        for w in range(num_workers):
-            shard_subdir = shards_dir / f"shard_w{w}"
-            summary_path = shards_dir / f"summary_w{w}.json"
-            # Avoid clobbering existing shards unless not resume
-            if args.resume and shard_subdir.exists():
-                logger.info(f"Shard {shard_subdir} exists and resume=True — skipping worker {w}")
-                summary_paths.append(str(summary_path))
-                shard_paths.append(shard_subdir)
-                continue
+    if num_workers <= 0:
+        log.error("num_workers must be positive.")
+        sys.exit(1)
 
+    samples_per_worker = (total_samples_target + num_workers - 1) // num_workers
+
+    ctx = mp.get_context("spawn") # Use spawn for better isolation
+    processes: List[mp.Process] = []
+    shard_dirs: List[Path] = []
+    active_workers = 0
+
+    log.info(f"Targeting {total_samples_target} total validated samples across {num_workers} workers (~{samples_per_worker} per worker).")
+
+    # --- Worker Spawning & Resume Check ---
+    for w_idx in range(num_workers):
+        shard_dir = shards_base_dir / f"shard_w{w_idx}"
+        shard_dirs.append(shard_dir)
+        worker_summary = load_worker_summary(shard_dir)
+
+        should_spawn = True
+        if resume:
+            if worker_summary and worker_summary.get("status") == "ok":
+                # Check if target is met
+                saved_count = worker_summary.get("episodes_validated_saved", 0)
+                if saved_count >= samples_per_worker:
+                    log.info(f"Shard {shard_dir.name} already complete ({saved_count}/{samples_per_worker} episodes). Skipping worker {w_idx}.")
+                    should_spawn = False
+                else:
+                    log.info(f"Shard {shard_dir.name} found completed summary but needs more samples ({saved_count}/{samples_per_worker}). Will resume.")
+                    # Worker will resume based on its checkpoint
+            elif load_worker_checkpoint(shard_dir):
+                log.info(f"Found checkpoint for worker {w_idx}. Will resume.")
+            else:
+                 log.info(f"No valid summary or checkpoint for worker {w_idx}. Starting from scratch.")
+        else:
+             # Not resuming, always start
+             # Clean up previous shard if it exists? Optional, maybe safer not to.
+             pass
+
+        if should_spawn:
+            log.info(f"Spawning worker {w_idx}...")
+            # Pass Hydra config directly - Omegaconf handles pickling
             p = ctx.Process(
-                target=worker_loop_fn,
-                args=(w, cfg, str(shard_subdir), shard_map_size, samples_per_worker, str(summary_path)),
-                daemon=False
+                target=worker_process_fn,
+                args=(w_idx, cfg, shard_dir, samples_per_worker),
+                daemon=False # Ensure cleanup happens
             )
             p.start()
-            worker_processes.append((p, shard_subdir, summary_path))
-            summary_paths.append(str(summary_path))
-            shard_paths.append(shard_subdir)
+            processes.append(p)
+            active_workers += 1
 
-        # Wait for processes to finish
-        for p, shard_subdir, summary_path in worker_processes:
-            p.join()
+    log.info(f"Launched {active_workers} worker processes.")
 
-        # Check summaries
-        total_written = 0
-        for _, shard_subdir, summary_path in worker_processes:
-            try:
-                if Path(summary_path).exists():
-                    s = json.load(open(summary_path, "r"))
-                    if s.get("status") == "ok":
-                        total_written += int(s.get("written_episodes", 0))
-                    else:
-                        logger.warning(f"Worker summary error: {s}")
-                else:
-                    logger.warning(f"No summary for worker shard {shard_subdir}")
-            except Exception as e:
-                logger.exception(f"Error reading summary {summary_path}: {e}")
-
-    else:
-        # Single process mode: run worker_loop_fn inline to avoid spawn overhead
-        shard_subdir = shards_dir / "shard_single"
-        summary_path = shards_dir / "summary_single.json"
-        if args.resume and shard_subdir.exists():
-            logger.info(f"Shard {shard_subdir} exists and resume=True — using existing shard")
-            shard_paths.append(shard_subdir)
+    # --- Wait for Workers ---
+    successful_workers = 0
+    failed_workers = 0
+    for p in processes:
+        p.join() # Wait for the process to finish
+        if p.exitcode == 0:
+            successful_workers += 1
         else:
-            # call inline
-            try:
-                worker_loop_fn(0, cfg, str(shard_subdir), shard_map_size, samples_per_worker, str(summary_path))
-            except Exception as e:
-                logger.exception("Single-threaded generation failed")
-                return
-            shard_paths.append(shard_subdir)
+            log.error(f"Worker process (PID {p.pid}) exited with non-zero code {p.exitcode}.")
+            failed_workers += 1
 
-    logger.info(f"All worker shards written (shard dir: {shards_dir})")
+    log.info(f"All worker processes finished. Success: {successful_workers}, Failed: {failed_workers}")
 
-    # Merge shards into final LMDB
-    final_dir = out_dir / "dataset.lmdb"
-    if args.resume and final_dir.exists():
-        logger.info(f"Final dataset exists and resume=True: skipping merge (use --resume=False to overwrite)")
+    # --- Collect Summaries & Check Status ---
+    worker_summaries = []
+    valid_shard_dirs = []
+    overall_success = (failed_workers == 0)
+
+    for shard_dir in shard_dirs:
+        summary = load_worker_summary(shard_dir)
+        if summary:
+            worker_summaries.append(summary)
+            if summary.get("status") == "ok":
+                valid_shard_dirs.append(shard_dir)
+            else:
+                log.error(f"Worker {summary.get('worker_id', 'N/A')} reported error: {summary.get('error', 'Unknown')}")
+                overall_success = False
+        elif any(p.exitcode != 0 for p in processes if f"shard_w{shard_dirs.index(shard_dir)}" in p.name): # Rough check if corresponding process failed silently
+             log.error(f"Worker for shard {shard_dir.name} seems to have failed without writing a summary.")
+             overall_success = False
+
+
+    if not overall_success:
+        log.error("One or more workers failed. Merge step will be skipped. Check worker logs and summaries in the shards directory.")
+        total_merged_count = None
+    elif not valid_shard_dirs:
+         log.warning("No valid shards were generated by any worker. Nothing to merge.")
+         total_merged_count = 0
     else:
-        logger.info(f"Merging {len(shard_paths)} shards into final LMDB at {final_dir}")
-        merged_count = merge_shards_to_lmdb([p for p in shard_paths if p.exists()], final_dir, map_size=final_map_size)
-        logger.info(f"Merged episodes count: {merged_count}")
+        # --- Merge Shards ---
+        final_lmdb_file = output_dir / f"expert_{run_name}.lmdb"
+        try:
+            total_merged_count = merge_shards_fn(
+                valid_shard_dirs,
+                final_lmdb_file,
+                cfg.lmdb.final_map_size_gb
+            )
+            log.info(f"Successfully merged {total_merged_count} episodes into {final_lmdb_file}")
+            # Optional: Clean up shard directories after successful merge?
+            if cfg.generation.cleanup_shards_after_merge:
+                 log.info("Cleaning up shard directories...")
+                 for shard_dir in valid_shard_dirs:
+                     shutil.rmtree(shard_dir)
+        except Exception as merge_err:
+            log.exception(f"Failed to merge shards: {merge_err}")
+            total_merged_count = None
+            overall_success = False # Mark run as failed if merge fails
 
-    # (Optional) Replay validation on merged dataset (expensive)
-    if cfg.get("do_replay_validate", True):
-        logger.info("Running replay validation on merged dataset (this is optional and may take time).")
-        # We'll stream episodes from final_dir and validate; do not load all episodes to memory.
-        env = lmdb.open(str(final_dir), subdir=True, readonly=True, lock=False)
-        import pickle
-        ok_count = 0
-        bad_count = 0
-        with env.begin() as txn:
-            cursor = txn.cursor()
-            for k, v in tqdm(cursor, desc="replay-validate"):
-                ep = pickle.loads(v)
-                ok = replay_validate_episode(ep, cfg["urdf_path"], cfg.get("xml_path", None))
-                if ok:
-                    ok_count += 1
-                else:
-                    bad_count += 1
-        env.close()
-        logger.info(f"Replay validation done: ok={ok_count} bad={bad_count}")
+    # --- Save Final Metadata ---
+    save_metadata_fn(cfg, output_dir, run_name, worker_summaries, total_merged_count)
 
-    # Save metadata file
-    metadata.update({
-        "timestamp_end": time.time(),
-        "num_workers": num_workers,
-        "total_samples_target": total_samples,
-        "shards": [str(p) for p in shard_paths],
-    })
-    with open(out_dir / "gen_metadata.json", "w") as f:
-        json.dump(metadata, f, indent=2)
+    end_time = time.time()
+    log.info(f"Dataset generation finished in {(end_time - start_time) / 60:.2f} minutes.")
 
-    logger.info("Dataset generation complete.")
-
+    if not overall_success:
+         log.error("Dataset generation finished with errors.")
+         # sys.exit(1) # Optional: exit with error code
 
 if __name__ == "__main__":
+    # Add a check for needing ExpertDataset method
+    if not hasattr(ExpertDataset, 'get_last_seed'):
+         print("\nERROR: Your `ExpertDataset` class is missing the `get_last_seed` method required for checkpointing.")
+         print("Please add the following method to `utils/expert_dataset.py` inside the `ExpertDataset` class:")
+         print("""
+    def get_last_seed(self) -> Optional[int]:
+        # Returns the seed used for the *last completed or currently running* episode generation attempt.
+        # Assumes _init_worker_state sets _worker_master_seed and _episode_attempt_counter
+        if not hasattr(self, '_worker_master_seed') or not hasattr(self, '_episode_attempt_counter'):
+             # Should not happen if worker is initialized correctly
+             return None
+        # The seed for the *next* episode would be master + attempts.
+        # The seed for the *current or last* attempt is master + attempts - 1.
+        if self._episode_attempt_counter > 0:
+            return (self._worker_master_seed + self._episode_attempt_counter - 1) & 0x7FFFFFFF
+        else:
+             # If no attempts made yet, return the initial seed planned
+             return self._worker_master_seed & 0x7FFFFFFF
+""")
+         sys.exit(1)
+
     main()
+
+

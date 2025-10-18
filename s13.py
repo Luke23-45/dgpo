@@ -1,46 +1,16 @@
-# FILE: scripts/pretrain_diffusion.py
-
-# ... (inside the DiffusionPretrainer class)
-
-    def _build_policy(self) -> DiffusionPolicy:
-        """Constructs the DiffusionPolicy from the configuration."""
-        # Extract proprioception dimension from the dataset's observation space
-        # This is a robust way to avoid hardcoding dimensions.
-        sample_obs, _ = self.train_loader.dataset[0]
-        proprio_dim = sample_obs["proprio"].shape[-1]
-        log.info(f"Inferred proprioception dimension: {proprio_dim}")
-
-        scheduler_cfg = NoiseSchedulerConfig(
-            beta_start=self.cfg.scheduler.beta_start,
-            beta_end=self.cfg.scheduler.beta_end,
-            schedule=self.cfg.scheduler.schedule_type,
-            timesteps=self.cfg.scheduler.timesteps,
+        ds = ExpertDataset(
+            urdf_path=cfg["urdf_path"],
+            env_xml_path=cfg.get("xml_path"),
+            base_seed=seed_for_worker,
+            max_samples_per_epoch=samples_per_worker,
+            skip_on_error=cfg.get("skip_on_error", True),
+            
+            # 3. Pass the INSTANCE, not the dictionary.
+            scripted_cfg=expert_config_instance,
+            
+            object_size=tuple(np.array(cfg.get("object_size", [0.04,0.04,0.04])).tolist()),
+            object_grasp_width=float(cfg.get("grasp_width", 0.6)),
+            action_scaling_factor=float(cfg.get("action_scaling_factor", 0.5)),
+            warmup=bool(cfg.get("warmup", True)),
+            yield_full_obs=True,
         )
-
-        model_cfg = self.cfg.model
-        
-        # --- THIS IS THE CORRECTED, FINAL CALL ---
-        # It matches the constructor of the state-of-the-art DiffusionPolicy
-        # and reads from the simplified, correct Hydra config.
-        policy = DiffusionPolicy(
-            # Core dimensions
-            proprio_dim=proprio_dim,
-            H_o=model_cfg.observation_horizon,
-            H_a=model_cfg.action_horizon,
-            action_dim=model_cfg.action_dim,
-            
-            # Architectural dimensions from the model config
-            image_feat_dim=model_cfg.image_feat_dim,
-            d_model=model_cfg.d_model,
-            
-            # Denoiser-specific hyperparameters
-            denoiser_layers=model_cfg.denoiser_layers,
-            denoiser_heads=model_cfg.denoiser_heads,
-            
-            # Scheduler and training parameters
-            scheduler_cfg=scheduler_cfg,
-            cfg_p_uncond=self.cfg.training.cfg_p_uncond,
-            ema_decay=self.cfg.training.ema_decay,
-            device=self.device,
-        )
-        return policy

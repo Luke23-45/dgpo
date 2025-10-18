@@ -452,7 +452,19 @@ class ExpertDataset(IterableDataset):
         self._episode_id_counter = 0  # Add this
         self._episode_attempt_counter = 0 # Use this for seeding
         logger.info(f"[Worker {self._worker_id}] State initialization complete.")
-    
+    def get_last_seed(self) -> Optional[int]:
+        # Returns the seed used for the *last completed or currently running* episode generation attempt.
+        # Assumes _init_worker_state sets _worker_master_seed and _episode_attempt_counter
+        if not hasattr(self, '_worker_master_seed') or not hasattr(self, '_episode_attempt_counter'):
+             # Should not happen if worker is initialized correctly
+             return None
+        # The seed for the *next* episode would be master + attempts.
+        # The seed for the *current or last* attempt is master + attempts - 1.
+        if self._episode_attempt_counter > 0:
+            return (self._worker_master_seed + self._episode_attempt_counter - 1) & 0x7FFFFFFF
+        else:
+             # If no attempts made yet, return the initial seed planned
+             return self._worker_master_seed & 0x7FFFFFFF  
     def _check_schema(self, obs: Dict[str, np.ndarray]):
         for k, (dtype, shape_tpl) in OBS_SCHEMA.items():
             if k not in obs:

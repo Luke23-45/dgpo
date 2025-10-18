@@ -1,0 +1,32 @@
+[2025-10-18 19:11:03,477][__main__][INFO] - Starting dataset generation run. Output Dir: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\generate_dataset\run_name
+[2025-10-18 19:11:03,477][__main__][INFO] - ----------- Configuration -----------
+[2025-10-18 19:11:03,482][__main__][INFO] - run_name: panda_pick_place_v1
+seed: 42
+resume: false
+output_dir: ${hydra:run.dir}
+env:
+  urdf_path: urdf/panda_mujoco_kinematics.urdf
+  xml_path: envs/panda_pick_place.xml
+  object_size:
+  - 0.04
+  - 0.04
+  - 0.04
+expert:
+  hover_height: 0.1
+generation:
+  num_samples: 40000
+  enable_replay_validation: true
+  save_interval_episodes: 50
+  checkpoint_interval_episodes: 200
+  attempt_oversampling_factor: 1.5
+  cleanup_shards_after_merge: false
+  parallel:
+    num_workers: 1
+lmdb:
+  shard_map_size_gb: 13
+  final_map_size_gb: 16
+
+[2025-10-18 19:11:03,483][__main__][INFO] - ------------------------------------
+[2025-10-18 19:11:03,484][__main__][INFO] - Targeting 40000 total validated samples across 1 workers (~40000 per worker).
+[2025-10-18 19:11:03,484][__main__][INFO] - Spawning worker 0...
+[2025-10-18 19:11:03,496][__main__][INFO] - Launched 1 worker processes.

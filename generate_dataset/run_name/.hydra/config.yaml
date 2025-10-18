@@ -1,0 +1,25 @@
+run_name: panda_pick_place_v1
+seed: 42
+resume: false
+output_dir: ${hydra:run.dir}
+env:
+  urdf_path: urdf/panda_mujoco_kinematics.urdf
+  xml_path: envs/panda_pick_place.xml
+  object_size:
+  - 0.04
+  - 0.04
+  - 0.04
+expert:
+  hover_height: 0.1
+generation:
+  num_samples: 40000
+  enable_replay_validation: true
+  save_interval_episodes: 50
+  checkpoint_interval_episodes: 200
+  attempt_oversampling_factor: 1.5
+  cleanup_shards_after_merge: false
+  parallel:
+    num_workers: 1
+lmdb:
+  shard_map_size_gb: 13
+  final_map_size_gb: 16
