@@ -1,0 +1,72 @@
+[2025-10-19 19:48:02,144][__main__][INFO] - ----------- RL Fine-tuning Configuration -----------
+[2025-10-19 19:48:02,154][__main__][INFO] - seed: 42
+device: cpu
+pretrained_policy_path: notes/checkpoints/best.pth
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/expert_20251019_011015_6000_samples.lmdb
+  num_workers: 0
+environment:
+  xml_path: envs/panda_pick_place.xml
+  n_envs: 1
+  max_episode_steps: 500
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 256
+  d_model: 256
+  denoiser_layers: 6
+  denoiser_heads: 8
+scheduler:
+  schedule: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+training:
+  total_timesteps: 2000
+  curriculum_total_episodes: 2000
+rl_algorithm:
+  buffer_size: 3000
+  learning_starts: 1000
+  batch_size: 256
+  gamma: 0.98
+  tau: 0.005
+  policy_delay: 2
+  policy_noise: 0.2
+  noise_clip: 0.5
+  exploration_noise: 0.1
+  guidance_scale: 1.5
+  sampling_steps: 10
+optimizer:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+logging:
+  use_wandb: false
+  wandb_project: dgpo_rl_finetune
+  wandb_run_name: null
+  log_interval_steps: 100
+  eval_freq: 1000
+  n_eval_episodes: 5
+  video_log_freq: 1
+
+[2025-10-19 19:48:02,164][__main__][INFO] - --------------------------------------------------
+[2025-10-19 19:48:02,177][__main__][INFO] - Global seed set to 42
+[2025-10-19 19:48:02,178][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\2025-10-19\19-48-02
+[2025-10-19 19:48:02,193][__main__][INFO] - Initializing 1 vectorized environments...
+[2025-10-19 19:48:08,266][__main__][INFO] - Initialized evaluation environment.
+[2025-10-19 19:48:08,309][__main__][INFO] - Initializing Replay Buffer...
+[2025-10-19 19:48:08,325][__main__][INFO] - Using sb3_contrib.common.buffers.DictReplayBuffer.
+[2025-10-19 19:48:08,330][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\expert_20251019_011015_6000_samples.lmdb | mode=RO | file-mode
+[2025-10-19 19:48:29,419][utils.expert_dataset][INFO] - Loaded expert demos: 40 episodes, 9889 total valid chunks.
+[2025-10-19 19:48:29,549][__main__][INFO] - Building RL models and loading pre-trained actor...
+[2025-10-19 19:48:29,549][__main__][INFO] - Inferred proprioception dimension per step: 22
+[2025-10-19 19:48:30,785][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-19 19:48:31,684][models.diffusion_policy][INFO] - Loaded model checkpoint from notes\checkpoints\best.pth
+[2025-10-19 19:48:31,687][__main__][INFO] - Successfully loaded pre-trained diffusion policy from notes\checkpoints\best.pth
+[2025-10-19 19:48:31,688][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=10
+[2025-10-19 19:48:31,844][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=10
+[2025-10-19 19:48:31,932][__main__][INFO] - Actor and Target Actor created.
+[2025-10-19 19:48:32,012][__main__][INFO] - Critic and Target Critic created.
+[2025-10-19 19:48:32,020][__main__][INFO] - Optimizers created.
+[2025-10-19 19:48:32,022][__main__][INFO] - No checkpoint found at specified path. Starting training from scratch.
+[2025-10-19 19:48:32,022][__main__][INFO] - Starting RL fine-tuning...

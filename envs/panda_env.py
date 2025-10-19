@@ -658,32 +658,77 @@ class PandaEnv(gym.Env):
         
         return is_visible, debug_info
 
+    # def _define_spaces(self):
+    #     """
+    #     Defines observation and action spaces.
+    #     """
+    #     # START OF MODIFIED BLOCK
+    #     proprio_dim = 7 + 7 + 2 + 6 # 7 qpos, 7 qvel, 2 touch, 6 force (3D x 2)
+    #     self.observation_space = spaces.Dict({
+    #         # --- Core Visual Modalities (HWC format) ---
+    #         "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
+    #         "image_wrist":   spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
+            
+    #         # --- Proprioceptive State ---
+    #         # 7 jnt_pos + 7 jnt_vel + 2 touch_sensor + 2x3D force_sensor
+    #         "proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(proprio_dim,), dtype=np.float32),
+    #         "is_grasped": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
+            
+    #         # --- Additional State Information for Expert ---
+    #         "task_completed": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
+            
+    #         # Current timestep in the episode, shaped as a 1D array
+    #         "timestep": spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(1,), dtype=np.int32),
+    #     })
+    #     # END OF MODIFIED BLOCK
+        
+    #     act_dim = 8
+    #     self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)  
     def _define_spaces(self):
         """
-        Defines observation and action spaces.
+        Defines observation and action spaces, including all expert keys
+        needed for the data generation and RL fine-tuning pipeline.
         """
-        # START OF MODIFIED BLOCK
         proprio_dim = 7 + 7 + 2 + 6 # 7 qpos, 7 qvel, 2 touch, 6 force (3D x 2)
+        
+        # Define common bounds for floating point Box spaces
+        FLOAT_BOX = lambda shape: spaces.Box(low=-np.inf, high=np.inf, shape=shape, dtype=np.float32)
+        
         self.observation_space = spaces.Dict({
             # --- Core Visual Modalities (HWC format) ---
             "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
             "image_wrist":   spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
             
-            # --- Proprioceptive State ---
-            # 7 jnt_pos + 7 jnt_vel + 2 touch_sensor + 2x3D force_sensor
-            "proprio": spaces.Box(low=-np.inf, high=np.inf, shape=(proprio_dim,), dtype=np.float32),
-            "is_grasped": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
+            # --- Proprioceptive State (Used by Policy) ---
+            "proprio": FLOAT_BOX((proprio_dim,)),
+            "is_grasped": FLOAT_BOX((1,)),
             
-            # --- Additional State Information for Expert ---
-            "task_completed": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
-            
-            # Current timestep in the episode, shaped as a 1D array
+            # --- Additional State Information (Meta/Task) ---
+            "task_completed": FLOAT_BOX((1,)),
             "timestep": spaces.Box(low=0, high=np.iinfo(np.int32).max, shape=(1,), dtype=np.int32),
+            
+            # --- Expert/Ground Truth Keys (Used by Expert Policy & Reward Wrapper) ---
+            # These must be defined here for stable-baselines3 compatibility.
+            "ee_pose_world": FLOAT_BOX((7,)), # 3 pos + 4 quat (xyzw)
+            "object_pos_world": FLOAT_BOX((3,)),
+            "goal_pos_world": FLOAT_BOX((3,)),
+            "object_orn_world": FLOAT_BOX((4,)),
+            "goal_orn_world": FLOAT_BOX((4,)),
+            "goal_size_world": FLOAT_BOX((3,)), # Goal object size (for reward/planning)
+            
+            # --- Internal/IKSolver Keys ---
+            "internal_full_proprio": FLOAT_BOX((proprio_dim,)), # Redundant copy for IKSolver compatibility
+            "gripper_qpos": FLOAT_BOX((2,)),
+            "robot_base_pos_world": FLOAT_BOX((3,)),
+            "ee_vel": FLOAT_BOX((6,)),
+            "object_vel": FLOAT_BOX((6,)),
+            "gripper_vel": FLOAT_BOX((2,)),
+            
         })
         # END OF MODIFIED BLOCK
         
         act_dim = 8
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)  
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
 
     def _randomize_photometrics(self, light_target: np.ndarray):
             """

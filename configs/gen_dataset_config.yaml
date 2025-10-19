@@ -1,40 +1,92 @@
-run_name: "panda_pick_place_v1"
+# FILE: configs/gen_dataset_config.yaml
+#
+# Definitive, Production-Grade Configuration for generate_dataset.py
+# ---
 
-# configs/generate_dataset_config.yaml (Example Structure)
-hydra:
-  run:
-    dir: ./generate_dataset/run_name
+# ===================================================================
+# 1. RUN MANAGEMENT & OUTPUT
+# ===================================================================
+# Directory where the final dataset files (LMDB/pickle, index, metadata) will be saved.
+output_dir: "data/dataset_part_2"
 
-seed: 42
-resume: false # Set to true to resume
-output_dir: ${hydra:run.dir} # Automatically set by Hydra
+# A descriptive name for this specific generation run.
+# The final filename will include this name and a hash of this config.
+run_name: "expert_run_validation_dataset"
 
-env:
-  urdf_path: "urdf/panda_mujoco_kinematics.urdf"
-  xml_path: "envs/panda_pick_place.xml"
-  object_size: [0.04, 0.04, 0.04]
-
-
-expert:
-  # Parameters for ExpertConfig in scripted_expert.py
-  hover_height: 0.10
+# The master seed for the entire generation process. All other seeds are derived
+# deterministically from this, ensuring full reproducibility.
+seed: 10513
 
 
-generation:
-  num_samples: 40000 # Total VALIDATED samples to generate
-  enable_replay_validation: true
-  save_interval_episodes: 50  # Write to LMDB every 50 validated episodes buffered
-  checkpoint_interval_episodes: 200 # Save worker state every 200 validated episodes
-  attempt_oversampling_factor: 1.5 # Generate 1.5x attempts as target samples due to filtering
-  cleanup_shards_after_merge: false # Keep shards for debugging by default
+
+# ===================================================================
+# 2. DATASET SIZE & PARALLELISM
+# ===================================================================
+# The total number of *samples* (timesteps) to generate and save after filtering.
+# A good starting point for a high-quality dataset is 20,000 - 50,000 samples.
+# num_samples: 50000 
+num_samples: 25000 
+# Number of parallel worker processes to spawn.
+# A good rule of thumb is to set this to the number of available CPU cores minus one or two.
+# For debugging, set to 0 to run in the main thread.
+num_workers: 1 # e.g., for a 10-core CPU
+
+# Seed offsets are used to guarantee unique seeds across workers and shards.
+# These defaults are large primes and are very safe.
+worker_seed_offset: 10007
 
 
-  parallel:
-    num_workers: 1 # Number of CPU cores to use
+# ===================================================================
+# 3. SHARDING (For massive-scale generation)
+# ===================================================================
+# Sharding allows you to break a massive generation job into smaller, independent runs.
+# For example, to generate 1M samples, you could run 10 shards of 100k samples each.
+# For a single-run generation, keep num_shards = 1 and shard_idx = 0.
+num_shards: 1
+shard_idx: 0
+shard_seed_offset: 1000102 # A large prime to separate seeds between shards
 
-lmdb:
-  shard_map_size_gb: 13 # Estimated size PER SHARD
-  final_map_size_gb: 16 # Estimated size for the FINAL merged dataset
+
+# ===================================================================
+# 4. ENVIRONMENT & EXPERT PARAMETERS
+# ===================================================================
+# Paths to the core simulation assets.
+urdf_path: "urdf/panda_mujoco_kinematics.urdf"
+xml_path: "envs/panda_pick_place.xml"
+
+# The crucial action scaling factor for the delta controller.
+# We use the value of 0.5, which was proven to be successful in our diagnostics.
+action_scaling_factor: 0.5
+
+# Properties of the object being manipulated. Must match the expert's expectations.
+object_size: [0.04, 0.04, 0.04]
+grasp_width: 0.6
+
+# Optional overrides for the ScriptedExpert's internal configuration.
+# For most cases, the defaults are fine. Uncomment and modify to tune the expert.
+expert_config: {}
+  # Example overrides:
+  # hover_height: 0.12
+  # cruise_velocity: 0.5
 
 
-#python scripts/generate_dataset.py --config your_config.yaml --resume
+# ===================================================================
+# 5. DATA QUALITY & VALIDATION
+# ===================================================================
+# Whether to run replay validation on every generated episode before saving.
+# HIGHLY RECOMMENDED to keep this `true`. It's a powerful quality check,
+# though it will slightly slow down the final saving process.
+do_replay_validate: true
+
+# The position tolerance (in meters) for the replay validation.
+replay_tol: 0.03 # 3 cm
+
+# Optional warmup for the ExpertDataset workers.
+# This runs a very small amount of generation at the start to trigger any
+# JIT compilations or one-time initializations. Recommended to keep `true`.
+warmup: true
+
+# The batch size used by the DataLoader in single-core mode.
+# This does not affect the data, only the update frequency of the progress bar.
+batch_size: 32
+

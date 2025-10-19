@@ -128,5 +128,17 @@ if __name__ == "__main__":
 
 """
 python -m s12 --db_path data\training\final_merged_dataset.lmdb
+(venv) C:\Users\Hellx\Documents\Programming\python\Project\dgpo>python -m s12 --db_path data\training\final_merged_dataset.lmdb
+🔍 Inspecting LMDB database at: data\training\final_merged_dataset.lmdb
+
+Found 260 total episodes (records) in the database.
+Verifying records and counting total samples...
+100%|███████████████████████████████████████| 260/260 [01:09<00:00,  3.76it/s]
+
+==================================================
+✅ Verification Complete!
+  - Total Episodes: 260
+  - Total Samples (Timesteps): 67656
+==================================================
 
 """

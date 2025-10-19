@@ -513,7 +513,7 @@ class DiffusionPolicy(nn.Module):
 
     def load(self, path: Path):
         """Loads model weights from a checkpoint."""
-        state = torch.load(path, map_location=self.device)
+        state = torch.load(path, map_location=self.device, weights_only=False)
         self.load_state_dict(state["policy_state_dict"])
         if self.ema and "ema_state_dict" in state and state["ema_state_dict"] is not None:
             self.ema.load_state_dict(state["ema_state_dict"])

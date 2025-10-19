@@ -24,7 +24,7 @@ pretrained_policy_path: "notes/checkpoints/best.pth"
 # Path to the offline expert dataset. This is used for the "+BC" loss.
 # CRITICAL: UPDATE THIS to be your main expert dataset.
 dataset:
-  path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/demos/expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb"
+  path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/expert_20251019_011015_6000_samples.lmdb"
   num_workers: 0 # For Windows, it's often safer to set this to 0.
 
 # ===================================================================
@@ -36,6 +36,8 @@ environment:
   # Number of parallel environments. Set to 1 for a simple test run.
   # Increase for faster data collection if you have multiple CPU cores.
   n_envs: 1
+
+  max_episode_steps: 500
   
 
 
@@ -55,7 +57,7 @@ model:
 # 5. DIFFUSION SCHEDULER (Must match the pre-trained model)
 # ===================================================================
 scheduler:
-  schedule_type: "cosine"
+  schedule: "cosine"
   timesteps: 100
   beta_start: 1.0e-4
   beta_end: 0.02
@@ -71,7 +73,7 @@ training:
   curriculum_total_episodes: 2000
 
 rl_algorithm:
-  buffer_size: 200_000
+  buffer_size: 2000
   learning_starts: 1000 # Collect 1000 steps of experience before the first update.
   batch_size: 256
   gamma: 0.98         # Discount factor
@@ -87,6 +89,7 @@ rl_algorithm:
   # Controls how strongly the actor adheres to the learned distribution.
   # A value between 1.0 (no guidance) and 2.0 is a good starting point.
   guidance_scale: 1.5
+  sampling_steps: 10 
 
 # ===================================================================
 # 7. OPTIMIZER
