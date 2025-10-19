@@ -19,7 +19,7 @@ data/
 .idea/
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
-
+generate_dataset/
 # --- Datasets and Large Files ---
 # Any raw or processed datasets should not be in the repo.
 # We are using cloud-based datasets, but this is a safeguard.
