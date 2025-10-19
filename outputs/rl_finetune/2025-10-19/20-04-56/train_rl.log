@@ -53,3 +53,24 @@ logging:
 [2025-10-19 20:04:56,804][__main__][INFO] - Global seed set to 42
 [2025-10-19 20:04:56,804][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\2025-10-19\20-04-56
 [2025-10-19 20:04:56,814][__main__][INFO] - Initializing 1 vectorized environments...
+[2025-10-19 20:05:01,140][__main__][INFO] - Initialized evaluation environment.
+[2025-10-19 20:05:01,156][__main__][INFO] - Initializing Replay Buffer...
+[2025-10-19 20:05:01,164][__main__][INFO] - Using sb3_contrib.common.buffers.DictReplayBuffer.
+[2025-10-19 20:05:01,165][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\expert_20251019_011015_6000_samples.lmdb | mode=RO | file-mode
+[2025-10-19 20:05:14,876][utils.expert_dataset][INFO] - Loaded expert demos: 40 episodes, 9889 total valid chunks.
+[2025-10-19 20:05:14,939][__main__][INFO] - Building RL models and loading pre-trained actor...
+[2025-10-19 20:05:14,940][__main__][INFO] - Inferred proprioception dimension per step: 22
+[2025-10-19 20:05:15,997][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-19 20:05:16,808][models.diffusion_policy][INFO] - Loaded model checkpoint from notes\checkpoints\best.pth
+[2025-10-19 20:05:16,814][__main__][INFO] - Successfully loaded pre-trained diffusion policy from notes\checkpoints\best.pth
+[2025-10-19 20:05:16,815][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=10
+[2025-10-19 20:05:16,915][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=10
+[2025-10-19 20:05:16,972][__main__][INFO] - Actor and Target Actor created.
+[2025-10-19 20:05:17,028][__main__][INFO] - Critic and Target Critic created.
+[2025-10-19 20:05:17,034][__main__][INFO] - Optimizers created.
+[2025-10-19 20:05:17,035][__main__][INFO] - No checkpoint found at specified path. Starting training from scratch.
+[2025-10-19 20:05:17,035][__main__][INFO] - Starting RL fine-tuning...
+[2025-10-19 20:10:04,045][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\expert_20251019_011015_6000_samples.lmdb | mode=RO | file-mode
+[2025-10-19 20:18:31,943][__main__][INFO] - Starting evaluation phase at timestep 1000...
+[2025-10-19 20:18:31,985][__main__][INFO] - Running 5 episodes for statistics...
+[2025-10-19 20:29:04,277][lmdb_utils][INFO] -  LMDB environment closed successfully.
