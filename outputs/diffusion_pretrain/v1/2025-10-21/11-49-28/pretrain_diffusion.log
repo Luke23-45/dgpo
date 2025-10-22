@@ -1,0 +1,58 @@
+[2025-10-21 11:49:28,104][__main__][INFO] - ----------- Configuration -----------
+[2025-10-21 11:49:28,107][__main__][INFO] - seed: 42
+device: cpu
+resume_checkpoint: null
+logging:
+  use_wandb: false
+  wandb_project: dgpo_diffusion_pretrain
+  log_interval_steps: 100
+  val_interval_epochs: 20
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  batch_size: 128
+  num_workers: 0
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+scheduler:
+  schedule_type: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+optimizer:
+  lr: 0.0002
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+training:
+  epochs: 1000
+  use_amp: false
+  ema_decay: 0.999
+  cfg_p_uncond: 0.15
+validation:
+  guidance_scale: 1.5
+  sampling_steps: 50
+
+[2025-10-21 11:49:28,108][__main__][INFO] - ------------------------------------
+[2025-10-21 11:49:28,117][__main__][INFO] - Global seed set to 42
+[2025-10-21 11:49:28,117][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\11-49-28
+[2025-10-21 11:49:28,124][__main__][INFO] - Building datasets...
+[2025-10-21 11:49:28,125][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93_index.json...
+[2025-10-21 11:49:28,129][utils.expert_dataset][INFO] - Loaded 260 episodes, 65576 total valid chunks (Virtually Indexed).
+[2025-10-21 11:49:28,131][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-21 11:49:28,133][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-21 11:49:28,133][__main__][INFO] - Building diffusion policy model...
+[2025-10-21 11:49:28,134][__main__][INFO] - Inferred proprioception dimension from dataset index: 22
+[2025-10-21 11:49:28,757][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-21 11:49:28,828][__main__][INFO] - Starting training from epoch 1...
+[2025-10-21 11:49:28,841][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93.lmdb | mode=RO | file-mode
+[2025-10-21 17:07:23,828][__main__][INFO] - Saved epoch backup to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\11-49-28\checkpoints\backup\backup_epoch_1.pth
+[2025-10-21 17:26:36,722][__main__][WARNING] - Training interrupted by user (KeyboardInterrupt).
+[2025-10-21 17:26:36,724][__main__][INFO] - Performing a final save of the 'last.pth' checkpoint before exiting...
+[2025-10-21 17:26:37,178][__main__][INFO] - Final state for interrupted epoch 2 saved to 'last.pth'.
+[2025-10-21 17:26:37,183][__main__][INFO] - Training process finished. Total runtime: 5.62 hours.

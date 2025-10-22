@@ -1,19 +1,16 @@
-# FILE: configs/pretrain_diffusion_config.yaml
-#
-# Definitive, State-of-the-Art Hydra Configuration for the Final pretrain_diffusion.py
+# FINAL CONFIGURATION (ITERATION 5)
+# Optimized for Model Performance on a High-RAM CPU System
 # ---
-#tensorboard --logdir C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\2025-10-17\21-01-06
-# Hydra specific settings
 hydra:
   run:
-    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/diffusion_pretrain/v1/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
 # ===================================================================
 # 1. RUN MANAGEMENT & REPRODUCIBILITY
 # ===================================================================
 seed: 42
-device: "cpu" # Change to "cuda" when you have a GPU
-resume_checkpoint: null # Set to a path to resume, e.g., "outputs/YYYY-MM-DD/HH-MM-SS/checkpoints/last.pth"
+device: "cpu"
+resume_checkpoint: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-21/11-49-28/checkpoints/last.pth"
 
 # ===================================================================
 # 2. LOGGING
@@ -21,37 +18,37 @@ resume_checkpoint: null # Set to a path to resume, e.g., "outputs/YYYY-MM-DD/HH-
 logging:
   use_wandb: false
   wandb_project: "dgpo_diffusion_pretrain"
-  wandb_run_name: null
-  log_interval_steps: 50
-  val_interval_epochs: 5 #5
+  log_interval_steps: 100       # Log training metrics every 100 steps.
+  val_interval_epochs: 3       # Run a full validation every 20 epochs. A good balance for a long run.
 
 # ===================================================================
-# 3. DATASET
+# 3. DATASET & DATALOADING
 # ===================================================================
 dataset:
-  path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/demos/expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb"
-  val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/demos/expert_expert_run_v1_20k_samples_086fea9add4358a2b0fe91deaa115372.lmdb"
-  batch_size: 16
-  num_workers: 0
+  path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"      # Replace with actual path
+  val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"   # Replace with actual path
+  batch_size: 128               # Maximized for 16GB RAM to get stable gradients.
+  num_workers: 2                # Use 4 parallel workers to hide data loading latency. Set to 0 if errors occur.
 
 # ===================================================================
-# 4. MODEL ARCHITECTURE (Matches the SOTA diffusion_policy.py constructor)
+# 4. MODEL ARCHITECTURE
 # ===================================================================
+# model:
+#   observation_horizon: 2
+#   action_horizon: 8
+#   action_dim: 8
+#   image_feat_dim: 256
+#   d_model: 256                  # Full-sized model for maximum representational capacity.
+#   denoiser_layers: 6
+#   denoiser_heads: 8
 model:
   observation_horizon: 2
   action_horizon: 8
   action_dim: 8
-  
-  # This is the feature dimension PER IMAGE from the ResNetEncoder
-  image_feat_dim: 256
-  
-  # This is the main embedding dimension for the Transformer blocks
-  d_model: 256
-  
-  # Parameters for the DiffusionTransformer (Denoiser)
-  denoiser_layers: 6
-  denoiser_heads: 8
-
+  image_feat_dim: 128             # REDUCED: Smaller feature dimension from ResNet.
+  d_model: 128                  # REDUCED: Dramatically reduces Transformer size and complexity.
+  denoiser_layers: 4            # REDUCED: Fewer layers means faster forward/backward passes.
+  denoiser_heads: 4              # REDUCED: Fewer attention calculations.
 # ===================================================================
 # 5. DIFFUSION SCHEDULER
 # ===================================================================
@@ -65,22 +62,19 @@ scheduler:
 # 6. OPTIMIZER & TRAINING
 # ===================================================================
 optimizer:
-  lr: 1.0e-4
-  weight_decay: 1.0e-6
+  lr: 2.0e-4                    # Scaled learning rate to match the larger batch size.
+  weight_decay: 1.0e-4          # Standard L2 regularization to combat overfitting.
   grad_clip_norm: 1.0
 
 training:
-  epochs: 5 # 500 for the end training
-  use_amp: false # Must be false for CPU
-  ema_decay: 0.999
-
-  # Probability of dropping conditioning for Classifier-Free Guidance training
-  cfg_p_uncond: 0.1
+  epochs: 1000                  # A sufficient number of epochs for full convergence on this dataset size.
+  use_amp: false                # Must be false for CPU.
+  ema_decay: 0.999              # Standard EMA decay for stable model weights.
+  cfg_p_uncond: 0.15              # Increased dropout of conditioning for better CFG performance.
 
 # ===================================================================
 # 7. VALIDATION
 # ===================================================================
 validation:
-  # Guidance scale for sampling during validation and diagnostics
   guidance_scale: 1.5
   sampling_steps: 50

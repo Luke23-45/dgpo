@@ -89,7 +89,7 @@ rl_algorithm:
   # Controls how strongly the actor adheres to the learned distribution.
   # A value between 1.0 (no guidance) and 2.0 is a good starting point.
   guidance_scale: 1.5
-  sampling_steps: 10 
+  sampling_steps: 4 
 
 # ===================================================================
 # 7. OPTIMIZER
@@ -113,7 +113,7 @@ logging:
   eval_freq: 1000
   
   # Number of episodes to run during each evaluation
-  n_eval_episodes: 5
+  n_eval_episodes: 1
   
   # How often to save a video during evaluation (e.g., every 1st evaluation)
-  video_log_freq: 1
+  video_log_freq: 0

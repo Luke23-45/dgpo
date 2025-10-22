@@ -96,17 +96,8 @@ class SoAEpisodeLoader:
             data = np.frombuffer(blob, dtype=dtype).reshape(shape)
         elif compression in ("jpeg", "png"):
             byte_list = pickle.loads(blob)
-            images = [
-                cv2.cvtColor(
-                    # 1. cv2.imdecode produces a BGR image from the bytes
-                    cv2.imdecode(np.frombuffer(b, dtype=np.uint8), cv2.IMREAD_COLOR),
-                    # 2. We immediately convert it to the standard RGB format
-                    cv2.COLOR_BGR2RGB
-                ) for b in byte_list
-            ]
-            # 3. The stacked data is now correctly in RGB format
+            images = [cv2.imdecode(np.frombuffer(b, dtype=np.uint8), cv2.IMREAD_COLOR) for b in byte_list]
             data = np.stack(images)
-
 
         else:
             raise ValueError(f"Unknown compression type: {compression}")
@@ -194,13 +185,9 @@ class ExpertVideoRenderer:
         seed = ep.get('seed', 'N/A')
         is_success = ep.get('success', False)
         
-# ...
         for t in tqdm(range(len(obs_list)), desc=f"Rendering {episode_id}", leave=False):
-            # The loader now provides a BGR frame directly.
-            # We can name the variable appropriately.
-            frame_bgr = obs_list[t]["image_primary"].copy()
-            
-            # NO CONVERSION NEEDED. The frame is already in the correct format for drawing and writing.
+            frame_rgb = obs_list[t]["image_primary"].copy()
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
             text_color = (0, 255, 0) if is_success else (0, 0, 255)
             cv2.putText(frame_bgr, f"ID: {episode_id} | Seed: {seed}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
@@ -208,7 +195,6 @@ class ExpertVideoRenderer:
             cv2.putText(frame_bgr, f"Step: {t}/{len(obs_list) - 1}", (10, H - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
             
             out.write(frame_bgr)
-# ...
 
         out.release()
         logger.info(f"Successfully rendered video to {output_path}")
@@ -273,7 +259,7 @@ if __name__ == "__main__":
     main()
 
 """
-python -m s13 --demo-path  --output-dir videos/inspection --num-episodes 5 --fps 15 --seed 42
+python -m s13 --demo-path   --output-dir videos/inspection --num-episodes 5 --fps 15 --seed 42
 
 
 tests.datasets.visualize_dataset

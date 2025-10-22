@@ -1,21 +1,5 @@
-"""
-utils/expert_dataset.py — robust expert demo generator (scripted-only mode, delta control),
-with on-disk serialization, replay validation, diagnostics, and full metadata support.
-
-Features:
-  - Default use_octo=False (so no OCTO dependency by default)
-  - Strict schema validation for observations & actions
-  - Traceable metadata (seed, URDF hashes, solver version, etc.)
-  - Replay validation: ability to replay stored sim_actions to re-simulate final pose
-  - Support for writing to LMDB (preferred) or fallback pickle format
-  - Balancing control (low-velocity vs motion frames)
-  - Diagnostic logging & histogram exports
-  - Episode-level indexing & split compatibility for training loader
-  - Tags for IK failures / fallback events
-  - Collate function for DataLoader compatibility
-
-**Important: you must install `lmdb` for LMDB support (optional fallback to pickle)**
-"""
+# FILE: utils/expert_dataset.py
+# (State-of-the-Art, SoA, JPEG-Compressed, Virtual-Indexed, LRU-Cached Version)
 
 from __future__ import annotations
 import copy
@@ -32,6 +16,15 @@ import torch
 from torch.utils.data import IterableDataset, Dataset, get_worker_info
 from scipy.spatial.transform import Rotation as R
 from utils.lmdb_utils import open_lmdb_env, close_lmdb_env
+from pathlib import Path
+import functools
+
+# --- SOTA Imports ---
+try:
+    import cv2 # Required for JPEG compression
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
 
 import mujoco
 
@@ -47,12 +40,12 @@ from utils.ik_solver import IKSolver
 from utils.scripted_expert import ScriptedExpert, ExpertConfig, ObjectProfile
 from utils.obs_adapters import build_octo_observation  # You might not need OCTO paths now
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) 
 logger.setLevel(logging.INFO)
 
 # Default configuration thresholds (you may expose these as args)
-REPLAY_POS_TOL = 0.03  # 3 cm tolerance
-REPLAY_ORN_TOL = 5.0 * np.pi / 180.0  # 5 degrees in radians
+REPLAY_POS_TOL = 0.03  # 3 cm tolerance [cite: 219]
+REPLAY_ORN_TOL = 5.0 * np.pi / 180.0  # 5 degrees in radians [cite: 219]
 
 # A minimal observation schema: keys with expected shapes/dtypes
 OBS_SCHEMA = {
@@ -65,284 +58,479 @@ OBS_SCHEMA = {
     "goal_pos_world": ("float32", (3,)),
     "is_grasped": ("float32", (1,)),
     "gripper_qpos": ("float32", (None,)),
-    "robot_base_pos_world": ("float32", (3,)),
-    "base_quat": ("float32", (4,)),
+    "robot_base_pos_world": ("float32", (3,)), 
+    "base_quat": ("float32", (4,)), 
     # you can add more keys if needed
 }
 
+# ==============================================================================
+# 1. STATE-OF-THE-ART DATASET WRITER
+#    (Generates the optimized SoA + JPEG-compressed format)
+# ==============================================================================
+
 class ExpertDatasetWriter:
     """
-    Helper to accumulate episodes and write out on-disk expert demo file plus index & metadata.
-    Supports LMDB format if available; otherwise fallback to pickle.
+    State-of-the-art helper to write expert demos to an optimized on-disk format.
+    
+    This writer implements a "Struct of Arrays" (SoA) format and on-the-fly
+    image compression to create a highly efficient dataset for chunked reading.
+
+    Key Features:
+    - **Struct-of-Arrays (SoA):** Instead of one giant pickle per episode,
+      each modality (e.g., 'actions', 'proprio', 'image_primary') is saved
+      as its own key in LMDB. This allows the reader to load *only* the
+      modalities it needs.
+    - **Image Compression:** 'image_primary' and 'image_wrist' are compressed
+      on-the-fly to JPEG, massively reducing the dataset size (e.g., 25GB -> 2-5GB).
+    - **Instant-On JSON Index:** Creates a single `_index.json` file that
+      contains all metadata (episode lengths, dtypes, shapes, compression)
+      for the entire dataset. The reader *only* loads this file,
+      eliminating any startup scan.
     """
-    def __init__(self, out_dir: str, run_name: Optional[str] = None):
-        os.makedirs(out_dir, exist_ok=True)
+    def __init__(
+        self,
+        out_dir: str,
+        run_name: Optional[str] = None,
+        image_compression: str = "jpeg",
+        jpeg_quality: int = 90
+    ):
+        if not CV2_AVAILABLE:
+            raise ImportError("cv2 (OpenCV) is required for the SOTA ExpertDatasetWriter. Please install it.")
+        if not lmdb:
+            raise ImportError("lmdb is required for the SOTA ExpertDatasetWriter. Please install it.") 
+
+        os.makedirs(out_dir, exist_ok=True) 
         if run_name is None:
             run_name = time.strftime("%Y%m%d_%H%M%S")
         self.run_name = run_name
-        self.out_dir = out_dir
-        self.episodes: List[Dict[str, Any]] = []  # list of per-episode dicts
-        self.metadata: Dict[str, Any] = {}
+        self.out_dir = Path(out_dir)
+        self.episodes_in_memory: List[Dict[str, Any]] = []
+        self.metadata: Dict[str, Any] = {} 
         self._episode_id_counter = 0
-    
-    def add_episode(self, ep_dict: Dict[str, Any]):
-        self.episodes.append(ep_dict)
-    
-    def save(self):
-        # Compute run hash
-        md5 = hashlib.md5(json.dumps(self.metadata, sort_keys=True).encode("utf-8")).hexdigest()
-        base_name = f"expert_{self.run_name}_{md5}"
-        fname = base_name + (".lmdb" if lmdb else ".pkl")
-        fpath = os.path.join(self.out_dir, fname)
-        logger.info(f"Saving expert dataset to {fpath} (episodes: {len(self.episodes)})")
-        
-        if lmdb:
-            self._save_lmdb(fpath)
-        else:
-            self._save_pickle(fpath)
-        
-        # Also write index and config metadata
-        index = []
-        for idx, ep in enumerate(self.episodes):
-            index.append({
-                "episode_id": ep["episode_id"],
-                "length": len(ep["actions"]), # Use the unified "actions" key
-                "success": bool(ep.get("success", False)),
-                "seed": ep.get("seed"),
-                "first_object_pos": ep["obs_list"][0]["object_pos_world"].tolist(),
-            })
-        with open(os.path.join(self.out_dir, base_name + "_index.json"), "w") as f:
-            json.dump(index, f, indent=2)
-        with open(os.path.join(self.out_dir, base_name + "_config.json"), "w") as f:
-            json.dump(self.metadata, f, indent=2)
-        logger.info(f"Index and config metadata saved.")
-    
-    def _save_pickle(self, path: str):
-        import pickle
-        with open(path, "wb") as f:
-            pickle.dump(self.episodes, f)
-    
-    # def _save_lmdb(self, path: str):
-    #     map_size = 10 * (1024**3)  # 10 GB initial map size, can be increased
-    #     env = lmdb.open(path, map_size=map_size, subdir=False, readonly=False, lock=False)
-    #     with env.begin(write=True) as txn:
-    #         for idx, ep in enumerate(self.episodes):
-    #             key = f"{idx:08d}".encode("ascii")
-    #             # Serialize the entire episode dictionary into a binary blob using pickle
-    #             val = pickle.dumps(ep)
-    #             txn.put(key, val)
-    #     env.sync()
-    #     env.close()
-    def _save_lmdb(self, path: str):
-        # Ensure parent dir exists (do NOT create the .lmdb file as a directory)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
 
-        # Use our robust helper — on Windows subdir=False is required for single-file lmdb
-        env = open_lmdb_env(path, readonly=False, lock=True, map_size_gb=1.0, subdir=False)
+        self.image_compression = image_compression
+        self.jpeg_quality = jpeg_quality
+        self.index_data = {"episodes": []}
+
+        logger.info(f"SOTA ExpertDatasetWriter initialized. Compression: {self.image_compression}")
+
+    def add_episode(self, ep_dict: Dict[str, Any]):
+        """
+        Adds a completed episode (in the old "List of Structs" format)
+        to the in-memory buffer, ready to be written.
+        """
+        self.episodes_in_memory.append(ep_dict)
+
+
+    def save_batch(self, episode_list: List[Dict[str, Any]]):
+        """Append a list of episodes directly to LMDB (safe for large datasets)."""
+        if not episode_list:
+            return
+
+        # construct paths like in save() but allow appending to existing file if present
+        meta_blob = json.dumps(self.metadata or {}, sort_keys=True)
+        md5 = hashlib.md5(meta_blob.encode("utf-8")).hexdigest()[:8]
+        base_name = f"expert_{self.run_name}_{md5}"
+
+        if not hasattr(self, "_lmdb_path"):
+            meta_blob = json.dumps(self.metadata or {}, sort_keys=True)
+            md5 = hashlib.md5(meta_blob.encode("utf-8")).hexdigest()[:8]
+            
+            self._lmdb_path = self.out_dir / (base_name + ".lmdb")
+
+        lmdb_path = self._lmdb_path
+
+        # open env (match same args as save())
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=2.0, subdir=False)
         try:
             with env.begin(write=True) as txn:
-                for idx, ep in enumerate(self.episodes):
-                    key = f"{idx:08d}".encode("ascii")
-                    val = pickle.dumps(ep)
-                    txn.put(key, val)
-            # durable flush
+                for ep_dict in episode_list:
+                    prefix = f"ep_{self._episode_id_counter:06d}"
+                    self._episode_id_counter += 1
+                    ep_meta = {"episode_id": prefix, "length": len(ep_dict["actions"]), "success": bool(ep_dict.get("success", False)), "seed": ep_dict.get("seed", None), "modalities": {}}
+                    self._write_raw_numpy(txn, ep_meta, prefix, "actions", np.array(ep_dict["actions"], dtype=np.float32))
+                    self._write_raw_numpy(txn, ep_meta, prefix, "proprio", np.stack([o["proprio"] for o in ep_dict["obs_list"]]).astype(np.float32))
+                    self._write_compressed_images(txn, ep_meta, prefix, "image_primary", [o["image_primary"] for o in ep_dict["obs_list"]])
+                    self._write_compressed_images(txn, ep_meta, prefix, "image_wrist", [o["image_wrist"] for o in ep_dict["obs_list"]])
+                    self.index_data["episodes"].append(ep_meta)
             env.sync()
-            logger.info(f"LMDB successfully written: {path} (episodes={len(self.episodes)})")
         finally:
             close_lmdb_env(env)
-    @staticmethod
-    def _np_encoder(obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        raise TypeError(f"Unserializable object {obj} of type {type(obj)}")
+        # persist partial index/config if you want:
+        json_path = self.out_dir / (base_name + "_index.json")
+        with open(json_path, "w") as f:
+            json.dump(self.index_data, f)
 
+
+    def save(self):
+        """
+        Processes all in-memory episodes, converts them to the optimized
+        SoA format, and writes them to the LMDB file and JSON index.
+        """
+        if not self.episodes_in_memory:
+            logger.warning("No episodes to save.")
+            return
+
+        # --- 1. Prepare File Paths ---
+        md5 = hashlib.md5(json.dumps(self.metadata, sort_keys=True).encode("utf-8")).hexdigest()
+        base_name = f"expert_{self.run_name}_{md5}"
+        lmdb_path = self.out_dir / (base_name + ".lmdb")
+        json_path = self.out_dir / (base_name + "_index.json")
+        config_path = self.out_dir / (base_name + "_config.json")
+        logger.info(f"Saving {len(self.episodes_in_memory)} episodes to {lmdb_path}...")
+
+        # --- 2. Open LMDB Environment ---
+        # Use a large map size for a 25GB+ dataset. 50GB is safe.
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=16.0, subdir=False) 
+        
+        try:
+            with env.begin(write=True) as txn: 
+                for ep_idx, ep_dict in enumerate(self.episodes_in_memory):
+                    episode_key_prefix = f"ep_{ep_idx:06d}"
+                    ep_meta = {
+                        "episode_id": episode_key_prefix,
+                        "length": len(ep_dict["actions"]), 
+                        "success": bool(ep_dict.get("success", False)), 
+                        "seed": ep_dict.get("seed", None),
+                        "modalities": {}
+                    }
+
+                    # --- 3. Process and Write Modalities (SoA) ---
+                    
+                    # A) 'actions' (Raw Numpy)
+                    actions_arr = np.array(ep_dict["actions"], dtype=np.float32) 
+                    self._write_raw_numpy(txn, ep_meta, episode_key_prefix, "actions", actions_arr)
+
+                    # B) 'proprio' (Raw Numpy)
+                    proprio_arr = np.stack([o["proprio"] for o in ep_dict["obs_list"]]).astype(np.float32) 
+                    self._write_raw_numpy(txn, ep_meta, episode_key_prefix, "proprio", proprio_arr)
+                    
+                    # C) 'image_primary' (Compressed Images)
+                    img_p_list = [o["image_primary"] for o in ep_dict["obs_list"]] 
+                    self._write_compressed_images(txn, ep_meta, episode_key_prefix, "image_primary", img_p_list)
+
+                    # D) 'image_wrist' (Compressed Images)
+                    img_w_list = [o["image_wrist"] for o in ep_dict["obs_list"]] 
+                    self._write_compressed_images(txn, ep_meta, episode_key_prefix, "image_wrist", img_w_list)
+
+                    # --- 4. Add this episode's metadata to the main index ---
+                    self.index_data["episodes"].append(ep_meta)
+
+            env.sync() 
+            logger.info("LMDB write complete.")
+        
+        finally:
+            close_lmdb_env(env) 
+
+        # --- 5. Write the final JSON index and config ---
+        self.index_data["metadata"] = self.metadata
+        with open(json_path, "w") as f:
+            json.dump(self.index_data, f) # No indent for smaller file size
+        
+        with open(config_path, "w") as f:
+            json.dump(self.metadata, f, indent=2) 
+        
+        logger.info(f"Dataset saved. Index: {json_path}")
+
+    def _write_raw_numpy(self, txn, ep_meta, prefix, name, arr):
+        """Helper to write a raw numpy array."""
+        key = f"{prefix}_{name}"
+        txn.put(key.encode("ascii"), arr.tobytes()) 
+        ep_meta["modalities"][name] = {
+            "key": key,
+            "compression": "raw",
+            "dtype": str(arr.dtype),
+            "shape": list(arr.shape)
+        }
+
+    def _write_compressed_images(self, txn, ep_meta, prefix, name, img_list):
+        """Helper to compress and write a list of image arrays."""
+        if not img_list:
+            return
+            
+        key = f"{prefix}_{name}"
+        if self.image_compression == "jpeg":
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
+            encode_fn = lambda img: cv2.imencode(".jpg", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))[1].tobytes()
+        else: # 'png' or default
+            encode_param = [int(cv2.IMWRITE_PNG_COMPRESSION), 1] # Fast PNG
+            encode_fn = lambda img: cv2.imencode(".png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))[1].tobytes()
+        
+        # This can be parallelized with multiprocessing.Pool for max speed
+        byte_list = [encode_fn(img) for img in img_list]
+        
+        # We pickle the *list of byte strings*
+        txn.put(key.encode("ascii"), pickle.dumps(byte_list)) 
+        
+        ep_meta["modalities"][name] = {
+            "key": key,
+            "compression": self.image_compression,
+            "dtype": str(img_list[0].dtype),
+            "shape": [len(img_list), *img_list[0].shape]
+        }
+
+# ==============================================================================
+# 2. STATE-OF-THE-ART DATASET READER
+#    (Consumes the optimized format)
+# ==============================================================================
 
 class ExpertTrajectoryDataset(Dataset):
     """
-    State-of-the-art loader for expert demos.
+    State-of-the-art, high-performance loader for expert demonstrations
+    stored in the optimized (SoA, compressed, virtually-indexed) format.
+
+    This class is designed for maximum throughput and minimal startup time
+    with multi-GB/TB datasets.
 
     Features:
-    - Loads data from LMDB or pickle files.
-    - Slices full episodes into structured chunks of (observation_horizon, action_horizon).
-    - Correctly handles multi-view images (primary and wrist).
-    - Designed for use with diffusion policy training.
+    - **Instant-On (Zero-Scan):** Reads a pre-computed `_index.json` file.
+      It *never* scans the LMDB file at startup.
+    - **Virtual Indexing:** Uses O(N_episodes) memory for indexing,
+      not O(N_chunks). It computes chunk-to-episode mappings in O(log N)
+      time during `__getitem__`.
+    - **SoA Chunking:** Loads *only* the required data chunks (e.g.,
+      2 frames of 'proprio', 8 frames of 'actions') from the SoA database,
+      avoiding any overhead from reading the full episode.
+    - **On-the-Fly Decompression:** Decompresses JPEG/PNG images in the
+      `DataLoader` workers, leveraging multiple CPU cores and minimizing
+      I/O bottlenecks.
+    - **Per-Worker LRU Caching:** Uses a bounded LRU cache (`@functools.lru_cache`)
+      to keep hot *full-episode-modalities* (like an episode's entire 'proprio'
+      array) in each worker's memory. This prevents OOM errors while
+      massively speeding up subsequent accesses to the same episode.
     """
-    def __init__(self, demo_path: str, observation_horizon: int, action_horizon: int):
-        self.demo_path = demo_path
+    def __init__(self, demo_path: str, observation_horizon: int, action_horizon: int): 
+        self.demo_path = Path(demo_path)
         self.observation_horizon = observation_horizon
         self.action_horizon = action_horizon
-        self.is_lmdb = lmdb and demo_path.endswith(".lmdb")
+        self.is_lmdb = lmdb and self.demo_path.suffix == ".lmdb" 
 
+        if not self.is_lmdb:
+            raise ValueError("SOTA ExpertTrajectoryDataset only supports LMDB (.lmdb) format.")
+        if not CV2_AVAILABLE:
+            raise ImportError("cv2 (OpenCV) is required for the SOTA ExpertTrajectoryDataset to decompress images.")
+
+        # --- 1. Load the JSON Index ---
+        self.index_path = self.demo_path.parent / f"{self.demo_path.stem}_index.json"
+
+        if not self.index_path.exists():
+            raise FileNotFoundError(
+                f"Missing required index file: {self.index_path}\n"
+                f"Please regenerate your dataset with the new ExpertDatasetWriter."
+            )
         
-        # In-memory cache for loaded episodes (especially for pickle mode)
-        self._episode_cache = {} 
-        self._lmdb_env = None
-        self._lmdb_txn = None
+        logger.info(f"Loading index from {self.index_path}...")
+        with open(self.index_path, "r") as f:
+            index_data = json.load(f)
 
-        # --- Build a chunk-aware index map ---
-        # First, we need to get the length of each episode.
-        episode_lengths = []
-        if self.is_lmdb:
-            # For LMDB, we read the index from the transaction length
-            env = open_lmdb_env(self.demo_path, readonly=True, lock=False, readahead=False)
-            with env.begin() as txn:
-                num_episodes = txn.stat()['entries']
-                for i in range(num_episodes):
-                    key = f"{i:08d}".encode("ascii")
-                    blob = txn.get(key)
-                    ep = pickle.loads(blob)
-                    episode_lengths.append(len(ep["actions"]))
-            env.close()
-        else:
-            # For pickle, we load the whole file once
-            with open(demo_path, "rb") as f:
-                self.episodes = pickle.load(f)
-            episode_lengths = [len(ep["actions"]) for ep in self.episodes]
+        self.episode_metadata = index_data["episodes"]
+        self.metadata = index_data.get("metadata", {})
 
-        self.index_map = []
-        for ep_idx, ep_len in enumerate(episode_lengths):
+        # --- 2. Build the Virtual Index ---
+        # We calculate the number of valid chunks in each episode.
+        self.chunks_per_episode = []
+        for ep_meta in self.episode_metadata:
+            ep_len = ep_meta["length"]
             # A valid chunk starts at an index `t` where there are enough past
             # observations and enough future actions.
             # First possible start index `t`: self.observation_horizon - 1
             # Last possible start index `t`: ep_len - self.action_horizon
-            start_idx = self.observation_horizon - 1
-            end_idx = ep_len - self.action_horizon
-            for t in range(start_idx, end_idx + 1):
-                self.index_map.append((ep_idx, t))
+            start_t = self.observation_horizon - 1
+            end_t = ep_len - self.action_horizon
+            num_chunks = (end_t - start_t) + 1
+            # Ensure we don't have negative chunks for short episodes
+            self.chunks_per_episode.append(max(0, num_chunks))
+
+        self.total_chunks = sum(self.chunks_per_episode)
+        
+        # The cumulative sum is the core of our virtual index.
+        # It maps a global chunk `idx` to an `ep_idx`.
+        self._cumulative_chunks = np.cumsum(self.chunks_per_episode)
+
+        # Worker-local state (initialized lazily)
+        self._lmdb_env = None 
         
         logger.info(
-            f"Loaded expert demos: {len(episode_lengths)} episodes, "
-            f"{len(self.index_map)} total valid chunks."
-        )
-
-    def __len__(self):
-        return len(self.index_map)
-
-    # def _get_episode(self, ep_idx: int) -> Dict[str, Any]:
-    #     """Helper to get an episode, using cache if available."""
-    #     if ep_idx in self._episode_cache:
-    #         return self._episode_cache[ep_idx]
-        
-    #     if self.is_lmdb:
-    #         if self._lmdb_env is None:
-    #             self._lmdb_env = lmdb.open(self.demo_path, readonly=True, lock=False, readahead=False, meminit=False)
-    #             self._lmdb_txn = self._lmdb_env.begin(write=False)
-    #         key = f"{ep_idx:08d}".encode("ascii")
-    #         blob = self._lmdb_txn.get(key)
-    #         ep = pickle.loads(blob)
-    #         self._episode_cache[ep_idx] = ep # Cache the loaded episode
-    #         return ep
-    #     else:
-    #         # For pickle, all episodes are already in memory
-    #         return self.episodes[ep_idx]
-
-    def _get_episode(self, ep_idx: int) -> Dict[str, Any]:
-        if ep_idx in self._episode_cache:
-            return self._episode_cache[ep_idx]
-
-        if self.is_lmdb:
-            # lazily open environment once per process
-            if self._lmdb_env is None:
-                # readahead=False improves concurrency; lock=False avoids writer locks for readers
-                self._lmdb_env = open_lmdb_env(self.demo_path, readonly=True, lock=False, readahead=False, subdir=False)
-            with self._lmdb_env.begin(write=False) as txn:
-                key = f"{ep_idx:08d}".encode("ascii")
-                blob = txn.get(key)
-                if blob is None:
-                    raise KeyError(f"Missing LMDB key {key!r} in {self.demo_path}")
-                ep = pickle.loads(blob)
-                self._episode_cache[ep_idx] = ep
-                return ep
-        else:
-            return self.episodes[ep_idx]
-    
-    def _init_lmdb(self):
-        if self._env is None:
-            self._env = lmdb.open(self.demo_path, readonly=True, lock=False, readahead=False, meminit=False)
-            self._txn = self._env.begin(write=False)
-    def __del__(self):
-        if getattr(self, "_lmdb_env", None) is not None:
-            close_lmdb_env(self._lmdb_env)
-            self._lmdb_env = None
+            f"Loaded {len(self.episode_metadata)} episodes, "
+            f"{self.total_chunks} total valid chunks (Virtually Indexed)."
+        ) 
   
-    def __getitem__(self, idx: int) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
-        ep_idx, t = self.index_map[idx]
-        ep = self._get_episode(ep_idx)
+    def get_proprioception_dim(self) -> int:
+        """
+        Returns the dimension of the 'proprio' modality from the dataset's metadata.
+        This is a fast, metadata-only operation.
+        """
+        if not self.episode_metadata:
+            # This should not happen if the index loaded correctly
+            raise RuntimeError("Dataset index is empty, cannot infer proprioception dim.")
+            
+        # Get the metadata for the 'proprio' modality from the first episode.
+        # We assume this is consistent across all episodes.
+        try:
+            proprio_meta = self.episode_metadata[0]['modalities']['proprio']
+            # The shape is [T, Dim]. We want the last element.
+            return proprio_meta['shape'][-1]
+        except (KeyError, IndexError):
+            raise RuntimeError(
+                "Could not infer proprioception dimension from the dataset's index.json. "
+                "Ensure 'proprio' modality with a valid 'shape' is present in the index."
+            )
+  
+    def __len__(self):
+        return self.total_chunks 
+
+    def _init_lmdb(self):
+        """Initializes the LMDB environment for the current worker."""
+        if self._lmdb_env is None:
+            self._lmdb_env = open_lmdb_env(
+                str(self.demo_path),
+                readonly=True,
+                lock=False,      # No locks, we are read-only 
+                readahead=False, # False = better for random access [cite: 246]
+                subdir=False     # Our DB is a single file
+            ) 
+            logger.debug(f"Worker {os.getpid()} opened LMDB env.")
+
+    def __del__(self):
+        """Ensures the LMDB environment is closed when a worker is destroyed."""
+        if getattr(self, "_lmdb_env", None) is not None:
+            close_lmdb_env(self._lmdb_env) 
+            self._lmdb_env = None
+
+    def _get_lmdb_blob(self, key: str) -> bytes:
+        """Gets a raw byte blob from LMDB, initializing the env if needed."""
+        self._init_lmdb()
+        with self._lmdb_env.begin(write=False) as txn:
+            blob = txn.get(key.encode("ascii"))
+            if blob is None:
+                raise KeyError(f"Missing LMDB key {key!r} in {self.demo_path}") 
+            return blob
+
+    @functools.lru_cache(maxsize=128) # Bounded, per-worker cache
+    def _get_full_modality_array(self, key: str, compression: str, dtype_str: str, shape_list: list) -> np.ndarray:
+        """
+        This is the cached, expensive part. It loads an *entire* modality
+        (e.g., all 'proprio' for one episode) from LMDB and decodes it.
+        The LRU cache ensures we don't reload this if we need another
+        chunk from the same episode.
+        """
+        blob = self._get_lmdb_blob(key)
+        dtype = np.dtype(dtype_str)
+        shape = tuple(shape_list)
+
+        if compression == "raw":
+            data = np.frombuffer(blob, dtype=dtype).reshape(shape)
+        elif compression in ("jpeg", "png"):
+            # Unpickle the list of byte strings
+            byte_list = pickle.loads(blob)
+            
+            # Decode images. This is the CPU-heavy part.
+            # Note: cv2 decodes to BGR by default.
+            images = [cv2.imdecode(np.frombuffer(b, dtype=np.uint8), cv2.IMREAD_COLOR) for b in byte_list]
+            # cv2.imdecode returns images in BGR. Convert each to RGB by reversing last axis.
+            # Using numpy slicing is faster and avoids cv2.cvtColor errors on 4D arrays.
+            data = np.stack(images)  # shape (N, H, W, 3), dtype=uint8
+            data = data[..., ::-1]   # BGR -> RGB by channel reversal
+        else:
+            raise ValueError(f"Unknown compression type: {compression}")
         
-        # --- Slicing Logic for Chunks ---
+        return data
+
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, np.ndarray], np.ndarray]: 
+        if not (0 <= idx < self.total_chunks):
+            raise IndexError(f"Index {idx} out of range for dataset with {self.total_chunks} chunks.")
+
+        # --- 1. Virtual Indexing (O(log N) lookup) ---
+        # Find the first episode index where the cumulative sum is >= idx
+        ep_idx = np.searchsorted(self._cumulative_chunks, idx, side='right')
+        
+        # Get the start index of this episode's chunks
+        ep_start_chunk_idx = self._cumulative_chunks[ep_idx - 1] if ep_idx > 0 else 0
+        
+        # Get the local timestep `t` within the episode
+        local_chunk_idx = idx - ep_start_chunk_idx
+        t = (self.observation_horizon - 1) + local_chunk_idx
+        
+        # Get the metadata for this specific episode
+        ep_meta = self.episode_metadata[ep_idx]
+
+        # --- 2. Slicing Logic (Identical to original) ---
         obs_start_idx = t - self.observation_horizon + 1
         obs_end_idx = t + 1
         action_start_idx = t
-        action_end_idx = t + self.action_horizon
+        action_end_idx = t + self.action_horizon 
 
-        # Slice the observation and action lists for the chunk
-        obs_chunk_list = ep["obs_list"][obs_start_idx:obs_end_idx]
-        action_chunk = np.array(ep["actions"][action_start_idx:action_end_idx], dtype=np.float32)
+        # --- 3. SOTA Chunk Loading ---
+        # We load *only* the slices we need from the cached full arrays.
+        obs_chunk = {}
+        for key in ["image_primary", "image_wrist", "proprio"]: 
+            meta = ep_meta["modalities"][key]
+            
+            # This call is fast:
+            # 1. Hits the LRU cache.
+            # 2. If miss, loads/decodes the *full* modality.
+            # 3. Caches the full modality.
+            full_array = self._get_full_modality_array(
+                meta["key"], meta["compression"], meta["dtype"], tuple(meta["shape"])
+            )
+            
+            # This numpy slice is a fast, C-backend view operation
+            obs_chunk[key] = full_array[obs_start_idx:obs_end_idx]
 
-        # --- Stack Multi-View Images and Proprioception ---
-        # This creates the final chunked numpy arrays
-        obs_chunk = {
-            "image_primary": np.stack([o["image_primary"] for o in obs_chunk_list]),
-            "image_wrist": np.stack([o["image_wrist"] for o in obs_chunk_list]),
-            "proprio": np.stack([o["proprio"] for o in obs_chunk_list]),
-        }
-        
-        return obs_chunk, action_chunk
-    
-    @staticmethod
-    def collate_fn(batch: List[Tuple[Dict[str, np.ndarray], np.ndarray]]):
-        """
-        Collates a batch of chunked data into a single PyTorch tensor dictionary.
-        Input shape (example):
-          - obs["image_primary"]: (B, H_obs, H, W, C)
-          - action: (B, H_act, A_dim)
-        """
-        obs_batch = {}
-        # Get all observation keys from the first sample (e.g., 'image_primary', 'image_wrist', 'proprio')
-        obs_keys = batch[0][0].keys()
-        
-        for key in obs_keys:
-            # Stack all observations for this key across the batch dimension
-            obs_batch[key] = torch.from_numpy(np.stack([sample[0][key] for sample in batch]))
+        # Load the action chunk
+        meta_actions = ep_meta["modalities"]["actions"]
+        full_actions = self._get_full_modality_array(
+            meta_actions["key"], meta_actions["compression"], meta_actions["dtype"], tuple(meta_actions["shape"])
+        )
+        action_chunk = full_actions[action_start_idx:action_end_idx].astype(np.float32)
 
-        # Stack all action chunks across the batch dimension
-        action_batch = torch.from_numpy(np.stack([sample[1] for sample in batch]))
-        
-        return obs_batch, action_batch
-    
-def collate_fn(batch: List[Tuple[Dict[str, np.ndarray], np.ndarray]]):
+        return obs_chunk, action_chunk 
+
+
+# ==============================================================================
+# 3. COLLATE FUNCTION (Unchanged, but required for completeness)
+# ==============================================================================
+
+def collate_fn(batch: List[Tuple[Dict[str, np.ndarray], np.ndarray]]): 
     """
     Collates a batch of chunked data into a single PyTorch tensor dictionary.
+    This function is compatible with both the old and new dataset.
+    
     Input shape (example):
-      - sample[0] (obs): Dict with arrays like (H_obs, H, W, C)
-      - sample[1] (action): Array like (H_act, A_dim)
+      - sample[0] (obs): Dict with arrays like (H_obs, H, W, C) 
+      - sample[1] (action): Array like (H_act, A_dim) 
     Returns:
-      - obs_batch: Dict with tensors like (B, H_obs, H, W, C)
-      - action_batch: Tensor like (B, H_act, A_dim)
+      - obs_batch: Dict with tensors like (B, H_obs, H, W, C) 
+      - action_batch: Tensor like (B, H_act, A_dim) 
     """
-    if not batch:
+    if not batch: 
         return {}, torch.empty(0)
 
     obs_batch = {}
     # Get all observation keys from the first sample
-    obs_keys = batch[0][0].keys()
+    obs_keys = batch[0][0].keys() 
     
     for key in obs_keys:
         # Stack all observations for this key across the batch dimension
         # Converts numpy arrays to torch tensors automatically
-        obs_batch[key] = torch.from_numpy(np.stack([sample[0][key] for sample in batch]))
+        obs_batch[key] = torch.from_numpy(np.stack([sample[0][key] for sample in batch])) 
 
     # Stack all action chunks across the batch dimension
-    action_batch = torch.from_numpy(np.stack([sample[1] for sample in batch]))
+    action_batch = torch.from_numpy(np.stack([sample[1] for sample in batch])) 
     
-    return obs_batch, action_batch
+    return obs_batch, action_batch 
 
 
-class ExpertDataset(IterableDataset):
+# ==============================================================================
+# 4. ONLINE DATA GENERATOR (Unchanged, it *produces* data for the writer)
+# ==============================================================================
+
+class ExpertDataset(IterableDataset): 
     """
     IterableDataset version that generates expert demos online, and (optionally) writes them out.
-    After generation, you may save via ExpertDatasetWriter.
-    This class yields (obs, data_action) for training.
+    [cite: 258]
+    This class is the *source* of data for the `ExpertDatasetWriter`.
+    It remains unchanged.
     """
     def __init__(
         self,
@@ -353,7 +541,7 @@ class ExpertDataset(IterableDataset):
         object_grasp_width: float = 0.6,
         env_xml_path: Optional[str] = None,
         base_seed: Optional[int] = None,
-        max_samples_per_epoch: Optional[int] = None,
+        max_samples_per_epoch: Optional[int] = None, 
         skip_on_error: bool = True,
         warmup: bool = False,
         scripted_cfg: ExpertConfig = ExpertConfig(),
@@ -362,8 +550,8 @@ class ExpertDataset(IterableDataset):
         # new config options:
         p_low_vel: float = 0.4,
         p_motion_frame: float = 0.6,
-        min_keep_per_state: int = 5,
-        diagnostics_dir: Optional[str] = None,
+        min_keep_per_state: int = 5, 
+        diagnostics_dir: Optional[str] = None, 
     ):
         super().__init__()
         self.urdf_path = urdf_path
@@ -373,7 +561,7 @@ class ExpertDataset(IterableDataset):
         self.max_samples_per_epoch = max_samples_per_epoch
         self.skip_on_error = skip_on_error
         self.warmup = warmup
-        self.scripted_cfg = scripted_cfg
+        self.scripted_cfg = scripted_cfg 
         self.yield_full_obs = yield_full_obs
         self.action_scaling_factor = action_scaling_factor
         
@@ -383,27 +571,28 @@ class ExpertDataset(IterableDataset):
         self.min_keep_per_state = min_keep_per_state
         
         # diagnostics
-        self.diagnostics_dir = diagnostics_dir
+        self.diagnostics_dir = diagnostics_dir 
         if diagnostics_dir:
-            os.makedirs(diagnostics_dir, exist_ok=True)
+            os.makedirs(diagnostics_dir, exist_ok=True) 
         self.object_profile = ObjectProfile(
             size=np.array(object_size, dtype=np.float32),
             grasp_width_normalized=object_grasp_width
         )
         # worker-local state (initialized lazily in __iter__)
         self._worker_state_initialized = False
-        self._env = None
-        self._ik_solver = None
-        self._scripted_expert: Optional[ScriptedExpert] = None
-        self._episode_buffer: List[Tuple[Dict, np.ndarray]] = []
-        self.episodes: List[Dict[str, Any]] = []
+        
+        self._env = None 
+        self._ik_solver = None 
+        self._scripted_expert: Optional[ScriptedExpert] = None 
+        self._episode_buffer: List[Tuple[Dict, np.ndarray]] = [] 
+        self.episodes: List[Dict[str, Any]] = [] 
 
         
-        logger.info("ExpertDataset (improved) initialized (lazy).")
+        logger.info("ExpertDataset (improved) initialized (lazy).") 
     
-    def _init_worker_state(self):
+    def _init_worker_state(self): 
         # --- START OF PATCH, STEP 2 ---
-        # This replaces the entire old method.
+        # This replaces the entire old method. 
         if self._worker_state_initialized:
             return
 
@@ -411,13 +600,13 @@ class ExpertDataset(IterableDataset):
         self._worker_id = worker_info.id if worker_info is not None else 0
         
         # 1. Create a single, unique, deterministic master seed for this entire worker process.
-        #    This is the root of all randomness for this worker.
-        seed = self.base_seed if self.base_seed is not None else int(time.time() * 1e9)
+        #    This is the root of all randomness for this worker. [cite: 267]
+        seed = self.base_seed if self.base_seed is not None else int(time.time() * 1e9) 
         self._worker_master_seed = seed + self._worker_id
         
         # 2. Create a dedicated, seeded random number generator (RNG) for this worker.
-        #    This will be used for any probabilistic logic (like data filtering) to make it reproducible.
-        self._rng = Generator(PCG64(self._worker_master_seed))
+        #    This will be used for any probabilistic logic (like data filtering) to make it reproducible. [cite: 269]
+        self._rng = Generator(PCG64(self._worker_master_seed)) 
         
         logger.info(f"[Worker {self._worker_id}] Initializing with master seed {self._worker_master_seed}")
         
@@ -427,82 +616,84 @@ class ExpertDataset(IterableDataset):
             f"ACTION_SCALING_FACTOR = {self._env.ACTION_SCALING_FACTOR}"
         )
         self._env.set_object_size(self.object_profile.size)
-        self._ik_solver = IKSolver(urdf_path=self.urdf_path)
+        self._ik_solver = IKSolver(urdf_path=self.urdf_path) 
         self._scripted_expert = ScriptedExpert(
             object_profile=self.object_profile,
             cfg=self.scripted_cfg
-        )
+        ) 
         
-        if self.warmup:
+        if self.warmup: 
             logger.info(f"[Worker {self._worker_id}] Warmup (scripted only).")
             try:
-                # REPLACE the hardcoded dimension with a dynamic lookup from the env.
+                # REPLACE the hardcoded dimension with a dynamic lookup from the env. [cite: 272]
                 dummy_obs = {
-                    "image_primary": np.zeros((256, 256, 3), dtype=np.uint8),
+                    "image_primary": np.zeros((256, 256, 3), dtype=np.uint8), 
                     # PandaEnv now has a `proprio_dim` attribute.
-                    "proprio": np.zeros(self._env.proprio_dim, dtype=np.float32),
-                    "task_completed": np.array([0.0], dtype=np.float32),
+                    "proprio": np.zeros(self._env.proprio_dim, dtype=np.float32), 
+                    "task_completed": np.array([0.0], dtype=np.float32), 
                 }
                 _ = build_octo_observation(dummy_obs)
             except Exception as e:
                 logger.warning("Warmup failed: " + str(e))
-        
-        self._worker_state_initialized = True
+         
+        self._worker_state_initialized = True 
         self._samples_yielded = 0
         self._episode_id_counter = 0  # Add this
         self._episode_attempt_counter = 0 # Use this for seeding
-        logger.info(f"[Worker {self._worker_id}] State initialization complete.")
+        logger.info(f"[Worker {self._worker_id}] State initialization complete.") 
+
     def get_last_seed(self) -> Optional[int]:
         # Returns the seed used for the *last completed or currently running* episode generation attempt.
-        # Assumes _init_worker_state sets _worker_master_seed and _episode_attempt_counter
+        # Assumes _init_worker_state sets _worker_master_seed and _episode_attempt_counter [cite: 276]
         if not hasattr(self, '_worker_master_seed') or not hasattr(self, '_episode_attempt_counter'):
              # Should not happen if worker is initialized correctly
              return None
         # The seed for the *next* episode would be master + attempts.
-        # The seed for the *current or last* attempt is master + attempts - 1.
+        # The seed for the *current or last* attempt is master + attempts - 1. [cite: 277]
         if self._episode_attempt_counter > 0:
-            return (self._worker_master_seed + self._episode_attempt_counter - 1) & 0x7FFFFFFF
+            return (self._worker_master_seed + self._episode_attempt_counter - 1) & 0x7FFFFFFF 
         else:
              # If no attempts made yet, return the initial seed planned
              return self._worker_master_seed & 0x7FFFFFFF  
-    def _check_schema(self, obs: Dict[str, np.ndarray]):
+    
+    def _check_schema(self, obs: Dict[str, np.ndarray]): 
         for k, (dtype, shape_tpl) in OBS_SCHEMA.items():
             if k not in obs:
                 raise ValueError(f"Missing OBS_SCHEMA key {k}")
             arr = obs[k]
             if arr.dtype != np.dtype(dtype):
-                raise ValueError(f"Key {k} has dtype {arr.dtype}, expected {dtype}")
+                raise ValueError(f"Key {k} has dtype {arr.dtype}, expected {dtype}") 
             # shape check (only lower dims)
             if shape_tpl[0] is not None and arr.ndim < len(shape_tpl):
                 raise ValueError(f"Key {k} has shape {arr.shape}, expected at least dims {shape_tpl}")
             # we could enforce exact dims for fixed-length keys
     
-    def _generate_one(self, current_obs: Dict) -> Tuple[Dict, np.ndarray, np.ndarray, bool]:
+    def _generate_one(self, current_obs: Dict) -> Tuple[Dict, np.ndarray, np.ndarray, bool]: 
         """
         Produces (obs, sim_action, data_action, ik_failed_flag).
-        sim_action: absolute action used to step simulator
-        data_action: normalized delta to train on
-        ik_failed_flag: True if IK solver used fallback
+        sim_action: absolute action used to step simulator [cite: 281]
+        data_action: normalized delta to train on [cite: 281]
+        ik_failed_flag: True if IK solver used fallback [cite: 281]
         """
         # Validate schema on input (optional)
         # self._check_schema(current_obs)
         
         # Use scripted expert always
-        pose_world, gripper_act = self._scripted_expert.get_target_pose(current_obs)
-        
+        pose_world, gripper_act = self._scripted_expert.get_target_pose(current_obs) 
+         
         # Transform world pose into base frame
         N_SUBSTEPS = 20
         effective_dt = self._env.model.opt.timestep * N_SUBSTEPS
         max_dq = self._env.ACTION_SCALING_FACTOR / effective_dt
         arm_joint_ids = np.arange(7) # Assuming the first 7 joints are the arm
         if self._env.data.time < 1e-6: # Log only at the beginning of an episode
-             logger.info(
+            logger.info( 
                  f"[worker {get_worker_info().id if get_worker_info() else 0}] "
                  f"IK params calculated: effective_dt={effective_dt:.4f}, "
                  f"max_dq={max_dq:.4f}"
-             )
+            ) 
         # 2. Call compute_delta_action to get the data_action directly.
-        delta_arm_action = self._ik_solver.compute_delta_action(
+        delta_arm_action = self._ik_solver.compute_delta_action( 
             target_ee_pose=pose_world,
             model=self._env.model,
             data=self._env.data,
@@ -510,14 +701,15 @@ class ExpertDataset(IterableDataset):
             joint_qpos_indices=arm_joint_ids,
             effective_dt=effective_dt,
             max_dq=max_dq
-        )
-        
-        # 3. For a direct delta pipeline, the sim_action IS the data_action.
-        action = np.concatenate([delta_arm_action, [gripper_act]]).astype(np.float32)
+        ) 
+         
+        # 3. For a direct delta pipeline, the sim_action IS the data_action. [cite: 285]
+        action = np.concatenate([delta_arm_action, [gripper_act]]).astype(np.float32) 
 
-        # 4. The concept of IK failure is less direct here. We can assume it doesn't
-        #    fail in the same way, or check if the returned action is all zeros.
-        ik_failed = np.linalg.norm(delta_arm_action) < 1e-4
+        # 4. The concept of IK failure is less direct here. [cite: 287]
+        #    We can assume it doesn't
+        #    fail in the same way, or check if the returned action is all zeros. [cite: 287]
+        ik_failed = np.linalg.norm(delta_arm_action) < 1e-4 
         
         # Add expert source tag (scripted-only)
         current_obs["expert_source"] = 0
@@ -529,13 +721,13 @@ class ExpertDataset(IterableDataset):
         Robust iterator for ExpertDataset.
 
         Guarantees:
-          - deterministic per-worker RNG (via self._rng)
-          - at least one sample kept from any successful trajectory
-          - safe copying of numpy arrays to avoid shallow-copy bugs
-          - consistent episode dict keys ("actions", "obs_list", "ik_fail_flags")
+           - deterministic per-worker RNG (via self._rng) [cite: 289]
+          - at least one sample kept from any successful trajectory [cite: 289]
+          - safe copying of numpy arrays to avoid shallow-copy bugs [cite: 289]
+          - consistent episode dict keys ("actions", "obs_list", "ik_fail_flags") [cite: 289]
         """
         # Ensure worker state is initialized (this must set self._worker_id, self._worker_master_seed, self._rng)
-        self._init_worker_state()
+        self._init_worker_state() 
 
         # defensive inits
         self._episode_buffer.clear()
@@ -546,140 +738,141 @@ class ExpertDataset(IterableDataset):
 
         while True:
             # stop condition
-            if self.max_samples_per_epoch is not None and samples_this_epoch >= self.max_samples_per_epoch:
+            if self.max_samples_per_epoch is not None and samples_this_epoch >= self.max_samples_per_epoch: 
                 return
 
             # if buffer empty, generate a new episode
             if not self._episode_buffer:
                 try:
                     # deterministic per-episode seed derived from master seed
-                    current_episode_seed = (self._worker_master_seed + episode_attempt_counter) & 0x7FFFFFFF
+                    current_episode_seed = (self._worker_master_seed + episode_attempt_counter) & 0x7FFFFFFF 
                     episode_attempt_counter += 1
                     logger.debug(f"[worker {getattr(self,'_worker_id',0)}] Starting episode attempt seed={current_episode_seed}")
 
                     # reset env & expert
-                    obs, _ = self._env.reset(seed=current_episode_seed)
-                    self._env.set_object_size(self.object_profile.size)
+                    obs, _ = self._env.reset(seed=current_episode_seed) 
+                    self._env.set_object_size(self.object_profile.size) 
                     self._scripted_expert.reset()
                     if hasattr(self._ik_solver, "reset_controller_state"):
-                        self._ik_solver.reset_controller_state()
+                         self._ik_solver.reset_controller_state() 
 
                     # collect the full (unfiltered) trajectory in memory for possible fallback
                     unfiltered_obs: List[Dict[str, np.ndarray]] = []
                     unfiltered_actions: List[np.ndarray] = []
-                    unfiltered_ik_flags: List[bool] = []
+                    unfiltered_ik_flags: List[bool] = [] 
 
                     for step in range(self._env.max_episode_steps):
                         policy_obs, action, ik_failed = self._generate_one(obs)
 
                         # convert and copy immediately to avoid aliasing
-                        obs_snapshot = {k: (np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v))
+                        obs_snapshot = {k: (np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v)) 
                                         for k, v in policy_obs.items()}
-                        action_arr = np.asarray(action, dtype=np.float32).copy()
+                        action_arr = np.asarray(action, dtype=np.float32).copy() 
 
-                        unfiltered_obs.append(obs_snapshot)
-                        unfiltered_actions.append(action_arr)
-                        unfiltered_ik_flags.append(bool(ik_failed))
+                        unfiltered_obs.append(obs_snapshot) 
+                        unfiltered_actions.append(action_arr) 
+                        unfiltered_ik_flags.append(bool(ik_failed)) 
 
                         # step simulator with sim_act (absolute action used to step)
-                        obs, _, terminated, truncated, _ = self._env.step(action)
+                        obs, _, terminated, truncated, _ = self._env.step(action) 
                         if terminated or truncated or self._scripted_expert.is_done():
                             break
 
-                    # determine success using the same logic as dataset (scripted_expert or env-based)
+                    # determine success using the same logic as dataset (scripted_expert or env-based) [cite: 299]
                     # prefer scripted_expert.was_successful() if available
                     try:
-                        is_success = self._scripted_expert.was_successful()
-                    except Exception:
-                        # fallback: basic object-lift & near-goal test
+                        is_success = self._scripted_expert.was_successful() 
+                    except Exception: 
+                        # fallback: basic object-lift & near-goal test [cite: 300]
                         final = obs
                         objp = final["object_pos_world"]
-                        goalp = final["goal_pos_world"]
+                        goalp = final["goal_pos_world"] 
                         is_lifted = objp[2] > (self._env.OBJECT_Z_HEIGHT + 0.03)
                         is_near_goal = np.linalg.norm(objp[:2] - goalp[:2]) < 0.05
-                        is_success = bool(is_lifted and is_near_goal)
+                        is_success = bool(is_lifted and is_near_goal) 
 
-                    # If successful, filter frames for storage (balanced selection)
+                     # If successful, filter frames for storage (balanced selection) [cite: 302]
                     if is_success:
                         filtered: List[Tuple[Dict, np.ndarray]] = []
-                        for step_idx, (step_obs, step_action) in enumerate(zip(unfiltered_obs, unfiltered_actions)):
+                        for step_idx, (step_obs, step_action) in enumerate(zip(unfiltered_obs, unfiltered_actions)): 
                             ee_vel = np.linalg.norm(step_obs["proprio"][7:14])
                             if ee_vel < 0.1:
-                                keep = (self._rng.random() < self.p_low_vel)
+                                keep = (self._rng.random() < self.p_low_vel) 
                             else:
-                                keep = (self._rng.random() < self.p_motion_frame)
+                                keep = (self._rng.random() < self.p_motion_frame) 
                             if keep:
-                                # store copy-safe snapshots
-                                filtered.append(( {k: np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v)
-                                                  for k, v in step_obs.items()},
-                                                  step_action.copy() ))
+                                 # store copy-safe snapshots [cite: 305]
+                                filtered.append(( {k: np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v) 
+                                                   for k, v in step_obs.items()}, 
+                                                  step_action.copy() )) 
 
-                        # fallback: if empty, keep most "active" frame (highest joint delta magnitude)
+                        # fallback: if empty, keep most "active" frame (highest joint delta magnitude) [cite: 307]
                         if not filtered and unfiltered_actions:
                             # robustly compute magnitudes (exclude gripper scalar if present)
                             try:
-                                mags = []
+                                mags = [] 
                                 for a in unfiltered_actions:
-                                    a = np.asarray(a, dtype=np.float32)
+                                    a = np.asarray(a, dtype=np.float32) 
                                     if a.size >= 2:
                                         mags.append(np.linalg.norm(a[:-1]))  # assume last is gripper
-                                    else:
-                                        mags.append(np.linalg.norm(a))
-                                best_idx = int(np.argmax(mags))
+                                    else: 
+                                        mags.append(np.linalg.norm(a)) 
+                                best_idx = int(np.argmax(mags)) 
                             except Exception:
                                 best_idx = -1
                             logger.warning(
-                                "Successful trajectory entirely filtered by stochastic selector; "
-                                f"keeping fallback frame idx={best_idx} (worker={getattr(self,'_worker_id',0)})"
+                                 "Successful trajectory entirely filtered by stochastic selector; [cite: 312] "
+                                f"keeping fallback frame idx={best_idx} (worker={getattr(self,'_worker_id',0)})" 
                             )
-                            fb_obs = {k: np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v)
+                            fb_obs = {k: np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v) 
                                       for k, v in unfiltered_obs[best_idx].items()}
                             fb_act = np.asarray(unfiltered_actions[best_idx], dtype=np.float32).copy()
-                            filtered.append((fb_obs, fb_act))
+                            filtered.append((fb_obs, fb_act)) 
 
                         # Acceptance
                         if filtered:
                             # append to the in-memory episode buffer which will be yielded
-                            self._episode_buffer.extend(filtered)
+                            self._episode_buffer.extend(filtered) 
 
                             # Build full episode dict (store unfiltered trajectory for offline writer)
                             ep_id = f"w{getattr(self,'_worker_id',0)}_e{self._episode_id_counter}"
-                            episode_dict = {
+                            episode_dict = { 
                                 "episode_id": ep_id,
                                 "seed": int(current_episode_seed),
-                                "obs_list": [{k: (np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v))
+                                 "obs_list": [{k: (np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v)) 
                                               for k, v in o.items()} for o in unfiltered_obs],
-                                "actions": [np.asarray(a, dtype=np.float32).copy() for a in unfiltered_actions],
+                                 "actions": [np.asarray(a, dtype=np.float32).copy() for a in unfiltered_actions], 
                                 "ik_fail_flags": list(unfiltered_ik_flags),
                                 "success": True,
-                            }
+                             } 
                             self.episodes.append(episode_dict)
                             self._episode_id_counter += 1
                             consecutive_failures = 0
-                        else:
+                        else: 
                             # defensive: should not happen due to fallback
                             consecutive_failures += 1
-                            logger.error("Filtered trajectory unexpectedly empty after fallback.")
+                            logger.error("Filtered trajectory unexpectedly empty after fallback.") 
                             if consecutive_failures >= MAX_CONSEC:
                                 raise RuntimeError("Too many consecutive failures")
-                            continue
+                            continue 
                     else:
                         # Failed trajectory: log & increment counter
                         consecutive_failures += 1
-                        logger.debug(f"Discarding failed trajectory (worker={getattr(self,'_worker_id',0)}). Consecutive failures: {consecutive_failures}")
+                        logger.debug(f"Discarding failed trajectory (worker={getattr(self,'_worker_id',0)}). [cite: 324] "
+                                      f"Consecutive failures: {consecutive_failures}") 
                         if consecutive_failures >= MAX_CONSEC:
                             raise RuntimeError("Too many consecutive failures")
                         continue
 
-                except Exception as exc:
+                except Exception as exc: 
                     # robust error handling
                     if self.skip_on_error:
                         logger.warning(f"Episode generation exception (worker={getattr(self,'_worker_id',0)}): {exc}", exc_info=True)
-                        consecutive_failures += 1
+                        consecutive_failures += 1 
                         if consecutive_failures >= MAX_CONSEC:
-                            raise RuntimeError(f"ExpertDataset crashed {MAX_CONSEC} times in a row.") from exc
+                            raise RuntimeError(f"ExpertDataset crashed {MAX_CONSEC} times in a row.") from exc 
                         continue
-                    else:
+                    else: 
                         raise
 
             # Yield samples from the episode buffer one-by-one
@@ -687,14 +880,15 @@ class ExpertDataset(IterableDataset):
                 continue
 
             obs_from_buffer, action_to_yield = self._episode_buffer.pop(0)
-            # increment counters
+ 
+            # increment counters [cite: 329]
             samples_this_epoch += 1
             self._samples_yielded += 1
 
             if self.yield_full_obs:
                 yield obs_from_buffer, action_to_yield
             else:
-                obs_for_policy = {"image_primary": obs_from_buffer["image_primary"],
+                obs_for_policy = {"image_primary": obs_from_buffer["image_primary"], 
                                   "proprio": obs_from_buffer["proprio"]}
                 yield obs_for_policy, action_to_yield
 
@@ -702,14 +896,18 @@ class ExpertDataset(IterableDataset):
     def get_stats(self):
         return {
             "samples_yielded": int(self._samples_yielded),
-            "episodes_collected": len(self.episodes)
+            "episodes_collected": len(self.episodes) 
         }
 
+# ==============================================================================
+# 5. REPLAY VALIDATION (Unchanged, operates on in-memory dicts)
+# ==============================================================================
 
-def replay_validate_episode(ep: Dict[str, Any], urdf_path: str, env_xml_path: Optional[str] = None) -> bool:
+def replay_validate_episode(ep: Dict[str, Any], urdf_path: str, env_xml_path: Optional[str] = None) -> bool: 
     """
     Replay sim_actions in a fresh environment and compare final object pose vs stored.
     Return True if within tolerance.
+    [cite: 332]
     """
     env = PandaEnv(xml_path=env_xml_path, control_mode='delta')
     env.reset(seed=ep.get("seed", None))
@@ -719,17 +917,17 @@ def replay_validate_episode(ep: Dict[str, Any], urdf_path: str, env_xml_path: Op
             init_obj_pos = np.array(ep["obs_list"][0]["object_pos_world"], dtype=np.float32)
             obj_body_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "object")
             if obj_body_id != -1:
-                env.data.xpos[obj_body_id] = init_obj_pos
+                 env.data.xpos[obj_body_id] = init_obj_pos 
             
             # Restore orientation (if available)
             if "object_orn_world" in ep["obs_list"][0]:
                 init_obj_orn_xyzw = np.array(ep["obs_list"][0]["object_orn_world"], dtype=np.float32)
                 # Convert to MuJoCo's wxyz format
-                init_obj_orn_wxyz = np.array([init_obj_orn_xyzw[3], init_obj_orn_xyzw[0], init_obj_orn_xyzw[1], init_obj_orn_xyzw[2]])
+                init_obj_orn_wxyz = np.array([init_obj_orn_xyzw[3], init_obj_orn_xyzw[0], init_obj_orn_xyzw[1], init_obj_orn_xyzw[2]]) 
                 obj_joint_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
                 if obj_joint_id != -1:
                     qpos_adr = env.model.jnt_qposadr[obj_joint_id]
-                    env.data.qpos[qpos_adr + 3 : qpos_adr + 7] = init_obj_orn_wxyz
+                    env.data.qpos[qpos_adr + 3 : qpos_adr + 7] = init_obj_orn_wxyz 
 
             # Apply changes to the simulation state
             mujoco.mj_forward(env.model, env.data)
@@ -737,7 +935,8 @@ def replay_validate_episode(ep: Dict[str, Any], urdf_path: str, env_xml_path: Op
             logger.warning(f"Could not restore initial object state for replay: {e}")
     for a in ep["actions"]: # Use the unified "actions" key
         obs, _, done, trunc, _ = env.step(np.array(a, dtype=np.float32))
-        if done or trunc:
+        
+        if done or trunc: 
             break
     final = obs
     tgt = ep["obs_list"][-1]["object_pos_world"]

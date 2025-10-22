@@ -167,9 +167,11 @@ class NoiseScheduler:
 
         # --- THIS IS THE FIX ---
         # Ensure all values are tensors on the correct device.
-        alpha_cumprod_t = self.alphas_cumprod[t]
-        alpha_cumprod_t_prev = self.alphas_cumprod[t_prev] if t_prev >= 0 else torch.tensor(1.0, device=xt.device)
 
+        alpha_cumprod_t = self.alphas_cumprod[t]
+        
+        # This is the critical fix. When t_prev is -1, create a tensor, not a float.
+        alpha_cumprod_t_prev = self.alphas_cumprod[t_prev] if t_prev >= 0 else torch.tensor(1.0, device=xt.device, dtype=xt.dtype)
         sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t]
         
         # --- A SECOND, RELATED FIX FOR ROBUSTNESS ---
@@ -511,13 +513,27 @@ class DiffusionPolicy(nn.Module):
         torch.save(state, path)
         log.info(f"Saved model checkpoint to {path}")
 
+
     def load(self, path: Path):
         """Loads model weights from a checkpoint."""
+        log.info(f"Loading model checkpoint from {path}")
         state = torch.load(path, map_location=self.device, weights_only=False)
-        self.load_state_dict(state["policy_state_dict"])
-        if self.ema and "ema_state_dict" in state and state["ema_state_dict"] is not None:
-            self.ema.load_state_dict(state["ema_state_dict"])
-        log.info(f"Loaded model checkpoint from {path}")
+        
+        # --- START OF SOTA PATCH ---
+        # More robust loading: handle cases where only policy is present
+        policy_state_dict = state.get("policy_state_dict", state)
+        self.load_state_dict(policy_state_dict)
+        
+        ema_state_dict = state.get("ema_state_dict")
+        if self.ema and ema_state_dict is not None:
+            try:
+                self.ema.load_state_dict(ema_state_dict)
+                log.info("Successfully loaded EMA weights.")
+            except Exception as e:
+                log.warning(f"Could not load EMA weights, they may be incompatible. Error: {e}")
+        elif self.ema:
+            log.warning("Checkpoint does not contain EMA weights, which were expected.")
+        # --- END OF SOTA PATCH ---
 
 
 

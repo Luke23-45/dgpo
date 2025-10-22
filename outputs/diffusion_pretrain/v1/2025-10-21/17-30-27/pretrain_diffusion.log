@@ -1,0 +1,85 @@
+[2025-10-21 17:30:27,396][__main__][INFO] - ----------- Configuration -----------
+[2025-10-21 17:30:27,400][__main__][INFO] - seed: 42
+device: cpu
+resume_checkpoint: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-21/11-49-28/checkpoints/last.pth
+logging:
+  use_wandb: false
+  wandb_project: dgpo_diffusion_pretrain
+  log_interval_steps: 100
+  val_interval_epochs: 3
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  batch_size: 128
+  num_workers: 2
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+scheduler:
+  schedule_type: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+optimizer:
+  lr: 0.0002
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+training:
+  epochs: 1000
+  use_amp: false
+  ema_decay: 0.999
+  cfg_p_uncond: 0.15
+validation:
+  guidance_scale: 1.5
+  sampling_steps: 50
+
+[2025-10-21 17:30:27,401][__main__][INFO] - ------------------------------------
+[2025-10-21 17:30:27,416][__main__][INFO] - Global seed set to 42
+[2025-10-21 17:30:27,417][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27
+[2025-10-21 17:30:27,425][__main__][INFO] - Building datasets...
+[2025-10-21 17:30:27,426][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93_index.json...
+[2025-10-21 17:30:27,431][utils.expert_dataset][INFO] - Loaded 260 episodes, 65576 total valid chunks (Virtually Indexed).
+[2025-10-21 17:30:27,432][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-21 17:30:27,434][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-21 17:30:27,435][__main__][INFO] - Building diffusion policy model...
+[2025-10-21 17:30:27,435][__main__][INFO] - Inferred proprioception dimension from dataset index: 22
+[2025-10-21 17:30:28,153][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-21 17:30:28,238][__main__][INFO] - Resuming training from checkpoint: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\11-49-28\checkpoints\last.pth
+[2025-10-21 17:30:28,506][__main__][INFO] - Starting training from epoch 3...
+[2025-10-21 22:20:40,172][__main__][INFO] - Saved epoch backup to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\checkpoints\backup\backup_epoch_3.pth
+[2025-10-21 22:20:40,188][__main__][INFO] - Running validation for epoch 3...
+[2025-10-21 22:38:16,892][__main__][INFO] - Validation Loss: 0.0403, Action MSE: 0.2353
+[2025-10-21 22:38:16,905][__main__][INFO] - Generating diagnostic denoising rollout...
+[2025-10-21 22:38:44,275][matplotlib.animation][INFO] - Animation.save using <class 'matplotlib.animation.FFMpegWriter'>
+[2025-10-21 22:38:44,331][matplotlib.animation][INFO] - MovieWriter._run: running command: ffmpeg -f rawvideo -vcodec rawvideo -s 1000x600 -pix_fmt rgba -framerate 20 -loglevel error -i pipe: -vcodec h264 -pix_fmt yuv420p -y 'C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\diagnostics\denoising_epoch_3.mp4'
+[2025-10-21 22:38:57,826][__main__][INFO] - Saved diagnostic video to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\diagnostics\denoising_epoch_3.mp4
+[2025-10-21 22:38:58,480][__main__][INFO] - Saved new best checkpoint to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\checkpoints\best.pth
+[2025-10-22 03:19:24,846][__main__][INFO] - Saved epoch backup to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\checkpoints\backup\backup_epoch_4.pth
+[2025-10-22 07:05:50,826][__main__][INFO] - Saved epoch backup to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\checkpoints\backup\backup_epoch_5.pth
+[2025-10-22 10:48:50,676][__main__][INFO] - Saved epoch backup to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\checkpoints\backup\backup_epoch_6.pth
+[2025-10-22 10:48:50,688][__main__][INFO] - Running validation for epoch 6...
+[2025-10-22 11:03:32,027][__main__][INFO] - Validation Loss: 0.0180, Action MSE: 0.1397
+[2025-10-22 11:03:32,045][__main__][INFO] - Generating diagnostic denoising rollout...
+[2025-10-22 11:03:57,432][matplotlib.animation][INFO] - Animation.save using <class 'matplotlib.animation.FFMpegWriter'>
+[2025-10-22 11:03:57,445][matplotlib.animation][INFO] - MovieWriter._run: running command: ffmpeg -f rawvideo -vcodec rawvideo -s 1000x600 -pix_fmt rgba -framerate 20 -loglevel error -i pipe: -vcodec h264 -pix_fmt yuv420p -y 'C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\diagnostics\denoising_epoch_6.mp4'
+[2025-10-22 11:04:09,864][__main__][INFO] - Saved diagnostic video to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\diagnostics\denoising_epoch_6.mp4
+[2025-10-22 11:04:10,511][__main__][INFO] - Saved new best checkpoint to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\checkpoints\best.pth
+[2025-10-22 15:01:30,043][__main__][INFO] - Saved epoch backup to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\checkpoints\backup\backup_epoch_7.pth
+[2025-10-22 18:54:45,177][__main__][INFO] - Saved epoch backup to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\checkpoints\backup\backup_epoch_8.pth
+[2025-10-22 23:20:41,656][__main__][INFO] - Saved epoch backup to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\checkpoints\backup\backup_epoch_9.pth
+[2025-10-22 23:20:41,672][__main__][INFO] - Running validation for epoch 9...
+[2025-10-22 23:33:32,900][__main__][INFO] - Validation Loss: 0.0154, Action MSE: 0.0685
+[2025-10-22 23:33:32,909][__main__][INFO] - Generating diagnostic denoising rollout...
+[2025-10-22 23:33:57,115][matplotlib.animation][INFO] - Animation.save using <class 'matplotlib.animation.FFMpegWriter'>
+[2025-10-22 23:33:57,121][matplotlib.animation][INFO] - MovieWriter._run: running command: ffmpeg -f rawvideo -vcodec rawvideo -s 1000x600 -pix_fmt rgba -framerate 20 -loglevel error -i pipe: -vcodec h264 -pix_fmt yuv420p -y 'C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\diagnostics\denoising_epoch_9.mp4'
+[2025-10-22 23:34:09,972][__main__][INFO] - Saved diagnostic video to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\diagnostics\denoising_epoch_9.mp4
+[2025-10-22 23:34:10,433][__main__][INFO] - Saved new best checkpoint to C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-21\17-30-27\checkpoints\best.pth
+[2025-10-22 23:38:17,946][__main__][WARNING] - Training interrupted by user (KeyboardInterrupt).
+[2025-10-22 23:38:17,961][__main__][INFO] - Performing a final save of the 'last.pth' checkpoint before exiting...
+[2025-10-22 23:38:20,999][__main__][INFO] - Final state for interrupted epoch 10 saved to 'last.pth'.
+[2025-10-22 23:38:21,010][__main__][INFO] - Training process finished. Total runtime: 30.13 hours.

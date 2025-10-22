@@ -35,7 +35,7 @@ Key Features:
 
 To Run:
     # Ensure you have a corresponding Hydra config file (e.g., in configs/pretrain_diffusion.yaml)
-    python pretrain_diffusion.py
+    python -m scripts.pretrain_diffusion
     
 """
 
@@ -171,6 +171,8 @@ class DiffusionPretrainer:
         if cfg.resume_checkpoint:
             self._load_checkpoint(Path(cfg.resume_checkpoint))
 
+  
+
     def _build_dataloaders(self) -> Tuple[DataLoader, Optional[DataLoader]]:
         """Constructs train and validation dataloaders."""
         # This assumes your dataset can be split or you provide separate paths
@@ -210,11 +212,13 @@ class DiffusionPretrainer:
 
     def _build_policy(self) -> DiffusionPolicy:
         """Constructs the DiffusionPolicy from the configuration."""
-        # Extract proprioception dimension from the dataset's observation space
-        # This is a robust way to avoid hardcoding dimensions.
-        sample_obs, _ = self.train_loader.dataset[0]
-        proprio_dim = sample_obs["proprio"].shape[-1]
-        log.info(f"Inferred proprioception dimension: {proprio_dim}")
+        try:
+            proprio_dim = self.train_loader.dataset.get_proprioception_dim()
+            log.info(f"Inferred proprioception dimension from dataset index: {proprio_dim}")
+        except Exception as e:
+            log.critical(f"FATAL: Failed to infer proprioception dimension from the dataset. "
+                         f"Check if the dataset is in the correct SOTA format and the index is valid. Error: {e}")
+            raise
 
         scheduler_cfg = NoiseSchedulerConfig(
             beta_start=self.cfg.scheduler.beta_start,
@@ -253,7 +257,7 @@ class DiffusionPretrainer:
             log.warning(f"Checkpoint not found at {path}, starting from scratch.")
             return
         log.info(f"Resuming training from checkpoint: {path}")
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.policy.load_state_dict(ckpt["policy_state_dict"])
         if self.policy.ema and "ema_state_dict" in ckpt:
             self.policy.ema.load_state_dict(ckpt["ema_state_dict"])
@@ -331,7 +335,11 @@ class DiffusionPretrainer:
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.cfg.training.use_amp):
                     loss, _ = self.policy.compute_loss(action_chunk, obs_chunk)
                     # Get a deterministic prediction for quantitative metrics
-                    predicted_action = self.policy.sample(obs_chunk, steps=10, use_ema=True)
+                    predicted_action = self.policy.sample(
+                        obs_chunk, 
+                        steps=self.cfg.validation.sampling_steps, 
+                        use_ema=True
+                    )
                     action_mse = F.mse_loss(predicted_action, action_chunk)
 
                 total_val_loss += loss.item()
@@ -422,19 +430,104 @@ class DiffusionPretrainer:
                 "val/denoising_rollout": wandb.Video(str(video_path), fps=20, format="mp4"),
             }, step=self.global_step)
 
-    def run(self):
-        """The main entry point to start the training process."""
-        log.info("Starting training...")
-        for epoch in range(self.start_epoch, self.cfg.training.epochs + 1):
-            self._train_one_epoch(epoch)
-            if epoch % self.cfg.logging.val_interval_epochs == 0:
-                self._validate_one_epoch(epoch)
-        
-        elapsed_time = time.time() - self.start_time
-        log.info(f"Training completed in {elapsed_time/3600:.2f} hours.")
-        if self.use_wandb:
-            wandb.finish()
 
+    def _save_backup_checkpoint(self, epoch: int):
+        """
+        Saves a high-frequency backup checkpoint.
+        Creates a new file and deletes the previous one to be atomic.
+        """
+        backup_dir = self.output_dir / "checkpoints" / "backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Define paths for current and previous backup
+        current_backup_path = backup_dir / f"backup_epoch_{epoch}.pth"
+        previous_backup_path = backup_dir / f"backup_epoch_{epoch - 1}.pth"
+        
+        # State dictionary is the same as for other checkpoints
+        state = {
+            "epoch": epoch,
+            "global_step": self.global_step,
+            "policy_state_dict": self.policy.state_dict(),
+            "ema_state_dict": self.policy.ema.state_dict() if self.policy.ema else None,
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.lr_scheduler.state_dict(),
+            "best_val_loss": self.best_val_loss,
+            "rng_states": {
+                "torch": torch.get_rng_state(), "numpy": np.random.get_state(),
+                "random": random.getstate(),
+            },
+            "config": OmegaConf.to_container(self.cfg, resolve=True),
+        }
+        
+        # Save the current backup
+        torch.save(state, current_backup_path)
+        log.info(f"Saved epoch backup to {current_backup_path}")
+        
+        # Delete the previous backup to save disk space
+        if previous_backup_path.exists():
+            previous_backup_path.unlink()
+
+
+
+    def run(self):
+        """The main entry point to start the training process, with SOTA checkpointing."""
+        log.info(f"Starting training from epoch {self.start_epoch}...")
+        
+        # --- START OF SOTA PATCH 2 ---
+        current_epoch = self.start_epoch
+        try:
+            for epoch in range(self.start_epoch, self.cfg.training.epochs + 1):
+                current_epoch = epoch # Keep track of the current epoch for exception handling
+                
+                # --- 1. Train for one epoch ---
+                self._train_one_epoch(epoch)
+                
+                # --- 2. Save high-frequency backup ---
+                # This happens after every single epoch.
+                self._save_backup_checkpoint(epoch)
+                
+                # --- 3. Run validation and save "best" / "last" checkpoints periodically ---
+                if epoch % self.cfg.logging.val_interval_epochs == 0:
+                    self._validate_one_epoch(epoch)
+            
+            log.info(f"Training completed successfully after {self.cfg.training.epochs} epochs.")
+
+        except KeyboardInterrupt:
+            log.warning("Training interrupted by user (KeyboardInterrupt).")
+            log.info("Performing a final save of the 'last.pth' checkpoint before exiting...")
+            
+            # Use the existing global save_checkpoint function for the final "resume" checkpoint
+            save_checkpoint(
+                state={
+                    "epoch": current_epoch, # The epoch that was interrupted
+                    "global_step": self.global_step,
+                    "policy_state_dict": self.policy.state_dict(),
+                    "ema_state_dict": self.policy.ema.state_dict() if self.policy.ema else None,
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "scheduler_state_dict": self.lr_scheduler.state_dict(),
+                    "best_val_loss": self.best_val_loss,
+                    "rng_states": {
+                        "torch": torch.get_rng_state(), "numpy": np.random.get_state(),
+                        "random": random.getstate(),
+                    },
+                    "config": OmegaConf.to_container(self.cfg, resolve=True),
+                },
+                is_best=False, # An interrupted run is never the "best"
+                checkpoint_dir=self.output_dir / "checkpoints",
+            )
+            log.info(f"Final state for interrupted epoch {current_epoch} saved to 'last.pth'.")
+
+        except Exception as e:
+            log.exception(f"An unexpected error occurred during training at epoch {current_epoch}.")
+            # We don't save on unknown errors, as the state might be corrupt.
+            raise
+            
+        finally:
+            elapsed_time = time.time() - self.start_time
+            log.info(f"Training process finished. Total runtime: {elapsed_time/3600:.2f} hours.")
+            if self.use_wandb:
+                wandb.finish()
+        # --- END OF SOTA PATCH 2 ---
 
 # -------------------------
 # 4. Hydra Main Entry Point
