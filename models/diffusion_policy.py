@@ -514,63 +514,244 @@ class DiffusionPolicy(nn.Module):
         log.info(f"Saved model checkpoint to {path}")
 
 
-    def load(self, path: Path):
+    def load(self, path: Path, restore_optimizer: bool = True, restore_scheduler: bool = True, restore_rng: bool = True):
         """
         Robust checkpoint loader.
-        - Works across CPU/GPU transitions
-        - Handles both wrapped and bare state dicts
-        - Gracefully loads EMA if available
-        - Logs missing or unexpected keys
+
+        - path: Path to checkpoint file
+        - restore_optimizer / restore_scheduler: whether to attempt loading optimizer/scheduler state dicts if present
+        - restore_rng: whether to attempt restoring RNG states (torch, cuda, numpy, python)
         """
-        import torch
+
         import logging
+        import torch
+        import numpy as np
+        from collections import OrderedDict
+
         log = logging.getLogger(__name__)
+        log.info(f"Loading checkpoint from: {path} on device={self.device}")
 
-        log.info(f"Loading model checkpoint from {path}")
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        # --- Load checkpoint to CPU first (most portable) ---
+        ckpt = torch.load(path, map_location="cpu")
 
-        # --- Extract model weights safely ---
-        if isinstance(checkpoint, dict):
-            # try common keys
-            policy_state = (
-                checkpoint.get("policy_state_dict")
-                or checkpoint.get("model_state_dict")
-                or checkpoint.get("state_dict")
-            )
-            if policy_state is None:
-                # fallback: maybe checkpoint itself *is* the state dict
-                if all(isinstance(k, str) for k in checkpoint.keys()):
-                    policy_state = checkpoint
+        # --- Helper: find a model-state dict inside checkpoint or accept bare state_dict ---
+        def extract_state_dict(container):
+            # If it's already a state dict (OrderedDict of tensors), return it
+            if isinstance(container, (dict, OrderedDict)) and all(isinstance(k, str) for k in container.keys()):
+                # Common wrapper key names:
+                for key_candidate in ("policy_state_dict", "model_state_dict", "state_dict"):
+                    if key_candidate in container:
+                        return container[key_candidate]
+                # Fall back: container itself may be the state_dict (weights-only save)
+                # Heuristic: check that values look like tensors / arrays
+                sample_values = list(container.values())[:3]
+                if any(torch.is_tensor(v) or isinstance(v, np.ndarray) for v in sample_values):
+                    return container
+            raise ValueError("No model state_dict found in checkpoint")
+
+        # --- Extract model state dict robustly ---
+        try:
+            model_state = extract_state_dict(ckpt)
+        except Exception:
+            # If extract_state_dict failed, try some more heuristics: maybe ckpt is the state dict itself
+            if isinstance(ckpt, (dict, OrderedDict)) and all(isinstance(k, str) for k in ckpt.keys()):
+                model_state = ckpt
+            else:
+                raise RuntimeError(f"Could not locate a valid model state_dict in checkpoint: {path}")
+
+        # --- Helper: strip common prefixes (module., model., etc.) ---
+        def strip_prefix_if_present(state_dict, prefix="module."):
+            keys = list(state_dict.keys())
+            if any(k.startswith(prefix) for k in keys):
+                new_dict = OrderedDict()
+                for k, v in state_dict.items():
+                    new_key = k[len(prefix):] if k.startswith(prefix) else k
+                    new_dict[new_key] = v
+                return new_dict
+            return state_dict
+
+        model_state = strip_prefix_if_present(model_state, prefix="module.")
+        model_state = strip_prefix_if_present(model_state, prefix="model.")  # sometimes wrapped
+
+        # --- Move tensors in model_state to target device (do not modify original types otherwise) ---
+        def move_state_to_device(state_dict, device):
+            moved = OrderedDict()
+            for k, v in state_dict.items():
+                if torch.is_tensor(v):
+                    moved[k] = v.to(device)
                 else:
-                    raise ValueError(
-                        f"Checkpoint at {path} has no recognizable state_dict keys."
-                    )
-        else:
-            raise TypeError(
-                f"Expected dict-like checkpoint, got {type(checkpoint).__name__}"
-            )
+                    # keep non-tensors as-is (e.g., metadata arrays)
+                    moved[k] = v
+            return moved
 
-        # --- Load policy weights robustly ---
-        missing_keys, unexpected_keys = self.load_state_dict(
-            policy_state, strict=False
-        )
-        if missing_keys:
-            log.warning(f"Missing keys in checkpoint: {missing_keys}")
-        if unexpected_keys:
-            log.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
+        model_state = move_state_to_device(model_state, self.device)
 
-        # --- Handle EMA if present ---
-        ema_state = checkpoint.get("ema_state_dict") if isinstance(checkpoint, dict) else None
-        if self.ema and ema_state is not None:
+        # --- Load into model with strict=False and log missing/unexpected keys ---
+        try:
+            load_result = self.load_state_dict(model_state, strict=False)
+            # load_state_dict may return a NamedTuple or None depending on PyTorch version
+            missing_keys = getattr(load_result, "missing_keys", None)
+            unexpected_keys = getattr(load_result, "unexpected_keys", None)
+
+            # Some older/newer versions return a dict-like result
+            if missing_keys is None and isinstance(load_result, dict):
+                missing_keys = load_result.get("missing_keys", None)
+                unexpected_keys = load_result.get("unexpected_keys", None)
+
+            if missing_keys:
+                log.warning("Checkpoint loaded but missing keys were found in the model:")
+                for k in missing_keys:
+                    log.warning("  MISSING: %s", k)
+            if unexpected_keys:
+                log.warning("Checkpoint loaded but unexpected keys were found in the checkpoint:")
+                for k in unexpected_keys:
+                    log.warning("  UNEXPECTED: %s", k)
+        except Exception as e:
+            # If direct load fails, show helpful diagnostic and re-raise
+            log.exception("Failed to load model weights into current network. This may be an incompatibility between model code and checkpoint.")
+            raise
+
+        # --- EMA (if present) ---
+        ema_state = None
+        if isinstance(ckpt, dict):
+            ema_state = ckpt.get("ema_state_dict") or ckpt.get("ema")
+        if getattr(self, "ema", None) is not None:
+            if ema_state is not None:
+                try:
+                    # ensure EMA state tensors moved to device
+                    ema_state_moved = {}
+                    for k, v in ema_state.items():
+                        ema_state_moved[k] = v.to(self.device) if torch.is_tensor(v) else v
+                    self.ema.load_state_dict(ema_state_moved, strict=False)
+                    log.info("EMA weights loaded successfully (best-effort).")
+                except Exception as e:
+                    log.warning("Failed to load EMA weights: %s", e)
+            else:
+                log.warning("Model has EMA object but checkpoint contains no EMA weights.")
+
+        # --- Optimizer / scheduler restore (best-effort) ---
+        if restore_optimizer and isinstance(ckpt, dict) and "optimizer_state_dict" in ckpt:
+            opt_state = ckpt["optimizer_state_dict"]
             try:
-                self.ema.load_state_dict(ema_state)
-                log.info("Successfully loaded EMA weights.")
+                # Move optimizer state tensors to device (PyTorch expects same device)
+                def _move_optimizer_state(opt_state_dict, device):
+                    for state in opt_state_dict.get("state", {}).values():
+                        for k, v in list(state.items()):
+                            if torch.is_tensor(v):
+                                state[k] = v.to(device)
+                    # param_groups usually contain 'params' indices only; leave as is
+                _move_optimizer_state(opt_state, self.device)
+                if getattr(self, "optimizer", None) is not None:
+                    self.optimizer.load_state_dict(opt_state)
+                    log.info("Optimizer state restored.")
+                else:
+                    log.warning("Checkpoint contains optimizer state but `self.optimizer` is None.")
             except Exception as e:
-                log.warning(f"Could not load EMA weights (incompatible). Error: {e}")
-        elif self.ema:
-            log.warning("EMA object exists but checkpoint has no EMA weights.")
+                log.warning("Failed to restore optimizer state: %s", e)
 
-        log.info(f"Checkpoint loaded successfully to device={self.device}")
+        if restore_scheduler and isinstance(ckpt, dict) and "scheduler_state_dict" in ckpt:
+            sched_state = ckpt["scheduler_state_dict"]
+            try:
+                if getattr(self, "scheduler", None) is not None:
+                    self.scheduler.load_state_dict(sched_state)
+                    log.info("Scheduler state restored.")
+                else:
+                    log.warning("Checkpoint contains scheduler state but `self.scheduler` is None.")
+            except Exception as e:
+                log.warning("Failed to restore scheduler state: %s", e)
 
+        # --- AMP GradScaler restore (if present) ---
+        if isinstance(ckpt, dict) and "scaler_state_dict" in ckpt and getattr(self, "scaler", None) is not None:
+            try:
+                self.scaler.load_state_dict(ckpt["scaler_state_dict"])
+                log.info("AMP GradScaler state restored.")
+            except Exception as e:
+                log.warning("Failed to restore GradScaler state: %s", e)
+
+        # --- Robust RNG restore (torch, cuda, numpy, python random) ---
+        if restore_rng and isinstance(ckpt, dict) and "rng_states" in ckpt:
+            rngs = ckpt["rng_states"]
+            # --- Helper to convert various serialized forms to torch.ByteTensor ---
+            def _to_torch_byte_tensor(obj):
+                if obj is None:
+                    return None
+                if torch.is_tensor(obj):
+                    t = obj
+                    if t.dtype != torch.uint8:
+                        t = t.to(torch.uint8)
+                    return t
+                if isinstance(obj, np.ndarray):
+                    return torch.from_numpy(obj.astype(np.uint8))
+                if isinstance(obj, (list, tuple)):
+                    return torch.tensor(obj, dtype=torch.uint8)
+                # if it's a bytes-like object, try torch.ByteTensor(list(bytes))
+                if isinstance(obj, (bytes, bytearray)):
+                    return torch.tensor(list(obj), dtype=torch.uint8)
+                # unknown type
+                return None
+
+            # Torch CPU RNG
+            try:
+                torch_rng = rngs.get("torch") if isinstance(rngs, dict) else None
+                if torch_rng is not None:
+                    torch_rng_t = _to_torch_byte_tensor(torch_rng)
+                    if torch_rng_t is not None:
+                        torch.set_rng_state(torch_rng_t)
+                        log.info("Restored torch CPU RNG state.")
+                    else:
+                        log.warning("Could not convert saved 'torch' RNG state to ByteTensor; skipping.")
+            except Exception as e:
+                log.warning("Failed to restore torch CPU RNG state: %s", e)
+
+            # CUDA RNG (all devices)
+            try:
+                cuda_rng = rngs.get("cuda") or rngs.get("cuda_all")
+                if cuda_rng is not None and torch.cuda.is_available():
+                    # convert and set for all devices
+                    cuda_rng_t = _to_torch_byte_tensor(cuda_rng)
+                    if cuda_rng_t is not None:
+                        try:
+                            torch.cuda.set_rng_state_all(cuda_rng_t)
+                            log.info("Restored torch CUDA RNG state (all devices).")
+                        except Exception as e:
+                            log.warning("Failed to set CUDA RNG state_all: %s", e)
+                    else:
+                        log.warning("Could not convert saved 'cuda' RNG state to ByteTensor; skipping.")
+            except Exception as e:
+                log.warning("CUDA RNG restore issue: %s", e)
+
+            # numpy RNG
+            try:
+                np_state = rngs.get("numpy")
+                if np_state is not None:
+                    try:
+                        np.random.set_state(tuple(np_state))
+                        log.info("Restored numpy RNG state.")
+                    except Exception:
+                        # maybe it's a dict with keys matching numpy format
+                        try:
+                            np.random.set_state(np_state)
+                            log.info("Restored numpy RNG state (alt).")
+                        except Exception as e:
+                            log.warning("Failed to restore numpy RNG state: %s", e)
+            except Exception as e:
+                log.warning("Numpy RNG restore issue: %s", e)
+
+            # python random
+            try:
+                import random
+                py_state = rngs.get("python")
+                if py_state is not None:
+                    try:
+                        random.setstate(py_state)
+                        log.info("Restored python random RNG state.")
+                    except Exception as e:
+                        log.warning("Failed to restore python RNG state: %s", e)
+            except Exception as e:
+                log.warning("Python RNG restore issue: %s", e)
+
+        # --- Final log and return ---
+        log.info("Checkpoint loaded (model + optional components).")
+        return ckpt
 
 
