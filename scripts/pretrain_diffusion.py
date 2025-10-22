@@ -251,27 +251,70 @@ class DiffusionPretrainer:
         )
         return policy
 
+
+
     def _load_checkpoint(self, path: Path):
-        """Loads a full training state from a checkpoint file."""
+        """
+        Loads a full training state from a checkpoint file, with robust,
+        cross-device (CPU/GPU) support for all components.
+        """
         if not path.exists():
             log.warning(f"Checkpoint not found at {path}, starting from scratch.")
             return
         log.info(f"Resuming training from checkpoint: {path}")
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        self.policy.load_state_dict(ckpt["policy_state_dict"])
-        if self.policy.ema and "ema_state_dict" in ckpt:
+
+        # --- Load checkpoint to CPU first for maximum compatibility ---
+        ckpt = torch.load(path, map_location="cpu")
+
+        # --- Load Model State ---
+        # Use strict=False to be robust to minor model changes
+        self.policy.load_state_dict(ckpt["policy_state_dict"], strict=False)
+
+        # --- Load EMA State (if applicable) ---
+        if self.policy.ema and "ema_state_dict" in ckpt and ckpt["ema_state_dict"]:
             self.policy.ema.load_state_dict(ckpt["ema_state_dict"])
-        self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+
+        # --- Load Optimizer State ---
+        try:
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            # Manually move optimizer state to the correct device
+            for state in self.optimizer.state.values():
+                for k, v in state.items():
+                    if torch.is_tensor(v):
+                        state[k] = v.to(self.device)
+        except Exception as e:
+            log.warning(f"Could not load optimizer state. It will be re-initialized. Error: {e}")
+
+        # --- Load Scheduler, Progress, etc. ---
         self.lr_scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        self.start_epoch = ckpt["epoch"] + 1
-        self.global_step = ckpt["global_step"]
+        self.start_epoch = ckpt.get("epoch", 0) + 1 # Use .get for safety
+        self.global_step = ckpt.get("global_step", 0)
         self.best_val_loss = ckpt.get("best_val_loss", float("inf"))
 
-        # Load random states for perfect reproducibility
+        # --- START OF CRITICAL RNG FIX ---
+        # Load random states for perfect reproducibility, with cross-device safety.
         if "rng_states" in ckpt:
-            torch.set_rng_state(ckpt["rng_states"]["torch"])
-            np.random.set_state(ckpt["rng_states"]["numpy"])
+            log.info("Restoring RNG states from checkpoint...")
+            
+            # Python and NumPy RNGs are device-independent
             random.setstate(ckpt["rng_states"]["random"])
+            np.random.set_state(ckpt["rng_states"]["numpy"])
+            
+            # --- The PyTorch RNG Fix ---
+            # 1. Load the torch CPU RNG state from the checkpoint
+            torch_rng_state = ckpt["rng_states"]["torch"]
+            # 2. Set the CPU RNG state
+            torch.set_rng_state(torch_rng_state)
+            
+            # 3. If we are on a GPU, also load the CUDA RNG state
+            if "cuda" in self.device.type and "torch_cuda_rng_state" in ckpt["rng_states"] and ckpt["rng_states"]["torch_cuda_rng_state"] is not None:
+                # The checkpoint might have states for multiple GPUs.
+                # set_rng_state_all will handle this.
+                torch.cuda.set_rng_state_all(ckpt["rng_states"]["torch_cuda_rng_state"])
+            
+            log.info("RNG states successfully restored.")
+        else:
+            log.warning("No 'rng_states' found in checkpoint. Reproducibility of data shuffling may be affected.")
 
     def _train_one_epoch(self, epoch: int):
         """Runs a single epoch of training."""

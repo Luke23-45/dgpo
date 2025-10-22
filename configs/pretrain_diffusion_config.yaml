@@ -10,7 +10,7 @@ hydra:
 # ===================================================================
 seed: 42
 device: "cuda"
-resume_checkpoint: "/content/drive/MyDrive/pda/Models/backup_epoch_9.pth"
+resume_checkpoint: "/content/drive/MyDrive/pda/Models/best.pth"
 
 # ===================================================================
 # 2. LOGGING
