@@ -515,25 +515,62 @@ class DiffusionPolicy(nn.Module):
 
 
     def load(self, path: Path):
-        """Loads model weights from a checkpoint."""
+        """
+        Robust checkpoint loader.
+        - Works across CPU/GPU transitions
+        - Handles both wrapped and bare state dicts
+        - Gracefully loads EMA if available
+        - Logs missing or unexpected keys
+        """
+        import torch
+        import logging
+        log = logging.getLogger(__name__)
+
         log.info(f"Loading model checkpoint from {path}")
-        state = torch.load(path, map_location=self.device, weights_only=False)
-        
-        # --- START OF SOTA PATCH ---
-        # More robust loading: handle cases where only policy is present
-        policy_state_dict = state.get("policy_state_dict", state)
-        self.load_state_dict(policy_state_dict)
-        
-        ema_state_dict = state.get("ema_state_dict")
-        if self.ema and ema_state_dict is not None:
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+
+        # --- Extract model weights safely ---
+        if isinstance(checkpoint, dict):
+            # try common keys
+            policy_state = (
+                checkpoint.get("policy_state_dict")
+                or checkpoint.get("model_state_dict")
+                or checkpoint.get("state_dict")
+            )
+            if policy_state is None:
+                # fallback: maybe checkpoint itself *is* the state dict
+                if all(isinstance(k, str) for k in checkpoint.keys()):
+                    policy_state = checkpoint
+                else:
+                    raise ValueError(
+                        f"Checkpoint at {path} has no recognizable state_dict keys."
+                    )
+        else:
+            raise TypeError(
+                f"Expected dict-like checkpoint, got {type(checkpoint).__name__}"
+            )
+
+        # --- Load policy weights robustly ---
+        missing_keys, unexpected_keys = self.load_state_dict(
+            policy_state, strict=False
+        )
+        if missing_keys:
+            log.warning(f"Missing keys in checkpoint: {missing_keys}")
+        if unexpected_keys:
+            log.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
+
+        # --- Handle EMA if present ---
+        ema_state = checkpoint.get("ema_state_dict") if isinstance(checkpoint, dict) else None
+        if self.ema and ema_state is not None:
             try:
-                self.ema.load_state_dict(ema_state_dict)
+                self.ema.load_state_dict(ema_state)
                 log.info("Successfully loaded EMA weights.")
             except Exception as e:
-                log.warning(f"Could not load EMA weights, they may be incompatible. Error: {e}")
+                log.warning(f"Could not load EMA weights (incompatible). Error: {e}")
         elif self.ema:
-            log.warning("Checkpoint does not contain EMA weights, which were expected.")
-        # --- END OF SOTA PATCH ---
+            log.warning("EMA object exists but checkpoint has no EMA weights.")
+
+        log.info(f"Checkpoint loaded successfully to device={self.device}")
 
 
 
