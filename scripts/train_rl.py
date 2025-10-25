@@ -51,6 +51,8 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 import gymnasium as gym
 from gymnasium.spaces import Box, Dict as DictSpace
+from itertools import cycle, chain
+import platform
 log = logging.getLogger(__name__)
 try:
     import wandb
@@ -64,7 +66,7 @@ try:
     from envs.panda_env import PandaEnv
     from utils.rl_reward_wrapper import AdvancedRewardWrapper, AdvancedRewardConfig, CurriculumConfig
     from utils.expert_dataset import ExpertTrajectoryDataset, collate_fn
-    from models.diffusion_policy import DiffusionPolicy, NoiseSchedulerConfig
+    from models.diffusion_policy import DiffusionPolicy, NoiseSchedulerConfig,VisionFusionEncoder
     # Use DictReplayBuffer from SB3-Contrib if needed, or stick to standard if sufficient
     # from sb3_contrib.common.buffers import DictReplayBuffer
     from stable_baselines3.common.buffers import ReplayBuffer as SB3ReplayBuffer # Rename for clarity
@@ -234,22 +236,15 @@ class Critic(nn.Module):
     def forward(self, obs_history: Dict[str, torch.Tensor], action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Computes Q-values using features from the *last* timestep in history."""
         # --- Feature Extraction ---
-        # No gradients needed for feature extraction during critic update
-        with torch.no_grad():
-            # Features extractor expects (B, H_o, ...)
-            vision_tokens, proprio_tokens = self.features_extractor(obs_history)
-            # Combine vision and proprio tokens: (B, H_o*(Nv+Np), D_model)
-            # For the critic, we typically only need the features from the *current* state (last in history)
-            # Let's take the features corresponding to the last observation timestep
-            # Assuming vision_tokens is (B, H_o*N_img_tokens, D) and proprio is (B, H_o, D)
-            # This needs careful slicing based on how VisionFusionEncoder structures output.
-            # Assuming VisionFusionEncoder outputs (B, H_o*N_fused_tokens, D) and (B, H_o, D)
-            # Let's average over the history dimension for simplicity and robustness
-            vision_features_avg = vision_tokens.mean(dim=1) # (B, D_model)
-            proprio_features_avg = proprio_tokens.mean(dim=1) # (B, D_model)
-            # Combine features (e.g., average or concatenate)
-            # Averaging seems more robust here.
-            features = (vision_features_avg + proprio_features_avg) / 2.0 # (B, D_model)
+        # [START OF FINAL PATCH]
+        # The no_grad block is removed. Gradients must flow through the critic
+        # during the actor update. Parameter freezing in train_step prevents the
+        # critic's weights from being changed by the actor's optimizer.
+        vision_tokens, proprio_tokens = self.features_extractor(obs_history)
+        vision_features_avg = vision_tokens.mean(dim=1)
+        proprio_features_avg = proprio_tokens.mean(dim=1)
+        features = (vision_features_avg + proprio_features_avg) / 2.0
+        # [END OF FINAL PATCH]
 
         # --- Q-Value Computation ---
         x = torch.cat([features, action], dim=1)
@@ -257,11 +252,12 @@ class Critic(nn.Module):
 
     def Q1(self, obs_history: Dict[str, torch.Tensor], action: torch.Tensor) -> torch.Tensor:
         """Computes the Q-value from the first critic only."""
-        with torch.no_grad():
-            vision_tokens, proprio_tokens = self.features_extractor(obs_history)
-            vision_features_avg = vision_tokens.mean(dim=1)
-            proprio_features_avg = proprio_tokens.mean(dim=1)
-            features = (vision_features_avg + proprio_features_avg) / 2.0
+        # [START OF FINAL PATCH]
+        vision_tokens, proprio_tokens = self.features_extractor(obs_history)
+        vision_features_avg = vision_tokens.mean(dim=1)
+        proprio_features_avg = proprio_tokens.mean(dim=1)
+        features = (vision_features_avg + proprio_features_avg) / 2.0
+        # [END OF FINAL PATCH]
 
         x = torch.cat([features, action], dim=1)
         return self.q1_net(x)
@@ -380,7 +376,7 @@ class RLFineTuner:
 
         # --- Expert Dataloader ---
         self.expert_loader = self._make_expert_loader()
-        self.expert_iterator = iter(self.expert_loader)
+        self.expert_iterator = cycle(self.expert_loader)
 
         # --- Build Models ---
         self._build_models_and_optimizers(history_obs_space)
@@ -429,77 +425,239 @@ class RLFineTuner:
         return DictSpace(history_spaces)
 
 
-    def _make_vec_env(self, is_eval: bool = False) -> VecEnv:
-        """Factory for creating the vectorized simulation environment."""
+    # def _make_vec_env(self, is_eval: bool = False) -> VecEnv:
+    #     """Factory for creating the vectorized simulation environment."""
+    #     def make_env(rank: int):
+    #         def _init():
+    #             env_cfg = self.cfg.environment
+    #             # Ensure eval envs have different seeds from training envs
+    #             seed = self.cfg.seed + rank + (1000 if is_eval else 0)
+
+    #             # 1. Create the base environment
+    #             # IMPORTANT: Need rgb_array render mode for video recording later
+    #             render_mode = "rgb_array" if is_eval else "rgb_array"
+    #             try:
+    #                 env = PandaEnv(
+    #                     xml_path=env_cfg.xml_path,
+    #                     control_mode="delta",
+    #                     render_mode=render_mode, # Critical for eval video
+    #                 )
+    #             except Exception as e:
+    #                  log.exception(f"Error creating PandaEnv (rank {rank}): {e}")
+    #                  raise
+
+    #             # 2. Create the reward configs (Hydra config management)
+    #             # Allow reward/curriculum configs to be defined in main Hydra config
+    #             try:
+    #                 reward_config = AdvancedRewardConfig(**self.cfg.get("reward", {}))
+    #                 curriculum_config = CurriculumConfig(**self.cfg.get("curriculum", {}))
+    #             except Exception as e:
+    #                 log.error(f"Error creating reward/curriculum configs: {e}. Using defaults.")
+    #                 reward_config = AdvancedRewardConfig()
+    #                 curriculum_config = CurriculumConfig()
+
+
+    #             # Override curriculum total episodes if specified in training config
+    #             curriculum_config.total_episodes = self.cfg.training.get(
+    #                  "curriculum_total_episodes", curriculum_config.total_episodes
+    #             )
+
+    #             # 3. Apply the SOTA reward wrapper
+    #             try:
+    #                 env = AdvancedRewardWrapper(
+    #                     env,
+    #                     reward_cfg=reward_config,
+    #                     curriculum_cfg=curriculum_config
+    #                 )
+    #             except Exception as e:
+    #                  log.exception(f"Error applying AdvancedRewardWrapper (rank {rank}): {e}")
+    #                  raise
+
+    #             # 4. Apply TimeLimit wrapper (standard practice)
+    #             env = gym.wrappers.TimeLimit(env, max_episode_steps=env_cfg.max_episode_steps)
+
+    #             # 5. Seed and Reset
+    #             try:
+    #                 env.reset(seed=seed)
+    #             except Exception as e:
+    #                  log.exception(f"Error resetting env (rank {rank}): {e}")
+    #                  raise
+
+    #             return env
+    #         return _init
+
+    #     n_envs = 1 if is_eval else self.cfg.environment.n_envs
+
+    #     # Use DummyVecEnv for n_envs=1 (or for debugging) to avoid multiprocessing issues
+    #     # Use SubprocVecEnv for n_envs > 1 for performance
+    #     vec_env_cls = DummyVecEnv if n_envs == 1 else SubprocVecEnv
+    #     try:
+    #         return vec_env_cls([make_env(i) for i in range(n_envs)])
+    #     except Exception as e:
+    #          log.exception(f"Error creating VecEnv: {e}")
+    #          raise
+
+    def _build_single_env(self, rank: int, is_eval: bool = False) -> gym.Env:
+        """
+        Create a single env instance, apply wrappers, seed & reset.
+        - rank: used to offset seed for deterministic but distinct envs.
+        - is_eval: if True, uses evaluation settings (less randomness).
+        """
+        log = logging.getLogger(__name__)
+        env_cfg = self.cfg.environment
+
+        # Use distinct seeds for eval vs train to avoid overlap
+        base_seed = int(getattr(self.cfg, "seed", 0))
+        seed = base_seed + rank + (1000 if is_eval else 0)
+
+        # 1) Build base environment
+        try:
+            # Replace PandaEnv below with wherever your env class actually lives
+            env = PandaEnv(
+                xml_path=env_cfg.get("xml_path", None),
+                control_mode=env_cfg.get("control_mode", "delta"),
+                render_mode="rgb_array" if not (is_eval and env_cfg.get("render_eval", False)) else "human",
+            )
+        except Exception as e:
+            log.exception(f"Failed to instantiate PandaEnv (rank={rank}): {e}")
+            raise
+
+        # 2) Optional: apply advanced reward wrapper & curriculum if present in your codebase
+        try:
+            # If you don't have these exact classes, replace / remove these lines
+            reward_cfg = None
+            curriculum_cfg = None
+            if hasattr(self.cfg, "reward"):
+                reward_cfg = AdvancedRewardConfig(**self.cfg.reward) if self.cfg.reward else None
+            if hasattr(self.cfg, "curriculum"):
+                curriculum_cfg = CurriculumConfig(**self.cfg.curriculum) if self.cfg.curriculum else None
+
+            if reward_cfg or curriculum_cfg:
+                env = AdvancedRewardWrapper(
+                    env,
+                    reward_cfg=reward_cfg,
+                    curriculum_cfg=curriculum_cfg
+                )
+        except Exception as e:
+            log.exception(f"Failed to apply reward/curriculum wrappers (rank={rank}): {e}")
+            raise
+
+        # 3) TimeLimit wrapper (useful for Gym compatibility)
+        try:
+            max_steps = int(env_cfg.get("max_episode_steps", 1000))
+            env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)
+        except Exception:
+            # If TimeLimit is not applicable, ignore
+            pass
+
+        # 4) Seed + initial reset (Gym >=0.21 uses reset(seed=...), older gym: env.seed())
+        try:
+            # prefer reset(seed=...) for newer gym/gymnasium
+            # Some envs accept seed on reset, otherwise fall back to env.seed()
+            try:
+                env.reset(seed=seed)
+            except TypeError:
+                # older gym versions
+                if hasattr(env, "seed"):
+                    env.seed(seed)
+                else:
+                    np.random.seed(seed)
+        except Exception as e:
+            log.exception(f"Failed to seed/reset environment (rank={rank}, seed={seed}): {e}")
+            raise
+
+        log.info(f"[ENV INIT] rank={rank} is_eval={is_eval} seed={seed}")
+        return env
+
+    def _make_vec_env(self, is_eval: bool = False):
+        """
+        Creates a vectorized environment for training or evaluation.
+        - Platform-aware: falls back to DummyVecEnv on Windows/macOS for stability.
+        - On Linux+GPU, initializes CUDA context prior to forking subprocesses.
+        - Returns a SB3 VecEnv instance.
+        """
+        log = logging.getLogger(__name__)
+
         def make_env(rank: int):
             def _init():
-                env_cfg = self.cfg.environment
-                # Ensure eval envs have different seeds from training envs
-                seed = self.cfg.seed + rank + (1000 if is_eval else 0)
-
-                # 1. Create the base environment
-                # IMPORTANT: Need rgb_array render mode for video recording later
-                render_mode = "rgb_array" if is_eval else "rgb_array"
-                try:
-                    env = PandaEnv(
-                        xml_path=env_cfg.xml_path,
-                        control_mode="delta",
-                        render_mode=render_mode, # Critical for eval video
-                    )
-                except Exception as e:
-                     log.exception(f"Error creating PandaEnv (rank {rank}): {e}")
-                     raise
-
-                # 2. Create the reward configs (Hydra config management)
-                # Allow reward/curriculum configs to be defined in main Hydra config
-                try:
-                    reward_config = AdvancedRewardConfig(**self.cfg.get("reward", {}))
-                    curriculum_config = CurriculumConfig(**self.cfg.get("curriculum", {}))
-                except Exception as e:
-                    log.error(f"Error creating reward/curriculum configs: {e}. Using defaults.")
-                    reward_config = AdvancedRewardConfig()
-                    curriculum_config = CurriculumConfig()
-
-
-                # Override curriculum total episodes if specified in training config
-                curriculum_config.total_episodes = self.cfg.training.get(
-                     "curriculum_total_episodes", curriculum_config.total_episodes
-                )
-
-                # 3. Apply the SOTA reward wrapper
-                try:
-                    env = AdvancedRewardWrapper(
-                        env,
-                        reward_cfg=reward_config,
-                        curriculum_cfg=curriculum_config
-                    )
-                except Exception as e:
-                     log.exception(f"Error applying AdvancedRewardWrapper (rank {rank}): {e}")
-                     raise
-
-                # 4. Apply TimeLimit wrapper (standard practice)
-                env = gym.wrappers.TimeLimit(env, max_episode_steps=env_cfg.max_episode_steps)
-
-                # 5. Seed and Reset
-                try:
-                    env.reset(seed=seed)
-                except Exception as e:
-                     log.exception(f"Error resetting env (rank {rank}): {e}")
-                     raise
-
+                # Note: _build_single_env handles seeding & reset internally.
+                env = self._build_single_env(rank, is_eval=is_eval)
                 return env
             return _init
 
-        n_envs = 1 if is_eval else self.cfg.environment.n_envs
+        n_envs = 1 if is_eval else int(getattr(self.cfg.environment, "n_envs", 1))
+        if n_envs < 1:
+            n_envs = 1
 
-        # Use DummyVecEnv for n_envs=1 (or for debugging) to avoid multiprocessing issues
-        # Use SubprocVecEnv for n_envs > 1 for performance
-        vec_env_cls = DummyVecEnv if n_envs == 1 else SubprocVecEnv
+        os_name = platform.system()
+        # default choice
+        vec_env_cls = SubprocVecEnv if n_envs > 1 else DummyVecEnv
+
+        # Platform-specific safe-guards
+        if os_name == "Windows" and n_envs > 1:
+            log.warning("[SAFEGUARD] Detected Windows OS. SubprocVecEnv uses 'spawn' multiprocessing "
+                        "which often breaks with PyTorch/CuDNN/MuJoCo. Falling back to DummyVecEnv.")
+            vec_env_cls = DummyVecEnv
+        elif os_name == "Darwin" and n_envs > 1:
+            log.warning("[SAFEGUARD] Detected macOS. Multiprocessing with GL/MuJoCo may deadlock. "
+                        "Falling back to DummyVecEnv.")
+            vec_env_cls = DummyVecEnv
+        elif os_name == "Linux" and torch.cuda.is_available() and n_envs > 1:
+            try:
+                # Warm up CUDA context to avoid duplicate-factory registration in children
+                torch.cuda.init()
+                log.info("[INFO] CUDA initialized in parent process before spawning workers.")
+            except Exception:
+                # If init fails, we still continue — worker creation may still work
+                log.warning("[WARN] torch.cuda.init() failed or was a no-op.")
+
+        env_fns = [make_env(i) for i in range(n_envs)]
+        t0 = time.time()
         try:
-            return vec_env_cls([make_env(i) for i in range(n_envs)])
+            env = vec_env_cls(env_fns)
         except Exception as e:
-             log.exception(f"Error creating VecEnv: {e}")
-             raise
+            log.error(f"[ERROR] VecEnv creation failed with {vec_env_cls.__name__}: {e}", exc_info=True)
+            # Fallback: try DummyVecEnv as recovery
+            if vec_env_cls is not DummyVecEnv:
+                log.warning("[RECOVERY] Retrying with DummyVecEnv fallback.")
+                try:
+                    env = DummyVecEnv(env_fns)
+                    vec_env_cls = DummyVecEnv
+                except Exception as e2:
+                    log.exception(f"[FATAL] DummyVecEnv also failed: {e2}")
+                    raise
+            else:
+                raise
+
+        creation_time = time.time() - t0
+        log.info(f"[ENV BUILDER] Created {n_envs} env(s) using {vec_env_cls.__name__} in {creation_time:.3f}s on {os_name} | CUDA={'ON' if torch.cuda.is_available() else 'OFF'}")
+
+        # Optional: micro-benchmark to report env stepping performance (enable in cfg)
+        try:
+            if getattr(self.cfg.environment, "diagnose_env_speed", False):
+                # perform a tiny benchmark (non-invasive)
+                obs = env.reset()
+                sample_action = None
+                # build one sample action if possible
+                try:
+                    sample_action = env.action_space.sample()
+                except Exception:
+                    sample_action = None
+                steps = 5
+                t1 = time.time()
+                for _ in range(steps):
+                    if sample_action is not None:
+                        obs, rewards, dones, infos = env.step([sample_action] * n_envs) if n_envs > 1 else env.step(sample_action)
+                    else:
+                        obs = env.reset()
+                t2 = time.time()
+                fps = (steps * max(1, n_envs)) / max(1e-6, (t2 - t1))
+                log.info(f"[DIAGNOSTIC] Env step speed ≈ {fps:.1f} steps/sec across {n_envs} env(s).")
+        except Exception as e:
+            log.warning(f"[DIAGNOSTIC] Env speed diagnostic failed: {e}")
+
+        return env
+
 
 
     def _make_expert_loader(self) -> DataLoader:
@@ -524,16 +682,30 @@ class RLFineTuner:
             drop_last=True # Important for consistent batch sizes
         )
 
+
     def _build_models_and_optimizers(self, history_obs_space: DictSpace):
         """Initializes actor, critic, target networks, and optimizers."""
         log.info("Building RL models and loading pre-trained actor...")
+
+        # --- Infer proprioception dimension from the expert dataset (SOTA practice) ---
+        try:
+            proprio_dim = self.expert_loader.dataset.get_proprioception_dim()
+            log.info(f"Inferred proprioception dimension from expert dataset: {proprio_dim}")
+            # Sanity check against environment's observation space
+            env_proprio_dim = history_obs_space["proprio"].shape[-1]
+            if proprio_dim != env_proprio_dim:
+                log.warning(f"Mismatch! Dataset proprio_dim ({proprio_dim}) vs. "
+                            f"environment proprio_dim ({env_proprio_dim}). "
+                            "Using dataset value for model architecture.")
+        except Exception as e:
+            log.critical(f"FATAL: Failed to infer proprioception dimension from the expert dataset. "
+                         f"Check dataset integrity and format. Error: {e}")
+            raise
 
         # --- Create Diffusion Policy (Actor Core) ---
         try:
             scheduler_cfg = NoiseSchedulerConfig(**self.cfg.scheduler)
             model_cfg = self.cfg.model
-            proprio_dim = history_obs_space["proprio"].shape[-1] # Dim per step
-            log.info(f"Inferred proprioception dimension per step: {proprio_dim}")
 
             diffusion_policy = DiffusionPolicy(
                 proprio_dim=proprio_dim,
@@ -589,41 +761,67 @@ class RLFineTuner:
         # --- Create Critic and Target Critic ---
         # Critic shares the *online* actor's vision encoder for representation learning
         # Make sure feature extractor doesn't update during critic step via no_grad() in Critic.forward
-        critic_feature_extractor = self.actor.diffusion_policy.vision_fusion_encoder
+        critic_feature_extractor = VisionFusionEncoder(
+            image_feat_dim=model_cfg.image_feat_dim,
+            proprio_dim=proprio_dim,
+            d_model=model_cfg.d_model
+        )
+        # Load the pre-trained weights from the actor's encoder
+        critic_feature_extractor.load_state_dict(
+            self.actor.diffusion_policy.vision_fusion_encoder.state_dict()
+        )
+
         self.critic = Critic(
             critic_feature_extractor,
             self.action_dim,
             model_cfg.d_model
         ).to(self.device)
 
-        # Target critic shares the *target* actor's vision encoder
-        critic_target_feature_extractor = self.actor_target.diffusion_policy.vision_fusion_encoder
+        # The target critic also gets its own encoder, initialized from the target actor's encoder.
+        critic_target_feature_extractor = VisionFusionEncoder(
+            image_feat_dim=model_cfg.image_feat_dim,
+            proprio_dim=proprio_dim,
+            d_model=model_cfg.d_model
+        )
+        critic_target_feature_extractor.load_state_dict(
+            self.actor_target.diffusion_policy.vision_fusion_encoder.state_dict()
+        )
+        
         self.critic_target = Critic(
             critic_target_feature_extractor,
             self.action_dim,
             model_cfg.d_model
         ).to(self.device)
+        
+        # Now, load the weights for the Q-networks themselves. The encoders are already aligned.
         self.critic_target.load_state_dict(self.critic.state_dict())
-        log.info("Critic and Target Critic created.")
+        log.info("Critic and Target Critic created with DECOUPLED encoders.")
 
         # --- Optimizers ---
         opt_cfg = self.cfg.optimizer
         try:
+            # The actor optimizer updates all parameters of the actor, including its encoder
             self.actor_optimizer = optim.AdamW(
                 self.actor.parameters(),
                 lr=opt_cfg.actor_lr,
-                weight_decay=opt_cfg.get("actor_weight_decay", 1e-4) # Add weight decay option
+                weight_decay=opt_cfg.get("actor_weight_decay", 1e-4)
             )
+
+            # The critic optimizer should ONLY update the Q-networks, not the feature extractor.
+            # The feature extractor's weights are updated via Polyak averaging from the actor's encoder.
+            critic_q_net_params = chain(self.critic.q1_net.parameters(), self.critic.q2_net.parameters())
             self.critic_optimizer = optim.AdamW(
-                self.critic.parameters(),
+                critic_q_net_params,
                 lr=opt_cfg.critic_lr,
                 weight_decay=opt_cfg.get("critic_weight_decay", 1e-4)
             )
-            log.info("Optimizers created.")
+            log.info("Optimizers created. Critic optimizer targets Q-networks only.")
         except Exception as e:
             log.exception(f"Error creating optimizers: {e}")
             raise
-
+  
+  
+  
     def select_action(self, obs_history_batch: Dict[str, np.ndarray]) -> np.ndarray:
         """Selects a batch of actions from the actor, adding exploration noise."""
         # Convert numpy batch to torch batch
@@ -663,21 +861,13 @@ class RLFineTuner:
              return
 
 
-        # 2. Sample from expert dataloader
         try:
+            # The cycling iterator handles exhaustion and reshuffling automatically
             expert_obs_chunk, expert_action_chunk = next(self.expert_iterator)
-        except StopIteration:
-            # This is the "stuck" point. Let's add logging.
-            log.info("Expert data iterator exhausted. Reloading for a new epoch...")
-            start_reload_time = time.time()
-            self.expert_iterator = iter(self.expert_loader) # This triggers the reload
-            try:
-                expert_obs_chunk, expert_action_chunk = next(self.expert_iterator)
-                reload_duration = time.time() - start_reload_time
-                log.info(f"Expert data reloaded in {reload_duration:.2f} seconds.")
-            except StopIteration:
-                log.error("Expert dataloader is empty or exhausted unexpectedly after reset.")
-                return # Skip training step if no expert data
+        except Exception as e:
+            log.error(f"Failed to fetch batch from expert dataloader: {e}. "
+                      "This can happen with multi-worker loaders. Skipping training step.", exc_info=True)
+            return
 
         # 3. Prepare Expert Data (move to device, ensure correct dtype)
         expert_obs = {
@@ -702,6 +892,13 @@ class RLFineTuner:
         dones = replay_data.dones.to(self.device).float()
 
         # --- 5. Critic Update ---
+# --- 5. Critic Update ---
+        # [START OF FINAL PATCH]
+        # Freeze the feature extractor in the critic to prevent it from being updated by the critic loss.
+        # This stabilizes representation learning and improves computational efficiency.
+        for p in self.critic.features_extractor.parameters():
+            p.requires_grad = False
+
         with torch.no_grad():
             # Target policy smoothing: Add noise to target actions
             policy_noise_scale = self.cfg.rl_algorithm.policy_noise
@@ -734,8 +931,17 @@ class RLFineTuner:
         critic_loss.backward()
         # Optional: Gradient clipping for critic
         if self.cfg.optimizer.get("critic_grad_clip_norm"):
-             torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.cfg.optimizer.critic_grad_clip_norm)
+             # We only need to clip the Q-net parameters, which are the ones in the optimizer
+             torch.nn.utils.clip_grad_norm_(
+                 chain(self.critic.q1_net.parameters(), self.critic.q2_net.parameters()), 
+                 self.cfg.optimizer.critic_grad_clip_norm
+             )
         self.critic_optimizer.step()
+
+        # Unfreeze the feature extractor for the subsequent actor update and target network updates.
+        for p in self.critic.features_extractor.parameters():
+            p.requires_grad = True
+        # [END OF FINAL PATCH]
 
         # --- 6. Delayed Actor Update ---
         if self.total_timesteps % self.cfg.rl_algorithm.policy_delay == 0:
@@ -873,54 +1079,59 @@ class RLFineTuner:
                 # Decide how to handle env errors: continue, break, etc.
                 continue # Skip this step
 
-            # --- Manage Replay Buffer and History Buffer ---
-            for i in range(self.n_envs):
-                try:
-                    # Get s_t (history *before* this step's observation is added)
-                    obs_history_t = self.obs_history.get_stacked(i)
+            try:
+                # 1. Get s_t (history *before* this step's observation is added).
+                # This is already a batched dictionary of numpy arrays.
+                obs_history_t = self.obs_history.get_batch_stacked()
 
-                    # Get next observation for this specific environment
+                # 2. Update the history buffer for all environments to get s_{t+1}.
+                # The 'infos' dict will contain the "real" next observation for terminal states.
+                # SB3's replay buffer uses this `infos` dict to store the correct terminal observation.
+                # Therefore, we can safely update our history buffer with the `next_raw_obs_list`
+                # and then handle terminal resets separately.
+                for i in range(self.n_envs):
                     env_next_obs = {k: v[i] for k, v in next_raw_obs_list.items()}
-
-                    # Append next observation to history
                     self.obs_history.append(i, env_next_obs)
+                
+                # Note: For the replay buffer, the "next_obs" is handled internally by SB3
+                # using the `infos` array for terminal states. We don't need to manually create `s_{t+1}`.
+                # We simply add the current history (`s_t`) and the raw `next_raw_obs_list`. The buffer
+                # is smart enough to use `infos[i]["terminal_observation"]` when `dones[i]` is True.
+                # However, the sb3-contrib DictReplayBuffer *does* expect the full next_obs dictionary.
+                # The logic below is more robust for both buffer types.
 
-                    # Get s_{t+1} (history *after* appending)
-                    obs_history_t_plus_1 = self.obs_history.get_stacked(i)
+                # Let's prepare the next_obs properly for the buffer.
+                # It's mostly the updated history, but for dones, it's special.
+                # For simplicity and correctness with sb3-contrib, we just pass the *updated* history.
+                # The buffer's `handle_timeout_termination=False` ensures it stores what we give it.
+                obs_history_t_plus_1 = self.obs_history.get_batch_stacked()
 
-                    # Get action, reward, done, info for this env
-                    env_action = action[i]
-                    env_reward = rewards[i]
-                    env_done = dones[i]
-                    # SB3 VecEnv typically wraps infos in a list/tuple
-                    env_info = infos[i] if isinstance(infos, (list, tuple)) else infos
+                # 3. Add the entire batch of transitions to the replay buffer in ONE call.
+                self.replay_buffer.add(
+                    obs=obs_history_t,
+                    next_obs=obs_history_t_plus_1,
+                    action=action,          # Shape (n_envs, action_dim)
+                    reward=rewards,         # Shape (n_envs,)
+                    done=dones,             # Shape (n_envs,)
+                    infos=infos,            # List of info dicts, length n_envs
+                )
 
-                    # Add transition (s_t, a_t, r_t, s_{t+1}, done_t) to buffer
-                    # Use deepcopy for info if it contains complex objects
-                    self.replay_buffer.add(
-                        obs_history_t,
-                        obs_history_t_plus_1,
-                        env_action,
-                        env_reward,
-                        env_done,
-                        [copy.deepcopy(env_info)] # SB3 expects infos as a list
-                    )
-
-                    # --- Handle Episode Termination ---
-                    if env_done:
-                        # VecEnv automatically resets, get the *real* terminal observation
+                # 4. Handle Episode Terminations (Reset History Buffers for next loop iteration).
+                # This must happen *after* adding to the buffer.
+                for i in range(self.n_envs):
+                    if dones[i]:
+                        env_info = infos[i] if isinstance(infos, (list, tuple)) else infos
                         if "terminal_observation" in env_info:
                             terminal_obs = env_info["terminal_observation"]
-                            # Reset the history buffer with the terminal observation
                             self.obs_history.reset(i, terminal_obs)
                         else:
-                             log.warning(f"No 'terminal_observation' found in info dict for env {i} on done. History buffer reset might be inaccurate.")
-                             # Attempt to reset with the last `env_next_obs` as a fallback
-                             self.obs_history.reset(i, env_next_obs)
-
-                except Exception as e:
-                    log.exception(f"Error processing step for env {i}: {e}")
-                    # Skip adding this transition if error occurs
+                            log.warning(f"No 'terminal_observation' in info dict for env {i} on done. History buffer reset might be inaccurate.")
+                            last_obs_for_env_i = {k: v[i] for k, v in next_raw_obs_list.items()}
+                            self.obs_history.reset(i, last_obs_for_env_i)
+            
+            except Exception as e:
+                log.exception(f"Error processing vectorized step and adding to buffer: {e}")
+                continue # Skip this entire batch if an error occurs
 
             # --- Update Timestep Counter ---
             # Correctly increment based on number of parallel environments

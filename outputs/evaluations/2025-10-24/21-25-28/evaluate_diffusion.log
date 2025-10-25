@@ -1,0 +1,21 @@
+[2025-10-24 21:25:28,542][__main__][INFO] - ===================================================
+[2025-10-24 21:25:28,543][__main__][INFO] -            Diffusion Policy Evaluation             
+[2025-10-24 21:25:28,544][__main__][INFO] - ===================================================
+[2025-10-24 21:25:28,546][__main__][INFO] - ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-24/13-14-50/checkpoints/backup/backup_epoch_17.pth
+seed: 42
+device: cpu
+do_offline_eval: true
+do_online_eval: true
+eval:
+  batch_size: 32
+  sampling_steps: 50
+  guidance_scale: 1.5
+  n_rollouts: 10
+  max_rollout_steps: 200
+dataset:
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+environment:
+  xml_path: envs/panda_pick_place.xml
+
+[2025-10-24 21:25:28,561][scripts.pretrain_diffusion][INFO] - Global seed set to 42
+[2025-10-24 21:25:28,562][__main__][INFO] - Loading checkpoint from: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-24\13-14-50\checkpoints\backup\backup_epoch_17.pth

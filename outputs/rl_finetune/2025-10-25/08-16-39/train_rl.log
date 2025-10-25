@@ -1,0 +1,72 @@
+[2025-10-25 08:16:39,651][__main__][INFO] - ----------- RL Fine-tuning Configuration -----------
+[2025-10-25 08:16:39,655][__main__][INFO] - seed: 42
+device: cpu
+pretrained_policy_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  num_workers: 2
+environment:
+  xml_path: envs/panda_pick_place.xml
+  n_envs: 1
+  max_episode_steps: 500
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+scheduler:
+  schedule: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+training:
+  total_timesteps: 200000
+  curriculum_total_episodes: 2000
+rl_algorithm:
+  buffer_size: 5000
+  learning_starts: 5000
+  batch_size: 128
+  gamma: 0.98
+  tau: 0.005
+  policy_delay: 2
+  policy_noise: 0.2
+  noise_clip: 0.5
+  exploration_noise: 0.1
+  guidance_scale: 1.5
+  sampling_steps: 4
+optimizer:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+logging:
+  use_wandb: false
+  wandb_project: dgpo_rl_finetune_v1
+  wandb_run_name: null
+  log_interval_steps: 800
+  eval_freq: 5000
+  n_eval_episodes: 12
+  video_log_freq: 0
+
+[2025-10-25 08:16:39,655][__main__][INFO] - --------------------------------------------------
+[2025-10-25 08:16:39,660][__main__][INFO] - Global seed set to 42
+[2025-10-25 08:16:39,661][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\2025-10-25\08-16-39
+[2025-10-25 08:16:39,666][__main__][INFO] - Initializing 1 vectorized environments...
+[2025-10-25 08:16:43,241][__main__][INFO] - Initialized evaluation environment.
+[2025-10-25 08:16:43,253][__main__][INFO] - Initializing Replay Buffer...
+[2025-10-25 08:16:43,258][__main__][INFO] - Using sb3_contrib.common.buffers.DictReplayBuffer.
+[2025-10-25 08:16:43,259][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-25 08:16:43,260][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-25 08:16:43,417][__main__][INFO] - Building RL models and loading pre-trained actor...
+[2025-10-25 08:16:43,418][__main__][INFO] - Inferred proprioception dimension from expert dataset: 22
+[2025-10-25 08:16:44,068][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-25 08:16:44,069][models.diffusion_policy][INFO] - Loading model checkpoint from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-25 08:16:44,352][__main__][INFO] - Successfully loaded pre-trained diffusion policy from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-25 08:16:44,353][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=4
+[2025-10-25 08:16:44,436][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=4
+[2025-10-25 08:16:44,477][__main__][INFO] - Actor and Target Actor created.
+[2025-10-25 08:16:44,537][__main__][INFO] - Critic and Target Critic created.
+[2025-10-25 08:16:44,542][__main__][INFO] - Optimizers created.
+[2025-10-25 08:16:44,542][__main__][INFO] - No checkpoint found at specified path. Starting training from scratch.
+[2025-10-25 08:16:44,543][__main__][INFO] - Starting RL fine-tuning...

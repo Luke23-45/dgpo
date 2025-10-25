@@ -19,13 +19,13 @@ device: "cpu" # Change to "cuda" if you have a GPU
 # ===================================================================
 # Path to the pre-trained diffusion policy weights from the pre-training step.
 # CRITICAL: UPDATE THIS PATH to point to your `best.pth` or `last.pth` file.
-pretrained_policy_path: "notes/checkpoints/best.pth"
+pretrained_policy_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth"
 
 # Path to the offline expert dataset. This is used for the "+BC" loss.
 # CRITICAL: UPDATE THIS to be your main expert dataset.
 dataset:
-  path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/expert_20251019_011015_6000_samples.lmdb"
-  num_workers: 0 # For Windows, it's often safer to set this to 0.
+  path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+  num_workers: 2 # For Windows, it's often safer to set this to 0.
 
 # ===================================================================
 # 3. ENVIRONMENT CONFIGURATION
@@ -48,10 +48,10 @@ model:
   observation_horizon: 2
   action_horizon: 8
   action_dim: 8
-  image_feat_dim: 256
-  d_model: 256
-  denoiser_layers: 6
-  denoiser_heads: 8
+  image_feat_dim: 128             # REDUCED: Smaller feature dimension from ResNet.
+  d_model: 128                  # REDUCED: Dramatically reduces Transformer size and complexity.
+  denoiser_layers: 4            # REDUCED: Fewer layers means faster forward/backward passes.
+  denoiser_heads: 4              # REDUCED: Fewer attention calculations.
 
 # ===================================================================
 # 5. DIFFUSION SCHEDULER (Must match the pre-trained model)
@@ -69,13 +69,13 @@ training:
   # Total number of environment steps to train for.
   # For a quick smoke test, use a small number like 2000.
   # For a real run, 200,000 to 1,000,000 is a good range.
-  total_timesteps: 2000
+  total_timesteps: 200000
   curriculum_total_episodes: 2000
 
 rl_algorithm:
-  buffer_size: 2000
-  learning_starts: 1000 # Collect 1000 steps of experience before the first update.
-  batch_size: 256
+  buffer_size: 5000
+  learning_starts: 5000 # Collect 1000 steps of experience before the first update.
+  batch_size: 128
   gamma: 0.98         # Discount factor
   tau: 0.005          # Soft update factor for target networks
 
@@ -103,17 +103,17 @@ optimizer:
 # ===================================================================
 logging:
   use_wandb: false
-  wandb_project: "dgpo_rl_finetune"
+  wandb_project: "dgpo_rl_finetune_v1"
   wandb_run_name: null
   
   # How often to log training metrics (in total environment steps)
-  log_interval_steps: 100
+  log_interval_steps: 800
   
   # How often to run the evaluation loop (in total environment steps)
-  eval_freq: 1000
+  eval_freq: 5000
   
   # Number of episodes to run during each evaluation
-  n_eval_episodes: 1
+  n_eval_episodes: 3
   
   # How often to save a video during evaluation (e.g., every 1st evaluation)
-  video_log_freq: 0
+  video_log_freq: 1

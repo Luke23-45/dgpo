@@ -1,0 +1,107 @@
+# FINAL CONFIGURATION (ITERATION 5)
+# Optimized for a full, high-performance RL fine-tuning run on a Colab GPU.
+# ---
+hydra:
+  run:
+    dir: outputs/rl_finetune/gpu_runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# ===================================================================
+# 1. RUN MANAGEMENT & REPRODUCIBILITY
+# ===================================================================
+seed: 42
+device: "cuda"
+pretrained_policy_path: "/content/drive/MyDrive/pda/Models/best_pretrained.pth" # Placeholder for Colab
+
+# ===================================================================
+# 2. DATASETS (Paths are for Colab, use overrides)
+# ===================================================================
+dataset:
+  path: "data/training/sota_dataset/full_training_set.lmdb"
+  num_workers: 2
+
+# ===================================================================
+# 3. ENVIRONMENT
+# ===================================================================
+environment:
+  xml_path: "envs/panda_pick_place.xml"
+  n_envs: 4
+  max_episode_steps: 500
+
+# ===================================================================
+# 4. REWARD & CURRICULUM (Placeholders for clarity)
+# ===================================================================
+reward:
+  # Parameters for AdvancedRewardWrapper would go here if you need to override them.
+  # e.g., success_bonus: 5.0
+curriculum:
+  # e.g., initial_difficulty: 0.2
+
+# ===================================================================
+# 5. MODEL ARCHITECTURE (Must match pre-trained model)
+# ===================================================================
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 256
+  d_model: 256
+  denoiser_layers: 6
+  denoiser_heads: 8
+
+# ===================================================================
+# 6. DIFFUSION SCHEDULER (Must match pre-trained model)
+# ===================================================================
+scheduler:
+  schedule: "cosine"
+  timesteps: 100
+  beta_start: 1.0e-4
+  beta_end: 0.02
+
+# ===================================================================
+# 7. TRAINING & RL ALGORITHM (TD3+BC)
+# ===================================================================
+training:
+  total_timesteps: 500000  # A solid run to see significant improvement.
+  curriculum_total_episodes: 5000 # A reasonable value for curriculum progression.
+
+rl_algorithm:
+  buffer_size: 50000         # A large buffer is crucial for stability.
+  learning_starts: 10000     # Collect a good amount of varied experience before learning.
+  batch_size: 256
+  gamma: 0.99                # Standard discount factor for many tasks.
+  tau: 0.005
+
+  # TD3 specifics
+  policy_delay: 2
+  policy_noise: 0.2
+  noise_clip: 0.5
+  exploration_noise: 0.1     # Constant exploration noise is simple and effective.
+
+  # Diffusion Actor specifics
+  guidance_scale: 1.5
+  sampling_steps: 5          # Fewer steps for faster RL action selection.
+
+# ===================================================================
+# 8. OPTIMIZER
+# ===================================================================
+optimizer:
+  actor_lr: 1.0e-5           # FINETUNING: Use a smaller LR for the actor to avoid destroying pre-trained weights.
+  critic_lr: 3.0e-4          # The critic is trained from scratch and can use a larger LR.
+  actor_weight_decay: 1.0e-4
+  critic_weight_decay: 1.0e-4
+  actor_grad_clip_norm: 1.0
+  critic_grad_clip_norm: 1.0
+
+# ===================================================================
+# 9. LOGGING & EVALUATION
+# ===================================================================
+logging:
+  use_wandb: true # Enable W&B for cloud logging. Set to false if not needed.
+  wandb_project: "dgpo_rl_finetune"
+  wandb_run_name: null
+  
+  log_interval_steps: 1000
+  eval_freq: 20000           # Evaluate every 20k steps.
+  n_eval_episodes: 20        # Very reliable evaluation score.
+  video_log_freq: 5          # Record a video every 5th evaluation phase.
+  video_fps: 20

@@ -1,0 +1,86 @@
+[2025-10-25 11:26:19,700][__main__][INFO] - ----------- RL Fine-tuning Configuration -----------
+[2025-10-25 11:26:19,705][__main__][INFO] - seed: 42
+device: cpu
+pretrained_policy_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  num_workers: 2
+environment:
+  xml_path: envs/panda_pick_place.xml
+  n_envs: 2
+  max_episode_steps: 500
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+scheduler:
+  schedule: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+training:
+  total_timesteps: 200000
+  curriculum_total_episodes: 2000
+rl_algorithm:
+  buffer_size: 5000
+  learning_starts: 5000
+  batch_size: 128
+  gamma: 0.98
+  tau: 0.005
+  policy_delay: 2
+  policy_noise: 0.2
+  noise_clip: 0.5
+  exploration_noise: 0.1
+  guidance_scale: 1.5
+  sampling_steps: 4
+optimizer:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+logging:
+  use_wandb: false
+  wandb_project: dgpo_rl_finetune_v1
+  wandb_run_name: null
+  log_interval_steps: 800
+  eval_freq: 5000
+  n_eval_episodes: 3
+  video_log_freq: 1
+
+[2025-10-25 11:26:19,705][__main__][INFO] - --------------------------------------------------
+[2025-10-25 11:26:19,713][__main__][INFO] - Global seed set to 42
+[2025-10-25 11:26:19,714][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\2025-10-25\11-26-19
+[2025-10-25 11:26:19,718][__main__][INFO] - Initializing 2 vectorized environments...
+[2025-10-25 11:26:19,719][__main__][WARNING] - [SAFEGUARD] Detected Windows OS. SubprocVecEnv uses 'spawn' multiprocessing which breaks with PyTorch/CuDNN/MuJoCo. Falling back to DummyVecEnv.
+[2025-10-25 11:26:19,719][__main__][ERROR] - [ERROR] VecEnv creation failed with DummyVecEnv: 'RLFineTuner' object has no attribute '_build_single_env'
+[2025-10-25 11:26:19,719][__main__][WARNING] - [RECOVERY] Retrying with DummyVecEnv fallback.
+[2025-10-25 11:26:19,720][__main__][ERROR] - An error occurred during the RL fine-tuning run.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 570, in _make_vec_env
+    env = vec_env_cls(env_fns)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\stable_baselines3\common\vec_env\dummy_vec_env.py", line 31, in __init__
+    self.envs = [_patch_env(fn()) for fn in env_fns]
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\stable_baselines3\common\vec_env\dummy_vec_env.py", line 31, in <listcomp>
+    self.envs = [_patch_env(fn()) for fn in env_fns]
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 531, in _init
+    env = self._build_single_env(rank, is_eval=is_eval)
+AttributeError: 'RLFineTuner' object has no attribute '_build_single_env'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 1368, in main
+    trainer = RLFineTuner(cfg)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 333, in __init__
+    self.env = self._make_vec_env(is_eval=False)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 575, in _make_vec_env
+    env = DummyVecEnv(env_fns)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\stable_baselines3\common\vec_env\dummy_vec_env.py", line 31, in __init__
+    self.envs = [_patch_env(fn()) for fn in env_fns]
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\stable_baselines3\common\vec_env\dummy_vec_env.py", line 31, in <listcomp>
+    self.envs = [_patch_env(fn()) for fn in env_fns]
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 531, in _init
+    env = self._build_single_env(rank, is_eval=is_eval)
+AttributeError: 'RLFineTuner' object has no attribute '_build_single_env'

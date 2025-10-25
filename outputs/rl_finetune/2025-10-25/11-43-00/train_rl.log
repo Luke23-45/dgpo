@@ -1,0 +1,78 @@
+[2025-10-25 11:43:00,678][__main__][INFO] - ----------- RL Fine-tuning Configuration -----------
+[2025-10-25 11:43:00,682][__main__][INFO] - seed: 42
+device: cpu
+pretrained_policy_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  num_workers: 2
+environment:
+  xml_path: envs/panda_pick_place.xml
+  n_envs: 2
+  max_episode_steps: 500
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+scheduler:
+  schedule: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+training:
+  total_timesteps: 200000
+  curriculum_total_episodes: 2000
+rl_algorithm:
+  buffer_size: 5000
+  learning_starts: 5000
+  batch_size: 128
+  gamma: 0.98
+  tau: 0.005
+  policy_delay: 2
+  policy_noise: 0.2
+  noise_clip: 0.5
+  exploration_noise: 0.1
+  guidance_scale: 1.5
+  sampling_steps: 4
+optimizer:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+logging:
+  use_wandb: false
+  wandb_project: dgpo_rl_finetune_v1
+  wandb_run_name: null
+  log_interval_steps: 800
+  eval_freq: 5000
+  n_eval_episodes: 3
+  video_log_freq: 1
+
+[2025-10-25 11:43:00,683][__main__][INFO] - --------------------------------------------------
+[2025-10-25 11:43:00,688][__main__][INFO] - Global seed set to 42
+[2025-10-25 11:43:00,688][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\2025-10-25\11-43-00
+[2025-10-25 11:43:00,695][__main__][INFO] - Initializing 2 vectorized environments...
+[2025-10-25 11:43:00,695][__main__][WARNING] - [SAFEGUARD] Detected Windows OS. SubprocVecEnv uses 'spawn' multiprocessing which often breaks with PyTorch/CuDNN/MuJoCo. Falling back to DummyVecEnv.
+[2025-10-25 11:43:04,073][__main__][INFO] - [ENV INIT] rank=0 is_eval=False seed=42
+[2025-10-25 11:43:04,877][__main__][INFO] - [ENV INIT] rank=1 is_eval=False seed=43
+[2025-10-25 11:43:04,879][__main__][INFO] - [ENV BUILDER] Created 2 env(s) using DummyVecEnv in 4.184s on Windows | CUDA=OFF
+[2025-10-25 11:43:05,717][__main__][INFO] - [ENV INIT] rank=0 is_eval=True seed=1042
+[2025-10-25 11:43:05,718][__main__][INFO] - [ENV BUILDER] Created 1 env(s) using DummyVecEnv in 0.838s on Windows | CUDA=OFF
+[2025-10-25 11:43:05,718][__main__][INFO] - Initialized evaluation environment.
+[2025-10-25 11:43:05,735][__main__][INFO] - Initializing Replay Buffer...
+[2025-10-25 11:43:05,740][__main__][INFO] - Using sb3_contrib.common.buffers.DictReplayBuffer.
+[2025-10-25 11:43:05,744][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-25 11:43:05,745][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-25 11:43:05,966][__main__][INFO] - Building RL models and loading pre-trained actor...
+[2025-10-25 11:43:05,966][__main__][INFO] - Inferred proprioception dimension from expert dataset: 22
+[2025-10-25 11:43:06,797][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-25 11:43:06,797][models.diffusion_policy][INFO] - Loading model checkpoint from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-25 11:43:07,329][__main__][INFO] - Successfully loaded pre-trained diffusion policy from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-25 11:43:07,330][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=4
+[2025-10-25 11:43:07,416][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=4
+[2025-10-25 11:43:07,460][__main__][INFO] - Actor and Target Actor created.
+[2025-10-25 11:43:07,518][__main__][INFO] - Critic and Target Critic created.
+[2025-10-25 11:43:07,522][__main__][INFO] - Optimizers created.
+[2025-10-25 11:43:07,523][__main__][INFO] - No checkpoint found at specified path. Starting training from scratch.
+[2025-10-25 11:43:07,523][__main__][INFO] - Starting RL fine-tuning...

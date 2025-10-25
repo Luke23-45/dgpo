@@ -11,7 +11,7 @@ hydra:
 # CRITICAL: Path to the trained model checkpoint (.pth file) to evaluate.
 # This should be overridden on the command line, e.g.,
 # python -m scripts.evaluate_policy ckpt_path=path/to/your/best.pth
-ckpt_path: ???
+ckpt_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-24/13-14-50/checkpoints/backup/backup_epoch_17.pth"
 
 seed: 42
 device: "cpu" # 'cuda' for GPU
@@ -42,7 +42,7 @@ eval:
 # ===================================================================
 # This dataset path should point to your validation or test set for offline eval.
 dataset:
-  val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/demos/expert_expert_run_v_..._val.lmdb"
+  val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
 
 # This environment config is needed for online rollouts.
 # It MUST match the environment the policy was trained for.

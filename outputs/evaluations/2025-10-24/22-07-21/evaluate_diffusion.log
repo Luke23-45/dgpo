@@ -1,0 +1,33 @@
+[2025-10-24 22:07:21,729][__main__][INFO] - Evaluation output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\evaluations\2025-10-24\22-07-21
+[2025-10-24 22:07:21,732][__main__][INFO] - Full evaluation config:
+ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-24/13-14-50/checkpoints/backup/backup_epoch_17.pth
+seed: 42
+device: cpu
+do_offline_eval: true
+do_online_eval: true
+eval:
+  batch_size: 32
+  sampling_steps: 50
+  guidance_scale: 1.5
+  n_rollouts: 10
+  max_rollout_steps: 200
+dataset:
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+environment:
+  xml_path: envs/panda_pick_place.xml
+
+[2025-10-24 22:07:21,743][scripts.pretrain_diffusion][INFO] - Global seed set to 42
+[2025-10-24 22:07:21,744][__main__][INFO] - Loading checkpoint from: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-24\13-14-50\checkpoints\backup\backup_epoch_17.pth
+[2025-10-24 22:07:21,978][__main__][INFO] - Successfully loaded training configuration from checkpoint.
+[2025-10-24 22:07:21,979][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93_index.json...
+[2025-10-24 22:07:21,982][utils.expert_dataset][INFO] - Loaded 260 episodes, 67656 total valid chunks (Virtually Indexed).
+[2025-10-24 22:07:22,620][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-24 22:07:22,790][__main__][INFO] - EMA weights loaded successfully.
+[2025-10-24 22:07:22,791][__main__][INFO] - Policy successfully reconstructed and loaded.
+[2025-10-24 22:07:22,794][__main__][INFO] - 
+==================================================
+OFFLINE EVALUATION
+==================================================
+[2025-10-24 22:07:22,795][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-24 22:07:22,796][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-24 22:07:22,799][__main__][INFO] - Using EMA weights for offline evaluation.

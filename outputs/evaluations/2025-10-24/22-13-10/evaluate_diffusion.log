@@ -1,0 +1,22 @@
+[2025-10-24 22:13:10,436][__main__][INFO] - Evaluation output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\evaluations\2025-10-24\22-13-10
+[2025-10-24 22:13:10,439][__main__][INFO] - Full evaluation config:
+ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-24/13-14-50/checkpoints/backup/backup_epoch_17.pth
+seed: 42
+device: cpu
+do_offline_eval: true
+do_online_eval: true
+eval:
+  batch_size: 32
+  sampling_steps: 50
+  guidance_scale: 1.5
+  n_rollouts: 10
+  max_rollout_steps: 200
+dataset:
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+environment:
+  xml_path: envs/panda_pick_place.xml
+
+[2025-10-24 22:13:10,445][scripts.pretrain_diffusion][INFO] - Global seed set to 42
+[2025-10-24 22:13:10,446][__main__][INFO] - Loading checkpoint from: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-24\13-14-50\checkpoints\backup\backup_epoch_17.pth
+[2025-10-24 22:13:10,639][__main__][INFO] - Successfully loaded training configuration from checkpoint.
+[2025-10-24 22:13:10,640][__main__][INFO] - Adapting legacy 'schedule_type' key to 'schedule' for model compatibility.
