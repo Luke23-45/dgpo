@@ -1460,7 +1460,7 @@ class RLFineTuner:
 # -------------------------
 # 4. Hydra Main Entry Point
 # -------------------------
-@hydra.main(version_base=None, config_path="../configs", config_name="finetune_rl_config")
+@hydra.main(version_base=None, config_path="../configs", config_name="train_rl")
 def main(cfg: DictConfig):
     # Setup logging (Hydra manages output dir and basic setup)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
