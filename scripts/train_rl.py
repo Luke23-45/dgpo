@@ -356,57 +356,44 @@ class RLFineTuner:
         log.info(f"Initializing {cfg.environment.n_envs} parallel training environments...")
         self.env = self._make_vec_env(is_eval=False)
 
-        # --- Evaluation Environment (No Video Recorder Wrapper Here) ---
-        # We need the unwrapped env for manual rendering during video generation
         n_eval_envs = self.cfg.logging.n_eval_episodes
         log.info(f"Initializing {n_eval_envs} parallel envs for evaluation stats...")
         self.eval_env = self._make_vec_env(is_eval=True, n_envs_override=n_eval_envs)
 
-        # [SOTA PATCH] Create a single, separate env for reliable video rendering.
         log.info("Initializing single environment for video recording...")
         self.video_env = self._make_vec_env(is_eval=True, n_envs_override=1)
 
-        # --- Action Space properties ---
+        # --- 2. Action/Observation Space Properties (Derived from env) ---
         self.action_dim = self.env.action_space.shape[0]
         self.max_action = float(self.env.action_space.high[0])
-
-        # --- Observation History & Replay Buffer ---
         self.history_len = self.cfg.model.observation_horizon
         self.n_envs = self.cfg.environment.n_envs
-
         single_step_obs_space = self.env.observation_space
-        history_obs_space = self._create_history_obs_space(single_step_obs_space, self.history_len)
 
+        # --- 3. Buffers and Dataloaders (Now that envs exist) ---
+        history_obs_space = self._create_history_obs_space(single_step_obs_space, self.history_len)
         log.info("Initializing Replay Buffer...")
-        # Ensure DictReplayBuffer is used if standard ReplayBuffer fails
         try:
-             # Use DictReplayBuffer for robustness with complex observations
              from stable_baselines3.common.buffers import DictReplayBuffer
              self.replay_buffer = DictReplayBuffer(
                  buffer_size=self.cfg.rl_algorithm.buffer_size,
                  observation_space=history_obs_space,
                  action_space=self.env.action_space,
-                 device=self.device,
+                 device=self.device, # The buffer can live on the GPU
                  n_envs=self.n_envs,
-                 handle_timeout_termination=False, # Important for PBRS
+                 handle_timeout_termination=False,
              )
              log.info("Using sb3_contrib.common.buffers.DictReplayBuffer.")
         except ImportError:
-              log.warning("sb3_contrib not found. Falling back to standard ReplayBuffer. "
-                         "Install sb3_contrib (`pip install sb3-contrib`) for robust Dict observation handling.")
-              raise ImportError("Please install sb3-contrib to use DictReplayBuffer - pip install sb3-contrib" )
-
-
+              raise ImportError("Please install sb3-contrib to use DictReplayBuffer.")
 
         self.obs_history = ObsHistoryBuffer(self.n_envs, self.history_len, single_step_obs_space)
-        # [SOTA PATCH] Size the eval history buffer for the *parallel* evaluation environment.
         self.eval_obs_history = ObsHistoryBuffer(n_eval_envs, self.history_len, single_step_obs_space)
-
-        # --- Expert Dataloader ---
         self.expert_loader = self._make_expert_loader()
         self.expert_iterator = cycle(self.expert_loader)
 
-        # --- Build Models ---
+        # --- 4. Build Models ---
+        # This is now the LAST step before setting up state tracking.
         self._build_models_and_optimizers(history_obs_space)
 
         # --- State Tracking ---
