@@ -454,52 +454,69 @@ class RLFineTuner:
         return DictSpace(history_spaces)
 
 
+  
 
-    def _build_env_worker(rank: int, cfg: DictConfig, is_eval: bool = False) -> gym.Env:
+    def _build_single_env(self, rank: int, is_eval: bool = False) -> gym.Env:
         """
-        Worker function to create a single env instance in a subprocess.
-        This function is standalone to be pickleable.
+        Create a single env instance, apply wrappers, seed & reset.
+        - rank: used to offset seed for deterministic but distinct envs.
+        - is_eval: if True, uses evaluation settings (less randomness).
         """
         log = logging.getLogger(__name__)
-        env_cfg = cfg.environment
+        env_cfg = self.cfg.environment
 
-        base_seed = int(getattr(cfg, "seed", 0))
+        # Use distinct seeds for eval vs train to avoid overlap
+        base_seed = int(getattr(self.cfg, "seed", 0))
         seed = base_seed + rank + (1000 if is_eval else 0)
 
+        # 1) Build base environment
         try:
+            # Replace PandaEnv below with wherever your env class actually lives
             env = PandaEnv(
                 xml_path=env_cfg.get("xml_path", None),
                 control_mode=env_cfg.get("control_mode", "delta"),
-                render_mode="rgb_array",
+                render_mode="rgb_array" if not (is_eval and env_cfg.get("render_eval", False)) else "human",
             )
         except Exception as e:
             log.exception(f"Failed to instantiate PandaEnv (rank={rank}): {e}")
             raise
 
+        # 2) Optional: apply advanced reward wrapper & curriculum if present in your codebase
         try:
+            # If you don't have these exact classes, replace / remove these lines
             reward_cfg = None
             curriculum_cfg = None
-            if hasattr(cfg, "reward"):
-                reward_cfg = AdvancedRewardConfig(**cfg.reward) if cfg.reward else None
-            if hasattr(cfg, "curriculum"):
-                curriculum_cfg = CurriculumConfig(**cfg.curriculum) if cfg.curriculum else None
+            if hasattr(self.cfg, "reward"):
+                reward_cfg = AdvancedRewardConfig(**self.cfg.reward) if self.cfg.reward else None
+            if hasattr(self.cfg, "curriculum"):
+                curriculum_cfg = CurriculumConfig(**self.cfg.curriculum) if self.cfg.curriculum else None
 
             if reward_cfg or curriculum_cfg:
-                env = AdvancedRewardWrapper(env, reward_cfg=reward_cfg, curriculum_cfg=curriculum_cfg)
+                env = AdvancedRewardWrapper(
+                    env,
+                    reward_cfg=reward_cfg,
+                    curriculum_cfg=curriculum_cfg
+                )
         except Exception as e:
             log.exception(f"Failed to apply reward/curriculum wrappers (rank={rank}): {e}")
             raise
 
+        # 3) TimeLimit wrapper (useful for Gym compatibility)
         try:
             max_steps = int(env_cfg.get("max_episode_steps", 1000))
             env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)
         except Exception:
+            # If TimeLimit is not applicable, ignore
             pass
 
+        # 4) Seed + initial reset (Gym >=0.21 uses reset(seed=...), older gym: env.seed())
         try:
+            # prefer reset(seed=...) for newer gym/gymnasium
+            # Some envs accept seed on reset, otherwise fall back to env.seed()
             try:
                 env.reset(seed=seed)
             except TypeError:
+                # older gym versions
                 if hasattr(env, "seed"):
                     env.seed(seed)
                 else:
@@ -508,59 +525,7 @@ class RLFineTuner:
             log.exception(f"Failed to seed/reset environment (rank={rank}, seed={seed}): {e}")
             raise
 
-        log.info(f"[ENV WORKER INIT] rank={rank} is_eval={is_eval} seed={seed}")
-        return env  
-
-    def _make_vec_env(self, is_eval: bool = False, n_envs_override: Optional[int] = None):
-        """
-        Creates a vectorized environment using the standalone worker function to
-        ensure pickleability for SubprocVecEnv.
-        """
-        log = logging.getLogger(__name__)
-
-        if n_envs_override is not None:
-            n_envs = n_envs_override
-        else:
-            n_envs = 1 if is_eval else int(getattr(self.cfg.environment, "n_envs", 1))
-        
-        if n_envs < 1: n_envs = 1
-
-        os_name = platform.system()
-        vec_env_cls = SubprocVecEnv if n_envs > 1 else DummyVecEnv
-
-        if os_name in ["Windows", "Darwin"] and n_envs > 1:
-            log.warning(f"[SAFEGUARD] Detected {os_name}. Falling back to DummyVecEnv.")
-            vec_env_cls = DummyVecEnv
-        elif os_name == "Linux" and torch.cuda.is_available() and n_envs > 1:
-            try:
-                torch.cuda.init()
-                log.info("[INFO] CUDA initialized in parent process before spawning workers.")
-            except Exception:
-                log.warning("[WARN] torch.cuda.init() failed.")
-        
-        # Use functools.partial to create pickleable callables that pass the config
-        env_fns = [
-            functools.partial(self._build_env_worker, rank=i, cfg=self.cfg, is_eval=is_eval)
-            for i in range(n_envs)
-        ]
-        
-        t0 = time.time()
-        try:
-            env = vec_env_cls(env_fns)
-        except Exception as e:
-            log.error(f"[ERROR] VecEnv creation failed with {vec_env_cls.__name__}: {e}", exc_info=True)
-            if vec_env_cls is not DummyVecEnv:
-                log.warning("[RECOVERY] Retrying with DummyVecEnv fallback.")
-                try:
-                    env = DummyVecEnv(env_fns)
-                    vec_env_cls = DummyVecEnv
-                except Exception as e2:
-                    log.exception(f"[FATAL] DummyVecEnv also failed: {e2}")
-                    raise
-            else:
-                raise
-
-        
+        log.info(f"[ENV INIT] rank={rank} is_eval={is_eval} seed={seed}")
         return env
 
     def _make_vec_env(self, is_eval: bool = False, n_envs_override: Optional[int] = None):
