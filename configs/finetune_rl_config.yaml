@@ -12,7 +12,7 @@ hydra:
 # 1. RUN MANAGEMENT & REPRODUCIBILITY
 # ===================================================================
 seed: 42
-device: "cpu" # Change to "cuda" if you have a GPU
+device: "cuda" # Change to "cuda" if you have a GPU
 
 # ===================================================================
 # 2. REQUIRED PATHS

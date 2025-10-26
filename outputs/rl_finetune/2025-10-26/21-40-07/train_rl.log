@@ -69,3 +69,99 @@ logging:
 [2025-10-26 21:40:07,740][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\2025-10-26\21-40-07
 [2025-10-26 21:40:07,745][__main__][INFO] - Initializing 2 parallel training environments...
 [2025-10-26 21:40:07,746][__main__][WARNING] - [SAFEGUARD] Detected Windows OS. SubprocVecEnv uses 'spawn' multiprocessing which often breaks with PyTorch/CuDNN/MuJoCo. Falling back to DummyVecEnv.
+[2025-10-26 21:40:11,256][__main__][INFO] - [ENV INIT] rank=0 is_eval=False seed=42
+[2025-10-26 21:40:12,240][__main__][INFO] - [ENV INIT] rank=1 is_eval=False seed=43
+[2025-10-26 21:40:12,240][__main__][INFO] - [ENV BUILDER] Created 2 env(s) using DummyVecEnv in 4.493s on Windows | CUDA=OFF
+[2025-10-26 21:40:12,241][__main__][INFO] - Initializing 1 parallel envs for evaluation stats...
+[2025-10-26 21:40:13,134][__main__][INFO] - [ENV INIT] rank=0 is_eval=True seed=1042
+[2025-10-26 21:40:13,135][__main__][INFO] - [ENV BUILDER] Created 1 env(s) using DummyVecEnv in 0.894s on Windows | CUDA=OFF
+[2025-10-26 21:40:13,135][__main__][INFO] - Initializing single environment for video recording...
+[2025-10-26 21:40:14,004][__main__][INFO] - [ENV INIT] rank=0 is_eval=True seed=1042
+[2025-10-26 21:40:14,004][__main__][INFO] - [ENV BUILDER] Created 1 env(s) using DummyVecEnv in 0.867s on Windows | CUDA=OFF
+[2025-10-26 21:40:14,019][__main__][INFO] - Initializing Replay Buffer...
+[2025-10-26 21:40:14,025][__main__][INFO] - Using sb3_contrib.common.buffers.DictReplayBuffer.
+[2025-10-26 21:40:14,026][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-26 21:40:14,027][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-26 21:40:14,028][__main__][INFO] - Building RL models and loading pre-trained actor...
+[2025-10-26 21:40:14,029][__main__][INFO] - Inferred proprioception dimension from expert dataset: 22
+[2025-10-26 21:40:14,495][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-26 21:40:14,495][models.diffusion_policy][INFO] - Loading model checkpoint from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-26 21:40:14,701][__main__][INFO] - Successfully loaded pre-trained diffusion policy from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-26 21:40:14,702][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=1
+[2025-10-26 21:40:15,220][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-26 21:40:15,244][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=1
+[2025-10-26 21:40:15,247][__main__][INFO] - Actor and Target Actor created.
+[2025-10-26 21:40:15,706][__main__][INFO] - Critic MLP built with hidden_dims=[512, 512], use_layernorm=True
+[2025-10-26 21:40:15,706][__main__][INFO] - Critic using features from averaged history.
+[2025-10-26 21:40:16,184][__main__][INFO] - Critic MLP built with hidden_dims=[512, 512], use_layernorm=True
+[2025-10-26 21:40:16,185][__main__][INFO] - Critic using features from averaged history.
+[2025-10-26 21:40:16,210][__main__][INFO] - Critic and Target Critic created with DECOUPLED encoders.
+[2025-10-26 21:40:16,211][__main__][INFO] - Optimizers created. Critic optimizer targets Q-networks only.
+[2025-10-26 21:40:16,212][__main__][INFO] - CosineAnnealingLR schedulers created.
+[2025-10-26 21:40:16,212][__main__][INFO] - No checkpoint found at specified path. Starting training from scratch.
+[2025-10-26 21:40:16,212][__main__][INFO] - Starting RL fine-tuning...
+[2025-10-26 21:40:17,535][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93.lmdb | mode=RO | file-mode
+[2025-10-26 21:41:16,540][__main__][INFO] - 
+----------- PROFILING STATS (avg ms per loop) -----------
+[2025-10-26 21:41:16,541][__main__][INFO] - select_action       : 0.00 ms
+[2025-10-26 21:41:16,541][__main__][INFO] - env_step            : 604.59 ms
+[2025-10-26 21:41:16,542][__main__][INFO] - buffer_add_etc      : 2.00 ms
+[2025-10-26 21:41:16,542][__main__][INFO] - train_step          : 59094.29 ms
+[2025-10-26 21:41:16,542][__main__][INFO] - total_loop          : 59700.88 ms
+[2025-10-26 21:41:16,542][__main__][INFO] - ---------------------------------------------------------
+[2025-10-26 21:42:42,897][__main__][INFO] - 
+----------- PROFILING STATS (avg ms per loop) -----------
+[2025-10-26 21:42:42,897][__main__][INFO] - select_action       : 270.50 ms
+[2025-10-26 21:42:42,898][__main__][INFO] - env_step            : 658.92 ms
+[2025-10-26 21:42:42,898][__main__][INFO] - buffer_add_etc      : 2.00 ms
+[2025-10-26 21:42:42,899][__main__][INFO] - train_step          : 72095.95 ms
+[2025-10-26 21:42:42,899][__main__][INFO] - total_loop          : 73027.37 ms
+[2025-10-26 21:42:42,899][__main__][INFO] - ---------------------------------------------------------
+[2025-10-26 21:43:39,925][__main__][INFO] - 
+----------- PROFILING STATS (avg ms per loop) -----------
+[2025-10-26 21:43:39,926][__main__][INFO] - select_action       : 379.00 ms
+[2025-10-26 21:43:39,926][__main__][INFO] - env_step            : 707.61 ms
+[2025-10-26 21:43:39,926][__main__][INFO] - buffer_add_etc      : 2.67 ms
+[2025-10-26 21:43:39,927][__main__][INFO] - train_step          : 66604.16 ms
+[2025-10-26 21:43:39,927][__main__][INFO] - total_loop          : 67693.44 ms
+[2025-10-26 21:43:39,927][__main__][INFO] - ---------------------------------------------------------
+[2025-10-26 21:45:03,801][__main__][INFO] - 
+----------- PROFILING STATS (avg ms per loop) -----------
+[2025-10-26 21:45:03,801][__main__][INFO] - select_action       : 365.00 ms
+[2025-10-26 21:45:03,802][__main__][INFO] - env_step            : 680.36 ms
+[2025-10-26 21:45:03,802][__main__][INFO] - buffer_add_etc      : 2.74 ms
+[2025-10-26 21:45:03,802][__main__][INFO] - train_step          : 70690.12 ms
+[2025-10-26 21:45:03,803][__main__][INFO] - total_loop          : 71738.22 ms
+[2025-10-26 21:45:03,803][__main__][INFO] - ---------------------------------------------------------
+[2025-10-26 21:45:59,986][__main__][INFO] - 
+----------- PROFILING STATS (avg ms per loop) -----------
+[2025-10-26 21:45:59,987][__main__][INFO] - select_action       : 370.20 ms
+[2025-10-26 21:45:59,988][__main__][INFO] - env_step            : 663.49 ms
+[2025-10-26 21:45:59,988][__main__][INFO] - buffer_add_etc      : 2.59 ms
+[2025-10-26 21:45:59,989][__main__][INFO] - train_step          : 67590.87 ms
+[2025-10-26 21:45:59,989][__main__][INFO] - total_loop          : 68627.15 ms
+[2025-10-26 21:45:59,990][__main__][INFO] - ---------------------------------------------------------
+[2025-10-26 21:47:20,958][__main__][INFO] - 
+----------- PROFILING STATS (avg ms per loop) -----------
+[2025-10-26 21:47:20,959][__main__][INFO] - select_action       : 382.17 ms
+[2025-10-26 21:47:20,959][__main__][INFO] - env_step            : 684.08 ms
+[2025-10-26 21:47:20,960][__main__][INFO] - buffer_add_etc      : 2.49 ms
+[2025-10-26 21:47:20,960][__main__][INFO] - train_step          : 69615.23 ms
+[2025-10-26 21:47:20,961][__main__][INFO] - total_loop          : 70683.96 ms
+[2025-10-26 21:47:20,961][__main__][INFO] - ---------------------------------------------------------
+[2025-10-26 21:48:18,917][__main__][INFO] - 
+----------- PROFILING STATS (avg ms per loop) -----------
+[2025-10-26 21:48:18,917][__main__][INFO] - select_action       : 406.14 ms
+[2025-10-26 21:48:18,918][__main__][INFO] - env_step            : 698.92 ms
+[2025-10-26 21:48:18,918][__main__][INFO] - buffer_add_etc      : 2.56 ms
+[2025-10-26 21:48:18,918][__main__][INFO] - train_step          : 67757.77 ms
+[2025-10-26 21:48:18,918][__main__][INFO] - total_loop          : 68865.40 ms
+[2025-10-26 21:48:18,919][__main__][INFO] - ---------------------------------------------------------
+[2025-10-26 21:49:47,202][__main__][INFO] - 
+----------- PROFILING STATS (avg ms per loop) -----------
+[2025-10-26 21:49:47,203][__main__][INFO] - select_action       : 406.87 ms
+[2025-10-26 21:49:47,203][__main__][INFO] - env_step            : 712.83 ms
+[2025-10-26 21:49:47,203][__main__][INFO] - buffer_add_etc      : 3.11 ms
+[2025-10-26 21:49:47,203][__main__][INFO] - train_step          : 70169.82 ms
+[2025-10-26 21:49:47,204][__main__][INFO] - total_loop          : 71292.63 ms
+[2025-10-26 21:49:47,204][__main__][INFO] - ---------------------------------------------------------
