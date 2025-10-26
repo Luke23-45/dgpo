@@ -983,19 +983,12 @@ class RLFineTuner:
         # Determine total number of training loops
         # Each loop processes self.n_envs steps
         num_loops = int(self.cfg.training.total_timesteps) // self.n_envs
-        timings = {
-            "select_action": [],
-            "env_step": [],
-            "buffer_add_etc": [],
-            "train_step": [],
-            "total_loop": []
-        }
+
         for loop_idx in tqdm(range(num_loops), desc="Total Timesteps"):
-            t_loop_start = time.time()
+
             current_loop_timestep = loop_idx * self.n_envs
 
             # --- Action Selection ---
-            t0 = time.time()
             if current_loop_timestep < self.cfg.rl_algorithm.learning_starts:
                 # Sample random actions before learning starts
                 action = np.array([self.env.action_space.sample() for _ in range(self.n_envs)])
@@ -1003,10 +996,7 @@ class RLFineTuner:
                 # Get stacked history for policy inference
                 stacked_obs_batch = self.obs_history.get_batch_stacked()
                 action = self.select_action(stacked_obs_batch)
-            timings["select_action"].append(time.time() - t0) # PROFILING
 
-            # --- Environment Interaction ---
-            t0 = time.time() # PROFILING
             # --- Environment Interaction ---
             try:
                 next_raw_obs_list, rewards, dones, infos = self.env.step(action)
@@ -1022,10 +1012,7 @@ class RLFineTuner:
                 log.exception(f"Error during environment step: {e}")
                 # Decide how to handle env errors: continue, break, etc.
                 continue # Skip this step
-            timings["env_step"].append(time.time() - t0) # PROFILING
 
-            # --- Buffer and History Management ---
-            t0 = time.time() # PROFILING
             try:
                 # 1. Get s_t (history *before* this step's observation is added).
                 # This is already a batched dictionary of numpy arrays.
@@ -1079,30 +1066,22 @@ class RLFineTuner:
             except Exception as e:
                 log.exception(f"Error processing vectorized step and adding to buffer: {e}")
                 continue # Skip this entire batch if an error occurs
-            timings["buffer_add_etc"].append(time.time() - t0) # PROFILING
 
             # --- Update Timestep Counter ---
             # Correctly increment based on number of parallel environments
             self.total_timesteps = (loop_idx + 1) * self.n_envs
-            t0 = time.time() # PROFILING
+
             # --- Training Step ---
             if self.total_timesteps >= self.cfg.rl_algorithm.learning_starts:
                 # Perform gradient updates using sampled data
                 self.train_step()
-            timings["train_step"].append(time.time() - t0)
 
             # --- Evaluation and Checkpointing ---
             if self.total_timesteps - self.timesteps_since_eval >= self.cfg.logging.eval_freq:
                 self.evaluate()
                 self._save_checkpoint() # Save checkpoint after evaluation
                 self.timesteps_since_eval = self.total_timesteps
-            timings["total_loop"].append(time.time() - t_loop_start)
-            if (loop_idx + 1) % 1 == 0: # Print stats every 200 loops
-                log.info("\n----------- PROFILING STATS (avg ms per loop) -----------")
-                for key, val in timings.items():
-                    avg_time_ms = np.mean(val) * 1000
-                    log.info(f"{key:<20}: {avg_time_ms:.2f} ms")
-                log.info("---------------------------------------------------------")
+
         # --- Final Save ---
         log.info("Training finished. Saving final checkpoint.")
         self._save_checkpoint(is_final=True)
