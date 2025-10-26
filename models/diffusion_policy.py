@@ -438,8 +438,15 @@ class DiffusionPolicy(nn.Module):
         obs_on_device = {k: v.to(self.device) for k, v in obs.items()}
         return self.vision_fusion_encoder(obs_on_device)
 
-    def compute_loss(self, actions: torch.Tensor, obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Computes the diffusion MSE loss with support for Classifier-Free Guidance."""
+    def compute_loss(self, 
+                     actions: torch.Tensor, 
+                     obs: Dict[str, torch.Tensor], 
+                     weights: Optional[torch.Tensor] = None
+                     ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Computes the diffusion MSE loss with support for Classifier-Free Guidance
+        and optional per-sample weighting for RL fine-tuning.
+        """
         actions = actions.to(self.device)
         B = actions.shape[0]
 
@@ -456,7 +463,25 @@ class DiffusionPolicy(nn.Module):
         proprio_cond[uncond_mask] = self.uncond_proprio_embedding
 
         predicted_noise = self.denoiser(noisy_actions, timesteps, vision_cond, proprio_cond)
-        loss = F.mse_loss(predicted_noise, noise)
+        
+        # --- START OF SOTA PATCH FOR WEIGHTED LOSS ---
+        # 1. Compute per-sample loss by preventing reduction
+        per_sample_loss = F.mse_loss(predicted_noise, noise, reduction='none')
+        
+        # 2. Average loss across the action horizon and action dimension
+        # Shape changes from (B, H_a, D_a) to (B,)
+        per_sample_loss = per_sample_loss.mean(dim=list(range(1, per_sample_loss.ndim)))
+
+        # 3. Apply weights if provided (for RL fine-tuning)
+        if weights is not None:
+            # Ensure weights tensor is the correct shape (B,)
+            if weights.ndim > 1:
+                weights = weights.squeeze()
+            loss = (per_sample_loss * weights).mean()
+        else:
+            # Fallback to standard un-weighted loss (for pre-training)
+            loss = per_sample_loss.mean()
+        # --- END OF SOTA PATCH FOR WEIGHTED LOSS ---
 
         if self.training and self.ema is not None:
             self.ema.update(self)

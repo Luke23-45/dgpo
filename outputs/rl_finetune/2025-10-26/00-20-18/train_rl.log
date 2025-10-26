@@ -1,0 +1,100 @@
+[2025-10-26 00:20:18,161][__main__][INFO] - ----------- RL Fine-tuning Configuration -----------
+[2025-10-26 00:20:18,166][__main__][INFO] - seed: 42
+device: cpu
+pretrained_policy_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  num_workers: 0
+environment:
+  xml_path: envs/panda_pick_place.xml
+  n_envs: 2
+  max_episode_steps: 500
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+scheduler:
+  schedule: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+training:
+  total_timesteps: 200000
+  curriculum_total_episodes: 2000
+rl_algorithm:
+  buffer_size: 16000
+  learning_starts: 4200
+  batch_size: 128
+  gamma: 0.98
+  tau: 0.005
+  policy_delay: 2
+  policy_noise: 0.2
+  noise_clip: 0.5
+  exploration_noise: 0.1
+  guidance_scale: 1.5
+  sampling_steps: 4
+optimizer:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+logging:
+  use_wandb: false
+  wandb_project: dgpo_rl_finetune_v1
+  wandb_run_name: null
+  log_interval_steps: 800
+  eval_freq: 4000
+  n_eval_episodes: 3
+  video_log_freq: 3
+
+[2025-10-26 00:20:18,167][__main__][INFO] - --------------------------------------------------
+[2025-10-26 00:20:18,171][__main__][INFO] - Global seed set to 42
+[2025-10-26 00:20:18,172][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\2025-10-26\00-20-18
+[2025-10-26 00:20:18,183][__main__][INFO] - Initializing 2 vectorized environments...
+[2025-10-26 00:20:21,114][__main__][INFO] - [ENV INIT] rank=0 is_eval=True seed=1042
+[2025-10-26 00:20:21,114][__main__][INFO] - [ENV BUILDER] Created 1 env(s) using DummyVecEnv in 2.930s on Windows | CUDA=OFF
+[2025-10-26 00:20:21,115][__main__][INFO] - Initializing 3 parallel envs for evaluation stats...
+[2025-10-26 00:20:21,116][__main__][WARNING] - [SAFEGUARD] Detected Windows OS. SubprocVecEnv uses 'spawn' multiprocessing which often breaks with PyTorch/CuDNN/MuJoCo. Falling back to DummyVecEnv.
+[2025-10-26 00:20:22,063][__main__][INFO] - [ENV INIT] rank=0 is_eval=True seed=1042
+[2025-10-26 00:20:22,959][__main__][INFO] - [ENV INIT] rank=1 is_eval=True seed=1043
+[2025-10-26 00:20:23,856][__main__][INFO] - [ENV INIT] rank=2 is_eval=True seed=1044
+[2025-10-26 00:20:23,857][__main__][INFO] - [ENV BUILDER] Created 3 env(s) using DummyVecEnv in 2.742s on Windows | CUDA=OFF
+[2025-10-26 00:20:23,858][__main__][INFO] - Initializing single environment for video recording...
+[2025-10-26 00:20:24,782][__main__][INFO] - [ENV INIT] rank=0 is_eval=True seed=1042
+[2025-10-26 00:20:24,783][__main__][INFO] - [ENV BUILDER] Created 1 env(s) using DummyVecEnv in 0.925s on Windows | CUDA=OFF
+[2025-10-26 00:20:24,794][__main__][INFO] - Initializing Replay Buffer...
+[2025-10-26 00:20:25,602][__main__][INFO] - Using sb3_contrib.common.buffers.DictReplayBuffer.
+[2025-10-26 00:20:25,604][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-26 00:20:25,605][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-26 00:20:25,616][__main__][INFO] - Building RL models and loading pre-trained actor...
+[2025-10-26 00:20:25,617][__main__][INFO] - Inferred proprioception dimension from expert dataset: 22
+[2025-10-26 00:20:26,234][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-26 00:20:26,234][models.diffusion_policy][INFO] - Loading model checkpoint from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-26 00:20:26,446][__main__][INFO] - Successfully loaded pre-trained diffusion policy from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-26 00:20:26,447][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=4
+[2025-10-26 00:20:26,895][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-26 00:20:26,921][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=4
+[2025-10-26 00:20:26,924][__main__][INFO] - Actor and Target Actor created.
+[2025-10-26 00:20:27,922][__main__][INFO] - Critic and Target Critic created with DECOUPLED encoders.
+[2025-10-26 00:20:27,924][__main__][INFO] - Optimizers created. Critic optimizer targets Q-networks only.
+[2025-10-26 00:20:27,925][__main__][INFO] - CosineAnnealingLR schedulers created.
+[2025-10-26 00:20:27,925][__main__][INFO] - No checkpoint found at specified path. Starting training from scratch.
+[2025-10-26 00:20:27,925][__main__][INFO] - Starting RL fine-tuning...
+[2025-10-26 00:20:28,243][__main__][ERROR] - Error during initial environment reset: index 1 is out of bounds for axis 0 with size 1
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 1060, in run
+    env_obs = {k: v[i] for k, v in raw_obs_list.items()}
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 1060, in <dictcomp>
+    env_obs = {k: v[i] for k, v in raw_obs_list.items()}
+IndexError: index 1 is out of bounds for axis 0 with size 1
+[2025-10-26 00:20:28,244][__main__][ERROR] - An error occurred during the RL fine-tuning run.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 1417, in main
+    trainer.run()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 1060, in run
+    env_obs = {k: v[i] for k, v in raw_obs_list.items()}
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 1060, in <dictcomp>
+    env_obs = {k: v[i] for k, v in raw_obs_list.items()}
+IndexError: index 1 is out of bounds for axis 0 with size 1

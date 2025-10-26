@@ -53,6 +53,8 @@ import gymnasium as gym
 from gymnasium.spaces import Box, Dict as DictSpace
 from itertools import cycle, chain
 import platform
+import functools 
+
 log = logging.getLogger(__name__)
 try:
     import wandb
@@ -70,6 +72,7 @@ try:
     # Use DictReplayBuffer from SB3-Contrib if needed, or stick to standard if sufficient
     # from sb3_contrib.common.buffers import DictReplayBuffer
     from stable_baselines3.common.buffers import ReplayBuffer as SB3ReplayBuffer # Rename for clarity
+  
     # Using SB3's DictReplayBuffer if needed, else the standard one adapted
     # Check if standard ReplayBuffer handles DictSpace well enough
     try:
@@ -141,7 +144,7 @@ class ObsHistoryBuffer:
                  # Pre-fill with zeros matching the space shape and dtype
                 zero_obs = np.zeros(shape, dtype=dtype)
                 for _ in range(history_len):
-                    env_buffer[key].append(zero_obs)
+                    env_buffer[key].append(zero_obs.copy())
 
             self.buffers.append(env_buffer)
 
@@ -206,59 +209,73 @@ class ObsHistoryBuffer:
 
 
 class Critic(nn.Module):
-    """Twin Critic network for TD3, using a shared feature extractor."""
-    def __init__(self, features_extractor: nn.Module, action_dim: int, d_model: int):
+    """Twin Critic network for TD3."""
+    def __init__(self,
+                 features_extractor: nn.Module,
+                 action_dim: int,
+                 d_model: int,
+                 hidden_dims: List[int] = [512, 512], # From config
+                 use_layernorm: bool = True,          # From config
+                 use_last_feature: bool = False      # From config
+                 ):
         super().__init__()
-        # IMPORTANT: Do NOT keep a reference to the online actor's extractor directly
-        # if the actor is also being trained. Clone it or pass features.
-        # Since the feature extractor is part of the DiffusionPolicy which *is* trained (actor_loss),
-        # we should use it in no_grad mode or pass features explicitly.
-        # The current implementation uses no_grad, which is correct for TD3's critic update.
         self.features_extractor = features_extractor
+        self.use_last_feature = use_last_feature
+        self.d_model = d_model
 
-        # Q1 network
-        self.q1_net = nn.Sequential(
-            nn.Linear(d_model + action_dim, 512), nn.ReLU(),
-            nn.LayerNorm(512), # Add LayerNorm for stability
-            nn.Linear(512, 512), nn.ReLU(),
-            nn.LayerNorm(512),
-            nn.Linear(512, 1)
-        )
-        # Q2 network
-        self.q2_net = nn.Sequential(
-            nn.Linear(d_model + action_dim, 512), nn.ReLU(),
-            nn.LayerNorm(512),
-            nn.Linear(512, 512), nn.ReLU(),
-            nn.LayerNorm(512),
-            nn.Linear(512, 1)
-        )
+        # Build Q-networks based on config
+        self.q1_net = self._build_mlp(d_model + action_dim, 1, hidden_dims, use_layernorm)
+        self.q2_net = self._build_mlp(d_model + action_dim, 1, hidden_dims, use_layernorm)
+        log.info(f"Critic MLP built with hidden_dims={hidden_dims}, use_layernorm={use_layernorm}")
+        log.info(f"Critic using features from {'last timestep' if use_last_feature else 'averaged history'}.")
+
+
+    def _build_mlp(self, input_dim: int, output_dim: int, hidden_dims: List[int], use_layernorm: bool) -> nn.Sequential:
+        """Helper to build MLP layers."""
+        layers = []
+        current_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(current_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            if use_layernorm:
+                layers.append(nn.LayerNorm(hidden_dim))
+            current_dim = hidden_dim
+        layers.append(nn.Linear(current_dim, output_dim))
+        return nn.Sequential(*layers)
+
+    def _extract_features(self, obs_history: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Extracts features, applying configured logic (last vs avg)."""
+        # Gradients must flow for actor update, so parameter freezing is handled in train_step.
+        vision_tokens, proprio_tokens = self.features_extractor(obs_history)
+
+        if self.use_last_feature:
+            # --- Use features from the LAST timestep ---
+            # This assumes both vision_tokens and proprio_tokens have shape (B, H_o, D).
+            # If your VisionFusionEncoder has a more complex output, this logic may need adjustment.
+            if vision_tokens.shape[1] == proprio_tokens.shape[1]: # Check for history dimension
+                 last_vision_feat = vision_tokens[:, -1, :]
+                 last_proprio_feat = proprio_tokens[:, -1, :]
+                 features = (last_vision_feat + last_proprio_feat) / 2.0
+            else:
+                 log.warning("Unexpected feature shapes for 'last_feature' mode. Falling back to averaging.")
+                 features = (vision_tokens.mean(dim=1) + proprio_tokens.mean(dim=1)) / 2.0
+        else:
+            # --- Average features over history (default method) ---
+            vision_features_avg = vision_tokens.mean(dim=1)
+            proprio_features_avg = proprio_tokens.mean(dim=1)
+            features = (vision_features_avg + proprio_features_avg) / 2.0
+
+        return features
 
     def forward(self, obs_history: Dict[str, torch.Tensor], action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Computes Q-values using features from the *last* timestep in history."""
-        # --- Feature Extraction ---
-        # [START OF FINAL PATCH]
-        # The no_grad block is removed. Gradients must flow through the critic
-        # during the actor update. Parameter freezing in train_step prevents the
-        # critic's weights from being changed by the actor's optimizer.
-        vision_tokens, proprio_tokens = self.features_extractor(obs_history)
-        vision_features_avg = vision_tokens.mean(dim=1)
-        proprio_features_avg = proprio_tokens.mean(dim=1)
-        features = (vision_features_avg + proprio_features_avg) / 2.0
-        # [END OF FINAL PATCH]
-
-        # --- Q-Value Computation ---
+        """Computes Q-values."""
+        features = self._extract_features(obs_history)
         x = torch.cat([features, action], dim=1)
         return self.q1_net(x), self.q2_net(x)
 
     def Q1(self, obs_history: Dict[str, torch.Tensor], action: torch.Tensor) -> torch.Tensor:
         """Computes the Q-value from the first critic only."""
-        # [START OF FINAL PATCH]
-        vision_tokens, proprio_tokens = self.features_extractor(obs_history)
-        vision_features_avg = vision_tokens.mean(dim=1)
-        proprio_features_avg = proprio_tokens.mean(dim=1)
-        features = (vision_features_avg + proprio_features_avg) / 2.0
-        # [END OF FINAL PATCH]
-
+        features = self._extract_features(obs_history)
         x = torch.cat([features, action], dim=1)
         return self.q1_net(x)
 
@@ -272,25 +289,38 @@ class DiffusionActor(nn.Module):
         self.sampling_steps = sampling_steps
         log.info(f"DiffusionActor initialized with guidance_scale={guidance_scale}, sampling_steps={sampling_steps}")
 
-
     @torch.no_grad()
-    def forward(self, obs_history: Dict[str, torch.Tensor], deterministic: bool = True) -> torch.Tensor:
-        """Selects an action using the diffusion policy with CFG."""
+    def act(self, obs_history: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Selects an action for inference/environment interaction (no gradients)."""
         self.diffusion_policy.eval() # Ensure model is in eval mode
-
-        # Number of sampling steps can be fixed or depend on deterministic flag
-        # Using a fixed (small) number is typical for RL inference speed
-        steps = self.sampling_steps
-
+        
         sampled_actions = self.diffusion_policy.sample(
             obs_history,
-            steps=steps,
+            steps=self.sampling_steps,
             guidance_scale=self.guidance_scale,
             use_ema=True # Use EMA weights for inference
         )
-        # Return the first action in the predicted sequence [cite: 826]
-        # Shape: (B, H_a, A_dim) -> (B, A_dim)
+        # Return the first action in the predicted sequence
         return sampled_actions[:, 0, :]
+
+    def forward(self, obs_history: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Selects an action with gradients enabled through sampling.
+        WARNING: Backpropagating through diffusion sampling is computationally
+        expensive and potentially unstable. This method should only be used
+        with the original TD3-style actor loss, not the preferred re-weighted BC loss.
+        """
+        self.diffusion_policy.train() # Ensure model is in train mode for training forward pass
+        
+        # Use non-EMA weights for the training forward pass
+        sampled_actions = self.diffusion_policy.sample(
+            obs_history,
+            steps=self.sampling_steps,
+            guidance_scale=self.guidance_scale,
+            use_ema=False 
+        )
+        return sampled_actions[:, 0, :]
+
 
 # -------------------------
 # 3. Main Trainer Class
@@ -323,13 +353,18 @@ class RLFineTuner:
             )
 
         # --- Vectorized Environments ---
-        log.info(f"Initializing {cfg.environment.n_envs} vectorized environments...")
+        log.info(f"Initializing {cfg.environment.n_envs} parallel training environments...")
         self.env = self._make_vec_env(is_eval=False)
 
         # --- Evaluation Environment (No Video Recorder Wrapper Here) ---
         # We need the unwrapped env for manual rendering during video generation
-        self.eval_env_unwrapped = self._make_vec_env(is_eval=True)
-        log.info("Initialized evaluation environment.")
+        n_eval_envs = self.cfg.logging.n_eval_episodes
+        log.info(f"Initializing {n_eval_envs} parallel envs for evaluation stats...")
+        self.eval_env = self._make_vec_env(is_eval=True, n_envs_override=n_eval_envs)
+
+        # [SOTA PATCH] Create a single, separate env for reliable video rendering.
+        log.info("Initializing single environment for video recording...")
+        self.video_env = self._make_vec_env(is_eval=True, n_envs_override=1)
 
         # --- Action Space properties ---
         self.action_dim = self.env.action_space.shape[0]
@@ -357,22 +392,15 @@ class RLFineTuner:
              )
              log.info("Using sb3_contrib.common.buffers.DictReplayBuffer.")
         except ImportError:
-             log.warning("sb3_contrib not found. Falling back to standard ReplayBuffer. "
+              log.warning("sb3_contrib not found. Falling back to standard ReplayBuffer. "
                          "Install sb3_contrib (`pip install sb3-contrib`) for robust Dict observation handling.")
-             # Attempt with standard buffer, might have issues with Dicts
-             self.replay_buffer = SB3ReplayBuffer(
-                 buffer_size=self.cfg.rl_algorithm.buffer_size,
-                 observation_space=history_obs_space,
-                 action_space=self.env.action_space,
-                 device=self.device,
-                 n_envs=self.n_envs,
-                 handle_timeout_termination=False,
-             )
+              raise ImportError("Please install sb3-contrib to use DictReplayBuffer - pip install sb3-contrib" )
+
 
 
         self.obs_history = ObsHistoryBuffer(self.n_envs, self.history_len, single_step_obs_space)
-        # Separate history buffer for the single evaluation environment
-        self.eval_obs_history = ObsHistoryBuffer(1, self.history_len, single_step_obs_space)
+        # [SOTA PATCH] Size the eval history buffer for the *parallel* evaluation environment.
+        self.eval_obs_history = ObsHistoryBuffer(n_eval_envs, self.history_len, single_step_obs_space)
 
         # --- Expert Dataloader ---
         self.expert_loader = self._make_expert_loader()
@@ -385,6 +413,7 @@ class RLFineTuner:
         self.total_timesteps = 0
         self.timesteps_since_eval = 0
         self.best_eval_success_rate = -1.0 # Track best model based on success rate
+        self.grad_accumulation_counter = 0 # For gradient accumulation
 
         # --- Checkpointing ---
         self.checkpoint_path = self.output_dir / "checkpoints" / "last_checkpoint.pth"
@@ -425,77 +454,7 @@ class RLFineTuner:
         return DictSpace(history_spaces)
 
 
-    # def _make_vec_env(self, is_eval: bool = False) -> VecEnv:
-    #     """Factory for creating the vectorized simulation environment."""
-    #     def make_env(rank: int):
-    #         def _init():
-    #             env_cfg = self.cfg.environment
-    #             # Ensure eval envs have different seeds from training envs
-    #             seed = self.cfg.seed + rank + (1000 if is_eval else 0)
-
-    #             # 1. Create the base environment
-    #             # IMPORTANT: Need rgb_array render mode for video recording later
-    #             render_mode = "rgb_array" if is_eval else "rgb_array"
-    #             try:
-    #                 env = PandaEnv(
-    #                     xml_path=env_cfg.xml_path,
-    #                     control_mode="delta",
-    #                     render_mode=render_mode, # Critical for eval video
-    #                 )
-    #             except Exception as e:
-    #                  log.exception(f"Error creating PandaEnv (rank {rank}): {e}")
-    #                  raise
-
-    #             # 2. Create the reward configs (Hydra config management)
-    #             # Allow reward/curriculum configs to be defined in main Hydra config
-    #             try:
-    #                 reward_config = AdvancedRewardConfig(**self.cfg.get("reward", {}))
-    #                 curriculum_config = CurriculumConfig(**self.cfg.get("curriculum", {}))
-    #             except Exception as e:
-    #                 log.error(f"Error creating reward/curriculum configs: {e}. Using defaults.")
-    #                 reward_config = AdvancedRewardConfig()
-    #                 curriculum_config = CurriculumConfig()
-
-
-    #             # Override curriculum total episodes if specified in training config
-    #             curriculum_config.total_episodes = self.cfg.training.get(
-    #                  "curriculum_total_episodes", curriculum_config.total_episodes
-    #             )
-
-    #             # 3. Apply the SOTA reward wrapper
-    #             try:
-    #                 env = AdvancedRewardWrapper(
-    #                     env,
-    #                     reward_cfg=reward_config,
-    #                     curriculum_cfg=curriculum_config
-    #                 )
-    #             except Exception as e:
-    #                  log.exception(f"Error applying AdvancedRewardWrapper (rank {rank}): {e}")
-    #                  raise
-
-    #             # 4. Apply TimeLimit wrapper (standard practice)
-    #             env = gym.wrappers.TimeLimit(env, max_episode_steps=env_cfg.max_episode_steps)
-
-    #             # 5. Seed and Reset
-    #             try:
-    #                 env.reset(seed=seed)
-    #             except Exception as e:
-    #                  log.exception(f"Error resetting env (rank {rank}): {e}")
-    #                  raise
-
-    #             return env
-    #         return _init
-
-    #     n_envs = 1 if is_eval else self.cfg.environment.n_envs
-
-    #     # Use DummyVecEnv for n_envs=1 (or for debugging) to avoid multiprocessing issues
-    #     # Use SubprocVecEnv for n_envs > 1 for performance
-    #     vec_env_cls = DummyVecEnv if n_envs == 1 else SubprocVecEnv
-    #     try:
-    #         return vec_env_cls([make_env(i) for i in range(n_envs)])
-    #     except Exception as e:
-    #          log.exception(f"Error creating VecEnv: {e}")
-    #          raise
+  
 
     def _build_single_env(self, rank: int, is_eval: bool = False) -> gym.Env:
         """
@@ -569,7 +528,7 @@ class RLFineTuner:
         log.info(f"[ENV INIT] rank={rank} is_eval={is_eval} seed={seed}")
         return env
 
-    def _make_vec_env(self, is_eval: bool = False):
+    def _make_vec_env(self, is_eval: bool = False, n_envs_override: Optional[int] = None):
         """
         Creates a vectorized environment for training or evaluation.
         - Platform-aware: falls back to DummyVecEnv on Windows/macOS for stability.
@@ -585,7 +544,11 @@ class RLFineTuner:
                 return env
             return _init
 
-        n_envs = 1 if is_eval else int(getattr(self.cfg.environment, "n_envs", 1))
+        if n_envs_override is not None:
+            n_envs = n_envs_override
+        else:
+            n_envs = 1 if is_eval else int(getattr(self.cfg.environment, "n_envs", 1))
+        
         if n_envs < 1:
             n_envs = 1
 
@@ -682,62 +645,43 @@ class RLFineTuner:
             drop_last=True # Important for consistent batch sizes
         )
 
-
     def _build_models_and_optimizers(self, history_obs_space: DictSpace):
         """Initializes actor, critic, target networks, and optimizers."""
         log.info("Building RL models and loading pre-trained actor...")
 
-        # --- Infer proprioception dimension from the expert dataset (SOTA practice) ---
-        try:
-            proprio_dim = self.expert_loader.dataset.get_proprioception_dim()
-            log.info(f"Inferred proprioception dimension from expert dataset: {proprio_dim}")
-            # Sanity check against environment's observation space
-            env_proprio_dim = history_obs_space["proprio"].shape[-1]
-            if proprio_dim != env_proprio_dim:
-                log.warning(f"Mismatch! Dataset proprio_dim ({proprio_dim}) vs. "
-                            f"environment proprio_dim ({env_proprio_dim}). "
-                            "Using dataset value for model architecture.")
-        except Exception as e:
-            log.critical(f"FATAL: Failed to infer proprioception dimension from the expert dataset. "
-                         f"Check dataset integrity and format. Error: {e}")
-            raise
+        # --- Infer proprioception dimension from the expert dataset ---
+        proprio_dim = self.expert_loader.dataset.get_proprioception_dim()
+        log.info(f"Inferred proprioception dimension from expert dataset: {proprio_dim}")
 
         # --- Create Diffusion Policy (Actor Core) ---
-        try:
-            scheduler_cfg = NoiseSchedulerConfig(**self.cfg.scheduler)
-            model_cfg = self.cfg.model
-
-            diffusion_policy = DiffusionPolicy(
-                proprio_dim=proprio_dim,
-                H_o=model_cfg.observation_horizon,
-                H_a=model_cfg.action_horizon,
-                action_dim=self.action_dim, # Use action dim from env
-                image_feat_dim=model_cfg.image_feat_dim,
-                scheduler_cfg=scheduler_cfg,
-                d_model=model_cfg.d_model,
-                denoiser_layers=model_cfg.denoiser_layers,
-                denoiser_heads=model_cfg.denoiser_heads,
-                cfg_p_uncond=0.0, # Not used in RL inference sampling with CFG wrapper
-                ema_decay=None, # EMA state loaded from checkpoint if available
-                device=self.device
-            )
-        except Exception as e:
-            log.exception(f"Error initializing DiffusionPolicy: {e}")
-            raise
+        model_cfg = self.cfg.model
+        policy_kwargs = {
+            "proprio_dim": proprio_dim,
+            "H_o": model_cfg.observation_horizon,
+            "H_a": model_cfg.action_horizon,
+            "action_dim": self.action_dim,
+            "image_feat_dim": model_cfg.image_feat_dim,
+            "scheduler_cfg": NoiseSchedulerConfig(**self.cfg.scheduler),
+            "d_model": model_cfg.d_model,
+            "denoiser_layers": model_cfg.denoiser_layers,
+            "denoiser_heads": model_cfg.denoiser_heads,
+            "cfg_p_uncond": 0.0,
+            "ema_decay": None,
+            "device": self.device
+        }
+        diffusion_policy = DiffusionPolicy(**policy_kwargs)
 
         # --- Load Pre-trained Weights ---
         if self.cfg.pretrained_policy_path:
             pretrained_path = Path(self.cfg.pretrained_policy_path)
             if pretrained_path.exists():
-                try:
-                    diffusion_policy.load(pretrained_path)
-                    log.info(f"Successfully loaded pre-trained diffusion policy from {pretrained_path}")
-                except Exception as e:
-                    log.warning(f"Could not load pretrained policy from {pretrained_path}: {e}. Actor starts potentially untrained.")
+                diffusion_policy.load(pretrained_path)
+                log.info(f"Successfully loaded pre-trained diffusion policy from {pretrained_path}")
             else:
-                log.warning(f"Pretrained policy path specified but not found: {pretrained_path}. Actor starts potentially untrained.")
+                log.warning(f"Pretrained policy path not found: {pretrained_path}. Actor may be untrained.")
         else:
-            log.warning("No pretrained policy path specified. Actor starts potentially untrained.")
+            log.warning("No pretrained policy path specified. Actor may be untrained.")
+        
         sampling_steps = self.cfg.rl_algorithm.get("sampling_steps", 10)
 
         # --- Create Actor and Target Actor ---
@@ -746,38 +690,34 @@ class RLFineTuner:
             self.cfg.rl_algorithm.guidance_scale,
             sampling_steps
         ).to(self.device)
-
-        # Target actor initially mirrors the online actor
-        # Need deepcopy to avoid sharing weights unintentionally before Polyak updates
-        target_diffusion_policy = copy.deepcopy(diffusion_policy)
+        target_diffusion_policy = DiffusionPolicy(**policy_kwargs)
+        target_diffusion_policy.load_state_dict(diffusion_policy.state_dict())
         self.actor_target = DiffusionActor(
             target_diffusion_policy,
             self.cfg.rl_algorithm.guidance_scale,
             sampling_steps
         ).to(self.device)
-        self.actor_target.load_state_dict(self.actor.state_dict())
         log.info("Actor and Target Actor created.")
 
         # --- Create Critic and Target Critic ---
-        # Critic shares the *online* actor's vision encoder for representation learning
-        # Make sure feature extractor doesn't update during critic step via no_grad() in Critic.forward
         critic_feature_extractor = VisionFusionEncoder(
             image_feat_dim=model_cfg.image_feat_dim,
             proprio_dim=proprio_dim,
             d_model=model_cfg.d_model
         )
-        # Load the pre-trained weights from the actor's encoder
         critic_feature_extractor.load_state_dict(
             self.actor.diffusion_policy.vision_fusion_encoder.state_dict()
         )
-
+        # Use new config options for Critic
         self.critic = Critic(
-            critic_feature_extractor,
-            self.action_dim,
-            model_cfg.d_model
+            features_extractor=critic_feature_extractor,
+            action_dim=self.action_dim,
+            d_model=self.cfg.model.d_model,
+            hidden_dims=self.cfg.rl_algorithm.critic_net_arch,
+            use_layernorm=self.cfg.rl_algorithm.use_critic_layernorm,
+            use_last_feature=self.cfg.rl_algorithm.critic_use_last_feature
         ).to(self.device)
 
-        # The target critic also gets its own encoder, initialized from the target actor's encoder.
         critic_target_feature_extractor = VisionFusionEncoder(
             image_feat_dim=model_cfg.image_feat_dim,
             proprio_dim=proprio_dim,
@@ -786,240 +726,234 @@ class RLFineTuner:
         critic_target_feature_extractor.load_state_dict(
             self.actor_target.diffusion_policy.vision_fusion_encoder.state_dict()
         )
-        
         self.critic_target = Critic(
-            critic_target_feature_extractor,
-            self.action_dim,
-            model_cfg.d_model
+            features_extractor=critic_target_feature_extractor,
+            action_dim=self.action_dim,
+            d_model=self.cfg.model.d_model,
+            hidden_dims=self.cfg.rl_algorithm.critic_net_arch,
+            use_layernorm=self.cfg.rl_algorithm.use_critic_layernorm,
+            use_last_feature=self.cfg.rl_algorithm.critic_use_last_feature
         ).to(self.device)
-        
-        # Now, load the weights for the Q-networks themselves. The encoders are already aligned.
         self.critic_target.load_state_dict(self.critic.state_dict())
         log.info("Critic and Target Critic created with DECOUPLED encoders.")
 
         # --- Optimizers ---
         opt_cfg = self.cfg.optimizer
-        try:
-            # The actor optimizer updates all parameters of the actor, including its encoder
-            self.actor_optimizer = optim.AdamW(
-                self.actor.parameters(),
-                lr=opt_cfg.actor_lr,
-                weight_decay=opt_cfg.get("actor_weight_decay", 1e-4)
-            )
+        # CORRECT: Actor optimizer updates all actor parameters
+        self.actor_optimizer = optim.AdamW(
+            self.actor.parameters(),
+            lr=opt_cfg.actor_lr,
+            weight_decay=opt_cfg.get("actor_weight_decay", 1e-4)
+        )
+        # CORRECT: Critic optimizer updates ONLY the Q-network parameters
+        critic_q_net_params = chain(self.critic.q1_net.parameters(), self.critic.q2_net.parameters())
+        self.critic_optimizer = optim.AdamW(
+            critic_q_net_params,
+            lr=opt_cfg.critic_lr,
+            weight_decay=opt_cfg.get("critic_weight_decay", 1e-4)
+        )
+        log.info("Optimizers created. Critic optimizer targets Q-networks only.")
 
-            # The critic optimizer should ONLY update the Q-networks, not the feature extractor.
-            # The feature extractor's weights are updated via Polyak averaging from the actor's encoder.
-            critic_q_net_params = chain(self.critic.q1_net.parameters(), self.critic.q2_net.parameters())
-            self.critic_optimizer = optim.AdamW(
-                critic_q_net_params,
-                lr=opt_cfg.critic_lr,
-                weight_decay=opt_cfg.get("critic_weight_decay", 1e-4)
-            )
-            log.info("Optimizers created. Critic optimizer targets Q-networks only.")
-        except Exception as e:
-            log.exception(f"Error creating optimizers: {e}")
-            raise
-  
-  
+        # --- Schedulers (Adjusted for Gradient Accumulation) ---
+        num_optimizer_steps = self.cfg.training.total_timesteps // self.cfg.training.gradient_accumulation_steps
+        self.actor_scheduler = optim.lr_scheduler.CosineAnnealingLR(self.actor_optimizer, T_max=num_optimizer_steps)
+        self.critic_scheduler = optim.lr_scheduler.CosineAnnealingLR(self.critic_optimizer, T_max=num_optimizer_steps)
+        log.info("CosineAnnealingLR schedulers created.")
+
+        # --- Optional: torch.compile for PyTorch 2.0+ ---
+        if self.cfg.training.use_torch_compile and hasattr(torch, "compile"):
+             log.info("Applying torch.compile (mode='reduce-overhead')...")
+             try:
+                 self.actor = torch.compile(self.actor, mode="reduce-overhead")
+                 self.critic = torch.compile(self.critic, mode="reduce-overhead")
+                 log.info("torch.compile applied successfully.")
+             except Exception as e:
+                 log.warning(f"torch.compile failed: {e}. Continuing without compilation.")
   
     def select_action(self, obs_history_batch: Dict[str, np.ndarray]) -> np.ndarray:
         """Selects a batch of actions from the actor, adding exploration noise."""
-        # Convert numpy batch to torch batch
         obs_torch = {
              k: torch.as_tensor(v, device=self.device).float()
              for k, v in obs_history_batch.items()
         }
 
         with torch.no_grad():
-            actions = self.actor(obs_torch, deterministic=True) # Use deterministic sampling
+            # Use the dedicated inference method for clarity and safety
+            actions = self.actor.act(obs_torch) # <-- CHANGE HERE
 
-        # Add exploration noise (Gaussian noise)
         if self.cfg.rl_algorithm.exploration_noise > 0:
             noise_scale = self.cfg.rl_algorithm.exploration_noise
             noise = torch.randn_like(actions) * noise_scale
             actions = actions + noise
-        else:
-             # If no noise, still clamp to ensure validity (though diffusion might already do this)
-             pass
-
-        # Clamp actions to the environment's action space bounds
-        actions = actions.clamp(-self.max_action, self.max_action)
+        
+        with torch.no_grad():
+            actions = actions.clamp(-self.max_action, self.max_action)
 
         return actions.cpu().numpy()
 
-    def train_step(self):
-        """Performs a single gradient update step for both actor and critic."""
-        # 1. Sample from replay buffer
-        try:
-            replay_data = self.replay_buffer.sample(self.cfg.rl_algorithm.batch_size)
-        except ValueError as e:
-            # Handle case where buffer might not be full enough yet
-            log.warning(f"Could not sample from replay buffer (possibly not full): {e}")
-            return
-        except Exception as e:
-             log.exception(f"Unexpected error sampling from replay buffer: {e}")
-             return
 
-
-        try:
-            # The cycling iterator handles exhaustion and reshuffling automatically
-            expert_obs_chunk, expert_action_chunk = next(self.expert_iterator)
-        except Exception as e:
-            log.error(f"Failed to fetch batch from expert dataloader: {e}. "
-                      "This can happen with multi-worker loaders. Skipping training step.", exc_info=True)
-            return
-
-        # 3. Prepare Expert Data (move to device, ensure correct dtype)
-        expert_obs = {
-            k: v.to(self.device).float()
-            for k, v in expert_obs_chunk.items()
-        }
-        expert_actions_full = expert_action_chunk.to(self.device).float() # (B, H_a, A_dim)
-        expert_actions_first = expert_actions_full[:, 0, :] # (B, A_dim) - action at t
-
-        # 4. Prepare Replay Data (move to device, ensure correct dtype)
-        # Note: replay_data from SB3 buffers might already be tensors on the correct device
-        obs = {
-            k: v.to(self.device).float() if isinstance(v, torch.Tensor) else torch.as_tensor(v, device=self.device).float()
-            for k, v in replay_data.observations.items()
-        }
-        next_obs = {
-             k: v.to(self.device).float() if isinstance(v, torch.Tensor) else torch.as_tensor(v, device=self.device).float()
-             for k, v in replay_data.next_observations.items()
-        }
-        actions = replay_data.actions.to(self.device).float()
-        rewards = replay_data.rewards.to(self.device).float()
-        dones = replay_data.dones.to(self.device).float()
-
-        # --- 5. Critic Update ---
-# --- 5. Critic Update ---
-        # [START OF FINAL PATCH]
-        # Freeze the feature extractor in the critic to prevent it from being updated by the critic loss.
-        # This stabilizes representation learning and improves computational efficiency.
-        for p in self.critic.features_extractor.parameters():
-            p.requires_grad = False
+    def _update_critic(self, obs, next_obs, actions, rewards, dones) -> torch.Tensor:
+        """Performs the critic update step."""
+        # The feature extractor is NOT in the critic_optimizer, so we don't need to freeze it here.
+        # Its gradients are generated during the actor update.
 
         with torch.no_grad():
-            # Target policy smoothing: Add noise to target actions
             policy_noise_scale = self.cfg.rl_algorithm.policy_noise
             noise_clip = self.cfg.rl_algorithm.noise_clip
-            noise = (
-                torch.randn_like(actions) * policy_noise_scale
-            ).clamp(-noise_clip, noise_clip)
+            noise = (torch.randn_like(actions) * policy_noise_scale).clamp(-noise_clip, noise_clip)
 
-            # Get next action from target actor and add noise
-            next_action = (self.actor_target(next_obs) + noise).clamp(
-                -self.max_action, self.max_action
-            )
+            next_action = (self.actor_target.act(next_obs) + noise).clamp(-self.max_action, self.max_action)
 
-            # Compute target Q-value using target critic
             target_q1, target_q2 = self.critic_target(next_obs, next_action)
             target_q = torch.min(target_q1, target_q2)
 
-            # TD target: R + gamma * (1 - Done) * Q_target(s', a')
             gamma = self.cfg.rl_algorithm.gamma
             target_q = rewards + (1.0 - dones) * gamma * target_q
 
-        # Get current Q-values using online critic and actions from buffer
         current_q1, current_q2 = self.critic(obs, actions)
-
-        # Compute critic loss (MSE between current Q and target Q)
         critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
 
-        # Optimize the critic
-        self.critic_optimizer.zero_grad()
+        # Normalize loss for gradient accumulation
+        critic_loss = critic_loss / self.cfg.training.gradient_accumulation_steps
         critic_loss.backward()
-        # Optional: Gradient clipping for critic
-        if self.cfg.optimizer.get("critic_grad_clip_norm"):
-             # We only need to clip the Q-net parameters, which are the ones in the optimizer
-             torch.nn.utils.clip_grad_norm_(
-                 chain(self.critic.q1_net.parameters(), self.critic.q2_net.parameters()), 
-                 self.cfg.optimizer.critic_grad_clip_norm
-             )
-        self.critic_optimizer.step()
 
-        # Unfreeze the feature extractor for the subsequent actor update and target network updates.
-        for p in self.critic.features_extractor.parameters():
-            p.requires_grad = True
-        # [END OF FINAL PATCH]
+        return critic_loss * self.cfg.training.gradient_accumulation_steps
 
-        # --- 6. Delayed Actor Update ---
-        if self.total_timesteps % self.cfg.rl_algorithm.policy_delay == 0:
-            # Freeze critic parameters during actor update
-            for p in self.critic.parameters():
-                p.requires_grad = False
+    def _update_actor(self, obs, expert_obs, expert_actions_full, expert_actions_first) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Performs the actor update step (delayed)."""
+        # Freeze critic parameters to avoid unnecessary gradient computation
+        for p in self.critic.parameters():
+            p.requires_grad = False
 
-            # --- RL Loss Component (Policy Gradient) ---
-            # Compute actions from the *online* actor for states from the replay buffer
-            actor_online_actions = self.actor(obs)
-            # Evaluate these actions using the *online* critic's Q1 network
+        actor_loss_rl = torch.tensor(0.0, device=self.device)
+        
+        if self.cfg.training.use_reweighted_bc_actor_loss:
+            # SOTA: Advantage-weighted BC loss
+            with torch.no_grad():
+                q_expert_actions = self.critic.Q1(expert_obs, expert_actions_first)
+                beta = self.cfg.rl_algorithm.actor_loss_beta
+                weights = torch.exp(beta * q_expert_actions).clamp(max=100.0)
+                weights = (weights / weights.mean()).detach()
+
+            # NOTE: This assumes your DiffusionPolicy.compute_loss can accept weights.
+            # If not, you must modify it to compute a per-sample loss, which you then
+            # multiply by weights before taking the mean.
+            # For this guide, we assume it's possible or proceed with an un-weighted version if not.
+            try:
+                bc_loss, _ = self.actor.diffusion_policy.compute_loss(
+                    expert_actions_full, expert_obs, weights=weights
+                )
+            except TypeError:
+                log.warning("DiffusionPolicy.compute_loss does not accept `weights`. Using un-weighted BC loss for actor update.")
+                bc_loss, _ = self.actor.diffusion_policy.compute_loss(expert_actions_full, expert_obs)
+
+            actor_loss = bc_loss # The total loss is just the weighted BC loss
+            alpha = torch.tensor(0.0, device=self.device) # Not used
+
+        else:
+            # Original TD3+BC actor loss
+            actor_online_actions = self.actor(obs) # Calls forward() with grads
             q1_values_for_actor_loss = self.critic.Q1(obs, actor_online_actions)
-            # Policy gradient loss: maximize Q-value (minimize negative Q-value)
             actor_loss_rl = -q1_values_for_actor_loss.mean()
 
-            # --- BC Loss Component (Diffusion Loss on Expert Data) ---
-            # Compute the standard diffusion training loss using the *online* actor's
-            # diffusion policy, but only on the *expert* data batch.
-            bc_loss, _ = self.actor.diffusion_policy.compute_loss(
-                expert_actions_full, expert_obs
-            )
+            bc_loss, _ = self.actor.diffusion_policy.compute_loss(expert_actions_full, expert_obs)
 
-            # --- Adaptive BC Weight (alpha) ---
             with torch.no_grad():
-                # Evaluate the expert's first action using the *online* critic's Q1
                 q_expert_actions = self.critic.Q1(expert_obs, expert_actions_first)
-                # Calculate alpha: Lower alpha if critic thinks expert actions are bad
-                # Use a small epsilon to prevent division by zero
                 alpha_denom = torch.mean(torch.abs(q_expert_actions)).detach() + 1e-6
-                alpha = (1.0 / alpha_denom).clamp(0.01, 100.0) # Wider clamp range
-
-                # Alternative: Use average Q magnitude (less aggressive scaling)
-                # avg_q_magnitude = (torch.mean(torch.abs(current_q1)).detach() +
-                #                    torch.mean(torch.abs(current_q2)).detach()) / 2.0 + 1e-6
-                # alpha = (self.cfg.rl_algorithm.bc_lambda / avg_q_magnitude).clamp(0.01, 100.0)
-
-
-            # --- Total Actor Loss ---
+                alpha = (1.0 / alpha_denom).clamp(0.01, 100.0)
+            
             actor_loss = actor_loss_rl + alpha * bc_loss
 
-            # Optimize the actor
-            self.actor_optimizer.zero_grad()
-            actor_loss.backward()
-             # Optional: Gradient clipping for actor
-            if self.cfg.optimizer.get("actor_grad_clip_norm"):
-                 torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.optimizer.actor_grad_clip_norm)
-            self.actor_optimizer.step()
+        # Normalize loss for gradient accumulation and backpropagate
+        actor_loss = actor_loss / self.cfg.training.gradient_accumulation_steps
+        actor_loss.backward()
 
-            # Unfreeze critic parameters
-            for p in self.critic.parameters():
-                p.requires_grad = True
+        # Unfreeze critic
+        for p in self.critic.parameters():
+            p.requires_grad = True
 
-            # --- 7. Target Network Updates (Polyak Averaging) ---
-            tau = self.cfg.rl_algorithm.tau
-            with torch.no_grad():
-                for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
-                    target_param.data.mul_(1.0 - tau)
-                    target_param.data.add_(tau * param.data)
+        return actor_loss * self.cfg.training.gradient_accumulation_steps, actor_loss_rl, bc_loss
 
-                for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
-                    target_param.data.mul_(1.0 - tau)
-                    target_param.data.add_(tau * param.data)
+    def train_step(self):
+        """Performs a single gradient update step, accumulating gradients if configured."""
+        # 1. Sample Data
+        replay_data = self.replay_buffer.sample(self.cfg.rl_algorithm.batch_size)
+        expert_obs_chunk, expert_action_chunk = next(self.expert_iterator)
 
-            # --- 8. Logging (Inside Delayed Update) ---
-            if self.total_timesteps % self.cfg.logging.log_interval_steps == 0:
-                metrics = {
-                    "train/critic_loss": critic_loss.item(),
+        # 2. Prepare Data
+        obs = {k: v.to(self.device).float() for k, v in replay_data.observations.items()}
+        next_obs = {k: v.to(self.device).float() for k, v in replay_data.next_observations.items()}
+        actions = replay_data.actions.to(self.device).float()
+        rewards = replay_data.rewards.to(self.device).float()
+        dones = replay_data.dones.to(self.device).float()
+        expert_obs = {k: v.to(self.device).float() for k, v in expert_obs_chunk.items()}
+        expert_actions_full = expert_action_chunk.to(self.device).float()
+        expert_actions_first = expert_actions_full[:, 0, :]
+
+        # 3. Update Critic (computes loss and gradients)
+        critic_loss = self._update_critic(obs, next_obs, actions, rewards, dones)
+
+        actor_loss, actor_loss_rl, bc_loss = torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
+        
+        # 4. Delayed Actor Update (computes loss and gradients)
+        if self.total_timesteps % self.cfg.rl_algorithm.policy_delay == 0:
+            actor_loss, actor_loss_rl, bc_loss = self._update_actor(
+                obs, expert_obs, expert_actions_full, expert_actions_first
+            )
+
+        # 5. Gradient Accumulation & Optimizer Step
+        self.grad_accumulation_counter += 1
+        if self.grad_accumulation_counter % self.cfg.training.gradient_accumulation_steps == 0:
+            # Critic optimizer step
+            if self.cfg.optimizer.critic_grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    chain(self.critic.q1_net.parameters(), self.critic.q2_net.parameters()),
+                    self.cfg.optimizer.critic_grad_clip_norm
+                )
+            self.critic_optimizer.step()
+            self.critic_optimizer.zero_grad(set_to_none=True) # More efficient
+
+            # Actor optimizer step (if actor was updated)
+            if self.total_timesteps % self.cfg.rl_algorithm.policy_delay == 0:
+                if self.cfg.optimizer.actor_grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.optimizer.actor_grad_clip_norm)
+                self.actor_optimizer.step()
+                self.actor_optimizer.zero_grad(set_to_none=True)
+
+                # Target Network Updates (Polyak)
+                tau = self.cfg.rl_algorithm.tau
+                with torch.no_grad():
+                    for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
+                        target_param.data.mul_(1.0 - tau)
+                        target_param.data.add_(tau * param.data)
+                    for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
+                        target_param.data.mul_(1.0 - tau)
+                        target_param.data.add_(tau * param.data)
+
+                # Step LR schedulers
+                self.actor_scheduler.step()
+                self.critic_scheduler.step()
+
+        # 6. Logging (only on actual optimizer steps)
+        if (self.grad_accumulation_counter % self.cfg.training.gradient_accumulation_steps == 0) and \
+           (self.total_timesteps % self.cfg.logging.log_interval_steps == 0):
+            
+            metrics = {
+                "train/critic_loss": critic_loss.item(),
+                "train/actor_lr": self.actor_scheduler.get_last_lr()[0],
+                "train/critic_lr": self.critic_scheduler.get_last_lr()[0],
+            }
+            if self.total_timesteps % self.cfg.rl_algorithm.policy_delay == 0:
+                 metrics.update({
+                    "train/actor_loss_total": actor_loss.item(),
                     "train/actor_loss_rl": actor_loss_rl.item(),
                     "train/bc_loss": bc_loss.item(),
-                    "train/alpha_bc": alpha.item(),
-                    "train/actor_loss_total": actor_loss.item(),
-                    "train/q1_mean_online": current_q1.mean().item(),
-                    "train/q2_mean_online": current_q2.mean().item(),
-                    "train/q_mean_expert": q_expert_actions.mean().item(), # Q value of expert actions
-                    "train/target_q_mean": target_q.mean().item(),
-                }
-                if self.use_wandb: wandb.log(metrics, step=self.total_timesteps)
-                for k, v in metrics.items(): self.writer.add_scalar(k, v, self.total_timesteps)
+                 })
+
+            if self.use_wandb: wandb.log(metrics, step=self.total_timesteps)
+            for k, v in metrics.items(): self.writer.add_scalar(k, v, self.total_timesteps)
+
 
     def run(self):
         """The main entry point to start the training process."""
@@ -1049,12 +983,19 @@ class RLFineTuner:
         # Determine total number of training loops
         # Each loop processes self.n_envs steps
         num_loops = int(self.cfg.training.total_timesteps) // self.n_envs
-
+        timings = {
+            "select_action": [],
+            "env_step": [],
+            "buffer_add_etc": [],
+            "train_step": [],
+            "total_loop": []
+        }
         for loop_idx in tqdm(range(num_loops), desc="Total Timesteps"):
-
+            t_loop_start = time.time()
             current_loop_timestep = loop_idx * self.n_envs
 
             # --- Action Selection ---
+            t0 = time.time()
             if current_loop_timestep < self.cfg.rl_algorithm.learning_starts:
                 # Sample random actions before learning starts
                 action = np.array([self.env.action_space.sample() for _ in range(self.n_envs)])
@@ -1062,7 +1003,10 @@ class RLFineTuner:
                 # Get stacked history for policy inference
                 stacked_obs_batch = self.obs_history.get_batch_stacked()
                 action = self.select_action(stacked_obs_batch)
+            timings["select_action"].append(time.time() - t0) # PROFILING
 
+            # --- Environment Interaction ---
+            t0 = time.time() # PROFILING
             # --- Environment Interaction ---
             try:
                 next_raw_obs_list, rewards, dones, infos = self.env.step(action)
@@ -1078,7 +1022,10 @@ class RLFineTuner:
                 log.exception(f"Error during environment step: {e}")
                 # Decide how to handle env errors: continue, break, etc.
                 continue # Skip this step
+            timings["env_step"].append(time.time() - t0) # PROFILING
 
+            # --- Buffer and History Management ---
+            t0 = time.time() # PROFILING
             try:
                 # 1. Get s_t (history *before* this step's observation is added).
                 # This is already a batched dictionary of numpy arrays.
@@ -1132,233 +1079,167 @@ class RLFineTuner:
             except Exception as e:
                 log.exception(f"Error processing vectorized step and adding to buffer: {e}")
                 continue # Skip this entire batch if an error occurs
+            timings["buffer_add_etc"].append(time.time() - t0) # PROFILING
 
             # --- Update Timestep Counter ---
             # Correctly increment based on number of parallel environments
             self.total_timesteps = (loop_idx + 1) * self.n_envs
-
+            t0 = time.time() # PROFILING
             # --- Training Step ---
             if self.total_timesteps >= self.cfg.rl_algorithm.learning_starts:
                 # Perform gradient updates using sampled data
                 self.train_step()
+            timings["train_step"].append(time.time() - t0)
 
             # --- Evaluation and Checkpointing ---
             if self.total_timesteps - self.timesteps_since_eval >= self.cfg.logging.eval_freq:
                 self.evaluate()
                 self._save_checkpoint() # Save checkpoint after evaluation
                 self.timesteps_since_eval = self.total_timesteps
-
+            timings["total_loop"].append(time.time() - t_loop_start)
+            if (loop_idx + 1) % 1 == 0: # Print stats every 200 loops
+                log.info("\n----------- PROFILING STATS (avg ms per loop) -----------")
+                for key, val in timings.items():
+                    avg_time_ms = np.mean(val) * 1000
+                    log.info(f"{key:<20}: {avg_time_ms:.2f} ms")
+                log.info("---------------------------------------------------------")
         # --- Final Save ---
         log.info("Training finished. Saving final checkpoint.")
         self._save_checkpoint(is_final=True)
         self.env.close()
-        self.eval_env_unwrapped.close()
+        self.eval_env.close()
+        self.video_env.close()
         if self.use_wandb:
             wandb.finish()
         self.writer.close()
 
-
     def evaluate(self):
         """
-        Runs evaluation episodes, gathers stats, and handles video logging efficiently.
-        Decouples statistics gathering from video recording for clarity and potential speedup.
+        [SOTA: Hybrid Parallel/Sequential Evaluation]
+        Gathers statistics by running episodes in parallel for maximum efficiency.
+        Then, separately records a single, clean video episode if required.
         """
         log.info(f"Starting evaluation phase at timestep {self.total_timesteps}...")
-        self.actor.eval() # Set actor to evaluation mode
+        self.actor.eval()
 
+        # ===================================================================
+        # 1. PARALLEL STATISTICS GATHERING (uses self.eval_env)
+        # ===================================================================
+        log.info(f"Running {self.cfg.logging.n_eval_episodes} episodes in parallel for statistics...")
+        start_eval_time = time.time()
+        
         all_ep_rewards = []
         all_successes = []
-        total_eval_steps = 0
-        start_eval_time = time.time()
+        episodes_completed = 0
+        
+        num_eval_envs = self.eval_env.num_envs
+        current_rewards = np.zeros(num_eval_envs)
 
-        # === Statistics Gathering Loop ===
-        log.info(f"Running {self.cfg.logging.n_eval_episodes} episodes for statistics...")
-        for i in range(self.cfg.logging.n_eval_episodes):
-            log.debug(f"Starting stats episode {i+1}/{self.cfg.logging.n_eval_episodes}")
-            ep_reward = 0.0
-            ep_len = 0
-            ep_success = 0.0 # Default to failure
+        try:
+            raw_obs_batch = self.eval_env.reset()
+            for i in range(num_eval_envs):
+                self.eval_obs_history.reset(i, {k: v[i] for k, v in raw_obs_batch.items()})
+        except Exception as e:
+            log.exception("Error resetting parallel evaluation environment. Skipping evaluation.")
+            self.actor.train()
+            return
+            
+        while episodes_completed < self.cfg.logging.n_eval_episodes:
+            # Get histories for only the active parallel evaluation envs
+            stacked_obs_batch = self.eval_obs_history.get_batch_stacked()
+            active_obs_batch = {k: v[:num_eval_envs] for k, v in stacked_obs_batch.items()}
+
+            with torch.no_grad():
+                actions = self.select_action(active_obs_batch)
 
             try:
-                # Reset environment and history buffer (use unwrapped env for stats)
-                raw_obs_dict = self.eval_env_unwrapped.reset()
-                current_raw_obs = {k: v[0] for k, v in raw_obs_dict.items()} # Get obs for env 0
-                current_hist_obs = self.eval_obs_history.reset(0, current_raw_obs)
+                next_raw_obs_batch, rewards, dones, infos = self.eval_env.step(actions)
             except Exception as e:
-                 log.exception(f"Error resetting evaluation environment for stats episode {i+1}: {e}")
-                 continue # Skip this episode
+                log.exception("Error stepping parallel evaluation environment. Ending stats collection early.")
+                break
 
-            dones = [False] # VecEnv returns dones as list/array
-            while not dones[0]:
-                # Prepare observation history for actor (add batch dim)
-                stacked_obs_batch = {k: v[np.newaxis, ...] for k, v in current_hist_obs.items()}
-                obs_torch = {
-                    k: torch.as_tensor(v, device=self.device).float()
-                    for k, v in stacked_obs_batch.items()
-                }
+            for i in range(num_eval_envs):
+                if episodes_completed >= self.cfg.logging.n_eval_episodes: break # Early exit if another env finished
+                
+                self.eval_obs_history.append(i, {k: v[i] for k, v in next_raw_obs_batch.items()})
+                current_rewards[i] += rewards[i]
 
-                # Select action deterministically using the actor
-                with torch.no_grad():
-                    action = self.actor(obs_torch, deterministic=True).cpu().numpy()
+                if dones[i]:
+                    episodes_completed += 1
+                    all_ep_rewards.append(current_rewards[i])
+                    all_successes.append(infos[i].get('is_success', 0.0))
+                    
+                    if "terminal_observation" in infos[i]:
+                        self.eval_obs_history.reset(i, infos[i]["terminal_observation"])
+                    current_rewards[i] = 0.0
 
-                # Step the unwrapped environment
-                try:
-                    # VecEnv step expects batched action, returns batched results
-                    next_raw_obs_list, reward, dones, infos = self.eval_env_unwrapped.step(action)
-
-                    # Extract results for the single environment (index 0)
-                    env_next_obs = {k: v[0] for k, v in next_raw_obs_list.items()}
-                    env_reward = reward[0]
-                    env_done = dones[0] # Boolean indicating if env 0 is done
-                    env_info = infos[0] # Info dict for env 0
-
-                except Exception as e:
-                     log.exception(f"Error stepping evaluation environment during stats episode {i+1}, step {ep_len}: {e}")
-                     env_done = True # Force end episode on error
-                     dones = [True] # Ensure loop terminates
-
-                # Update history buffer
-                self.eval_obs_history.append(0, env_next_obs)
-                current_hist_obs = self.eval_obs_history.get_stacked(0)
-
-                ep_reward += env_reward
-                ep_len += 1
-                total_eval_steps += 1
-
-                if env_done:
-                    ep_success = env_info.get('is_success', 0.0) # Get success status from info
-                    # Handle automatic reset by VecEnv - reset history buffer
-                    if "terminal_observation" in env_info:
-                        terminal_obs = env_info["terminal_observation"]
-                        self.eval_obs_history.reset(0, terminal_obs)
-                    else:
-                        # Fallback if terminal obs not provided (should be by SB3 VecEnvs)
-                        log.warning("No 'terminal_observation' in info dict on eval done. Resetting history with last obs.")
-                        self.eval_obs_history.reset(0, env_next_obs)
-                    break # Exit episode loop
-
-            all_ep_rewards.append(ep_reward)
-            all_successes.append(ep_success)
-            log.debug(f"Stats episode {i+1} finished. Reward: {ep_reward:.2f}, Success: {ep_success:.0f}, Length: {ep_len}")
-
-        # Calculate average statistics
-        mean_reward = np.mean(all_ep_rewards) if all_ep_rewards else 0.0
-        std_reward = np.std(all_ep_rewards) if all_ep_rewards else 0.0
-        success_rate = np.mean(all_successes) if all_successes else 0.0
         stats_duration = time.time() - start_eval_time
-        log.info(f"Statistics gathering complete ({stats_duration:.2f}s): "
-                 f"Mean Reward={mean_reward:.2f} (+/- {std_reward:.2f}), "
-                 f"Success Rate={success_rate:.2f}")
+        mean_reward = np.mean(all_ep_rewards) if all_ep_rewards else 0.0
+        success_rate = np.mean(all_successes) if all_successes else 0.0
+        log.info(f"Statistics gathering complete ({stats_duration:.2f}s): Success Rate={success_rate:.3f}, Mean Reward={mean_reward:.2f}")
 
-        # Log metrics to TensorBoard and W&B
-        metrics = {
-            "eval/mean_reward": mean_reward,
-            "eval/success_rate": success_rate,
-            "eval/std_reward": std_reward,
-            "eval/num_episodes": len(all_ep_rewards),
-            "eval/total_steps": total_eval_steps,
-        }
-        if self.use_wandb:
-            wandb.log(metrics, step=self.total_timesteps)
-        for k, v in metrics.items():
-            self.writer.add_scalar(k, v, self.total_timesteps)
+        metrics = {"eval/mean_reward": mean_reward, "eval/success_rate": success_rate}
+        if self.use_wandb: wandb.log(metrics, step=self.total_timesteps)
+        for k, v in metrics.items(): self.writer.add_scalar(k, v, self.total_timesteps)
 
-        # === Conditional Video Recording ===
-        # Determine if it's time to log video based on *evaluation phase count*
-        current_eval_phase = self.total_timesteps // self.cfg.logging.eval_freq
-        record_video_this_eval = (
-            self.use_wandb and
-            self.cfg.logging.video_log_freq > 0 and # Only if freq is positive
-            current_eval_phase % self.cfg.logging.video_log_freq == 0
-        )
-
-        if record_video_this_eval:
+        # ===================================================================
+        # 2. SEQUENTIAL VIDEO RECORDING (uses self.video_env)
+        # ===================================================================
+        current_eval_phase = (self.total_timesteps // self.cfg.logging.eval_freq) if self.cfg.logging.eval_freq > 0 else 0
+        if self.use_wandb and self.cfg.logging.video_log_freq > 0 and current_eval_phase % self.cfg.logging.video_log_freq == 0:
             log.info("Starting video recording episode...")
-            start_video_time = time.time()
             video_frames = []
             try:
-                # Reset environment and history buffer for video episode
-                raw_obs_dict = self.eval_env_unwrapped.reset()
-                current_raw_obs = {k: v[0] for k, v in raw_obs_dict.items()}
-                current_hist_obs = self.eval_obs_history.reset(0, current_raw_obs)
+                raw_obs_dict_tuple = self.video_env.reset()
+                # DummyVecEnv with n=1 still returns a dict of batched arrays (batch_size=1)
+                raw_obs_dict = {k: v[0] for k, v in raw_obs_dict_tuple.items()}
+                # Use a single slot (index 0) of the history buffer for the video env
+                current_hist_obs = self.eval_obs_history.reset(0, raw_obs_dict)
+                done = False
             except Exception as e:
-                 log.exception(f"Error resetting evaluation environment for video recording: {e}")
-                 record_video_this_eval = False # Skip video logging on reset error
+                log.exception("Error resetting video environment. Aborting video recording.")
+                done = True
 
-            dones = [False]
-            while not dones[0] and record_video_this_eval:
-                # Render frame *before* taking the step
+            while not done:
                 try:
-                    # Use the render method of the VecEnv or its underlying envs
-                    # Assuming VecEnv's render returns list of frames or single frame
-                    frame_or_list = self.eval_env_unwrapped.render()
-                    if isinstance(frame_or_list, (list, tuple)):
-                        frame = frame_or_list[0] # Get frame for the first (only) env
-                    else:
-                        frame = frame_or_list
-
-                    if isinstance(frame, np.ndarray):
-                        video_frames.append(frame.copy()) # Use copy to avoid issues
-                    else:
-                        log.warning("Eval env render did not return a NumPy array. Skipping frame.")
+                    # render() on DummyVecEnv returns a list of frames
+                    frame = self.video_env.render()
+                    video_frames.append(frame.copy())
                 except Exception as e:
                     log.warning(f"Could not render frame for video: {e}")
-                    # Continue without this frame
 
-                # Prepare observation and select action (same as stats loop)
                 stacked_obs_batch = {k: v[np.newaxis, ...] for k, v in current_hist_obs.items()}
-                obs_torch = {k: torch.as_tensor(v, device=self.device).float() for k, v in stacked_obs_batch.items()}
                 with torch.no_grad():
-                    action = self.actor(obs_torch, deterministic=True).cpu().numpy()
-
-                # Step environment
+                    action = self.select_action(stacked_obs_batch)
+                
                 try:
-                    next_raw_obs_list, _, dones, infos = self.eval_env_unwrapped.step(action)
+                    next_raw_obs_list, _, dones, _ = self.video_env.step(action)
+                    done = dones[0]
                     env_next_obs = {k: v[0] for k, v in next_raw_obs_list.items()}
-                    env_done = dones[0]
-                    env_info = infos[0]
-
+                    self.eval_obs_history.append(0, env_next_obs)
+                    current_hist_obs = self.eval_obs_history.get_stacked(0)
                 except Exception as e:
-                     log.exception(f"Error stepping evaluation environment during video recording: {e}")
-                     env_done = True # Force end episode
-                     dones = [True]
-
-                # Update history buffer
-                self.eval_obs_history.append(0, env_next_obs)
-                current_hist_obs = self.eval_obs_history.get_stacked(0)
-
-                if env_done:
-                    # Handle reset if needed (though loop condition breaks)
-                    if "terminal_observation" in env_info:
-                         self.eval_obs_history.reset(0, env_info["terminal_observation"])
-                    break # Exit episode loop
-
-            video_duration = time.time() - start_video_time
-            log.info(f"Video recording episode finished ({video_duration:.2f}s). Collected {len(video_frames)} frames.")
-
-            # Log video to W&B if frames were collected
+                    log.exception("Error stepping video environment. Aborting episode.")
+                    break
+            
             if video_frames:
-                try:
-                    # Stack frames: (T, H, W, C)
-                    video_np = np.stack(video_frames)
-                    # Transpose for W&B: (T, C, H, W)
-                    video_np = np.transpose(video_np, (0, 3, 1, 2))
-                    wandb.log(
-                        {"eval/video": wandb.Video(video_np, fps=self.cfg.logging.get("video_fps", 20), format="mp4")},
-                        step=self.total_timesteps
-                    )
-                    log.info("Logged video to W&B.")
-                except Exception as e:
-                    log.warning(f"Failed to log video to W&B: {e}")
+                video_np = np.stack(video_frames)
+                video_np = np.transpose(video_np, (0, 3, 1, 2)) # T, C, H, W for W&B
+                wandb.log({"eval/video": wandb.Video(video_np, fps=self.cfg.logging.get("video_fps", 20))}, step=self.total_timesteps)
+                log.info("Logged video to W&B.")
 
-        # === Checkpointing based on Best Success Rate ===
+        # ===================================================================
+        # 3. CHECKPOINTING AND CLEANUP
+        # ===================================================================
         if success_rate > self.best_eval_success_rate:
-            log.info(f"New best evaluation success rate: {success_rate:.3f} (previous: {self.best_eval_success_rate:.3f}). Saving best checkpoint.")
+            log.info(f"New best eval success rate: {success_rate:.3f}. Saving best checkpoint.")
             self.best_eval_success_rate = success_rate
             self._save_checkpoint(is_best=True)
 
-        self.actor.train() # IMPORTANT: Set actor back to training mode
+        self.actor.train()
         log.info("Evaluation phase finished.")
+
+
 
 
     # --- Checkpointing Methods ---
@@ -1382,10 +1263,10 @@ class RLFineTuner:
 
         # Save latest checkpoint
         latest_path = self.output_dir / "checkpoints" / "latest_checkpoint.pth"
-        temp_latest_path = latest_path.with_suffix(".tmp")
         try:
+            temp_latest_path = latest_path.with_suffix(".pth.tmp")
             torch.save(state, temp_latest_path)
-            os.replace(temp_latest_path, latest_path) # Atomic rename
+            os.replace(temp_latest_path, latest_path) # Atomic operation
             log.info(f"Saved latest checkpoint to {latest_path} at timestep {self.total_timesteps}")
         except Exception as e:
              log.exception(f"Error saving latest checkpoint: {e}")
@@ -1460,7 +1341,7 @@ class RLFineTuner:
 # -------------------------
 # 4. Hydra Main Entry Point
 # -------------------------
-@hydra.main(version_base=None, config_path="../configs", config_name="train_rl")
+@hydra.main(version_base=None, config_path="../configs", config_name="finetune_rl_config")
 def main(cfg: DictConfig):
     # Setup logging (Hydra manages output dir and basic setup)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")

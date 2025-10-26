@@ -1,0 +1,109 @@
+[2025-10-26 21:05:13,596][__main__][INFO] - ----------- RL Fine-tuning Configuration -----------
+[2025-10-26 21:05:13,601][__main__][INFO] - seed: 42
+device: cpu
+pretrained_policy_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  num_workers: 0
+environment:
+  xml_path: envs/panda_pick_place.xml
+  n_envs: 2
+  max_episode_steps: 500
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+  proprio_dim: 22
+scheduler:
+  schedule: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+training:
+  total_timesteps: 200000
+  curriculum_total_episodes: 2000
+  gradient_accumulation_steps: 1
+  use_torch_compile: false
+  use_reweighted_bc_actor_loss: true
+rl_algorithm:
+  buffer_size: 12000
+  learning_starts: 500
+  batch_size: 128
+  gamma: 0.98
+  tau: 0.005
+  policy_delay: 2
+  policy_noise: 0.2
+  noise_clip: 0.5
+  exploration_noise: 0.1
+  guidance_scale: 1.5
+  sampling_steps: 1
+  critic_net_arch:
+  - 512
+  - 512
+  use_critic_layernorm: true
+  critic_use_last_feature: false
+  actor_loss_beta: 10.0
+optimizer:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+  actor_weight_decay: 0.0001
+  critic_weight_decay: 0.0001
+  actor_grad_clip_norm: 1.0
+  critic_grad_clip_norm: null
+logging:
+  use_wandb: false
+  wandb_project: dgpo_rl_finetune_v1
+  wandb_run_name: null
+  log_interval_steps: 800
+  eval_freq: 3000
+  n_eval_episodes: 1
+  video_log_freq: 3
+  video_fps: 20
+
+[2025-10-26 21:05:13,601][__main__][INFO] - --------------------------------------------------
+[2025-10-26 21:05:13,605][__main__][INFO] - Global seed set to 42
+[2025-10-26 21:05:13,606][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\2025-10-26\21-05-13
+[2025-10-26 21:05:13,610][__main__][INFO] - Initializing 2 parallel training environments...
+[2025-10-26 21:05:13,611][__main__][WARNING] - [SAFEGUARD] Detected Windows OS. SubprocVecEnv uses 'spawn' multiprocessing which often breaks with PyTorch/CuDNN/MuJoCo. Falling back to DummyVecEnv.
+[2025-10-26 21:05:16,413][__main__][INFO] - [ENV INIT] rank=0 is_eval=False seed=42
+[2025-10-26 21:05:17,226][__main__][INFO] - [ENV INIT] rank=1 is_eval=False seed=43
+[2025-10-26 21:05:17,227][__main__][INFO] - [ENV BUILDER] Created 2 env(s) using DummyVecEnv in 3.616s on Windows | CUDA=OFF
+[2025-10-26 21:05:17,228][__main__][INFO] - Initializing 1 parallel envs for evaluation stats...
+[2025-10-26 21:05:18,028][__main__][INFO] - [ENV INIT] rank=0 is_eval=True seed=1042
+[2025-10-26 21:05:18,029][__main__][INFO] - [ENV BUILDER] Created 1 env(s) using DummyVecEnv in 0.800s on Windows | CUDA=OFF
+[2025-10-26 21:05:18,029][__main__][INFO] - Initializing single environment for video recording...
+[2025-10-26 21:05:18,825][__main__][INFO] - [ENV INIT] rank=0 is_eval=True seed=1042
+[2025-10-26 21:05:18,826][__main__][INFO] - [ENV BUILDER] Created 1 env(s) using DummyVecEnv in 0.796s on Windows | CUDA=OFF
+[2025-10-26 21:05:18,839][__main__][INFO] - Initializing Replay Buffer...
+[2025-10-26 21:05:18,846][__main__][INFO] - Using sb3_contrib.common.buffers.DictReplayBuffer.
+[2025-10-26 21:05:18,848][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-26 21:05:18,849][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-26 21:05:18,850][__main__][INFO] - Building RL models and loading pre-trained actor...
+[2025-10-26 21:05:18,851][__main__][INFO] - Inferred proprioception dimension from expert dataset: 22
+[2025-10-26 21:05:19,261][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-26 21:05:19,262][models.diffusion_policy][INFO] - Loading model checkpoint from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-26 21:05:19,443][__main__][INFO] - Successfully loaded pre-trained diffusion policy from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-26 21:05:19,443][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=1
+[2025-10-26 21:05:19,820][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-26 21:05:19,843][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=1
+[2025-10-26 21:05:19,846][__main__][INFO] - Actor and Target Actor created.
+[2025-10-26 21:05:20,243][__main__][INFO] - Critic MLP built with hidden_dims=[512, 512], use_layernorm=True
+[2025-10-26 21:05:20,243][__main__][INFO] - Critic using features from averaged history.
+[2025-10-26 21:05:20,663][__main__][INFO] - Critic MLP built with hidden_dims=[512, 512], use_layernorm=True
+[2025-10-26 21:05:20,663][__main__][INFO] - Critic using features from averaged history.
+[2025-10-26 21:05:20,688][__main__][INFO] - Critic and Target Critic created with DECOUPLED encoders.
+[2025-10-26 21:05:20,690][__main__][INFO] - Optimizers created. Critic optimizer targets Q-networks only.
+[2025-10-26 21:05:20,690][__main__][INFO] - CosineAnnealingLR schedulers created.
+[2025-10-26 21:05:20,691][__main__][INFO] - No checkpoint found at specified path. Starting training from scratch.
+[2025-10-26 21:05:20,691][__main__][INFO] - Starting RL fine-tuning...
+[2025-10-26 21:05:21,260][__main__][ERROR] - An error occurred during the RL fine-tuning run.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 1355, in main
+    trainer.run()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 1005, in run
+    timings["select_action"].append(time.time() - t0) # PROFILING
+UnboundLocalError: local variable 't0' referenced before assignment

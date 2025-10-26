@@ -1,0 +1,111 @@
+[2025-10-26 21:07:14,613][__main__][INFO] - ----------- RL Fine-tuning Configuration -----------
+[2025-10-26 21:07:14,618][__main__][INFO] - seed: 42
+device: cpu
+pretrained_policy_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  num_workers: 0
+environment:
+  xml_path: envs/panda_pick_place.xml
+  n_envs: 2
+  max_episode_steps: 500
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+  proprio_dim: 22
+scheduler:
+  schedule: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+training:
+  total_timesteps: 200000
+  curriculum_total_episodes: 2000
+  gradient_accumulation_steps: 1
+  use_torch_compile: false
+  use_reweighted_bc_actor_loss: true
+rl_algorithm:
+  buffer_size: 12000
+  learning_starts: 500
+  batch_size: 128
+  gamma: 0.98
+  tau: 0.005
+  policy_delay: 2
+  policy_noise: 0.2
+  noise_clip: 0.5
+  exploration_noise: 0.1
+  guidance_scale: 1.5
+  sampling_steps: 1
+  critic_net_arch:
+  - 512
+  - 512
+  use_critic_layernorm: true
+  critic_use_last_feature: false
+  actor_loss_beta: 10.0
+optimizer:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+  actor_weight_decay: 0.0001
+  critic_weight_decay: 0.0001
+  actor_grad_clip_norm: 1.0
+  critic_grad_clip_norm: null
+logging:
+  use_wandb: false
+  wandb_project: dgpo_rl_finetune_v1
+  wandb_run_name: null
+  log_interval_steps: 800
+  eval_freq: 3000
+  n_eval_episodes: 1
+  video_log_freq: 3
+  video_fps: 20
+
+[2025-10-26 21:07:14,618][__main__][INFO] - --------------------------------------------------
+[2025-10-26 21:07:14,623][__main__][INFO] - Global seed set to 42
+[2025-10-26 21:07:14,623][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\2025-10-26\21-07-14
+[2025-10-26 21:07:14,631][__main__][INFO] - Initializing 2 parallel training environments...
+[2025-10-26 21:07:14,631][__main__][WARNING] - [SAFEGUARD] Detected Windows OS. SubprocVecEnv uses 'spawn' multiprocessing which often breaks with PyTorch/CuDNN/MuJoCo. Falling back to DummyVecEnv.
+[2025-10-26 21:07:17,337][__main__][INFO] - [ENV INIT] rank=0 is_eval=False seed=42
+[2025-10-26 21:07:18,168][__main__][INFO] - [ENV INIT] rank=1 is_eval=False seed=43
+[2025-10-26 21:07:18,169][__main__][INFO] - [ENV BUILDER] Created 2 env(s) using DummyVecEnv in 3.538s on Windows | CUDA=OFF
+[2025-10-26 21:07:18,170][__main__][INFO] - Initializing 1 parallel envs for evaluation stats...
+[2025-10-26 21:07:18,997][__main__][INFO] - [ENV INIT] rank=0 is_eval=True seed=1042
+[2025-10-26 21:07:18,998][__main__][INFO] - [ENV BUILDER] Created 1 env(s) using DummyVecEnv in 0.828s on Windows | CUDA=OFF
+[2025-10-26 21:07:18,999][__main__][INFO] - Initializing single environment for video recording...
+[2025-10-26 21:07:19,847][__main__][INFO] - [ENV INIT] rank=0 is_eval=True seed=1042
+[2025-10-26 21:07:19,848][__main__][INFO] - [ENV BUILDER] Created 1 env(s) using DummyVecEnv in 0.848s on Windows | CUDA=OFF
+[2025-10-26 21:07:19,862][__main__][INFO] - Initializing Replay Buffer...
+[2025-10-26 21:07:19,869][__main__][INFO] - Using sb3_contrib.common.buffers.DictReplayBuffer.
+[2025-10-26 21:07:19,870][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-26 21:07:19,871][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-26 21:07:19,873][__main__][INFO] - Building RL models and loading pre-trained actor...
+[2025-10-26 21:07:19,873][__main__][INFO] - Inferred proprioception dimension from expert dataset: 22
+[2025-10-26 21:07:20,366][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-26 21:07:20,367][models.diffusion_policy][INFO] - Loading model checkpoint from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-26 21:07:20,569][__main__][INFO] - Successfully loaded pre-trained diffusion policy from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-26 21:07:20,570][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=1
+[2025-10-26 21:07:21,047][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-26 21:07:21,075][__main__][INFO] - DiffusionActor initialized with guidance_scale=1.5, sampling_steps=1
+[2025-10-26 21:07:21,079][__main__][INFO] - Actor and Target Actor created.
+[2025-10-26 21:07:21,561][__main__][INFO] - Critic MLP built with hidden_dims=[512, 512], use_layernorm=True
+[2025-10-26 21:07:21,562][__main__][INFO] - Critic using features from averaged history.
+[2025-10-26 21:07:22,061][__main__][INFO] - Critic MLP built with hidden_dims=[512, 512], use_layernorm=True
+[2025-10-26 21:07:22,062][__main__][INFO] - Critic using features from averaged history.
+[2025-10-26 21:07:22,086][__main__][INFO] - Critic and Target Critic created with DECOUPLED encoders.
+[2025-10-26 21:07:22,087][__main__][INFO] - Optimizers created. Critic optimizer targets Q-networks only.
+[2025-10-26 21:07:22,087][__main__][INFO] - CosineAnnealingLR schedulers created.
+[2025-10-26 21:07:22,088][__main__][INFO] - No checkpoint found at specified path. Starting training from scratch.
+[2025-10-26 21:07:22,088][__main__][INFO] - Starting RL fine-tuning...
+[2025-10-26 21:09:32,174][__main__][INFO] - 
+----------- PROFILING STATS (avg ms per loop) -----------
+[2025-10-26 21:09:32,179][__main__][INFO] - select_action       : 0.32 ms
+[2025-10-26 21:09:32,179][__main__][INFO] - env_step            : 643.70 ms
+[2025-10-26 21:09:32,179][__main__][INFO] - buffer_add_etc      : 2.63 ms
+[2025-10-26 21:09:32,180][__main__][INFO] - train_step          : 0.10 ms
+[2025-10-26 21:09:32,180][__main__][INFO] - total_loop          : 646.79 ms
+[2025-10-26 21:09:32,180][__main__][INFO] - ---------------------------------------------------------
+[2025-10-26 21:10:05,143][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93.lmdb | mode=RO | file-mode
