@@ -276,5 +276,5 @@ if __name__ == "__main__":
     main()
 
 """
-python -m evaluate.evaluate_policy "outputs/rl_finetune/2025-10-26/00-51-29/checkpoints/best_checkpoint.pth"
+python -m evaluate.evaluate_policy "outputs\temp\latest_checkpoint.pth"
 """
