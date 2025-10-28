@@ -55,7 +55,20 @@ from itertools import cycle, chain
 import platform
 import functools 
 
+
 log = logging.getLogger(__name__)
+
+try:
+    num_cores = os.cpu_count() or 1
+    # A heuristic to avoid overhead on systems with very many cores.
+    effective_cores = min(num_cores, 16)
+    torch.set_num_threads(effective_cores)
+    os.environ['OMP_NUM_THREADS'] = str(effective_cores)
+    os.environ['MKL_NUM_THREADS'] = str(effective_cores)
+    log.info(f"Set PyTorch/OMP/MKL threads to: {effective_cores} (available: {num_cores})")
+except Exception as e:
+    log.warning(f"Failed to set thread counts: {e}")
+
 try:
     import wandb
     WANDB_AVAILABLE = True
@@ -72,6 +85,7 @@ try:
     # Use DictReplayBuffer from SB3-Contrib if needed, or stick to standard if sufficient
     # from sb3_contrib.common.buffers import DictReplayBuffer
     from stable_baselines3.common.buffers import ReplayBuffer as SB3ReplayBuffer # Rename for clarity
+
   
     # Using SB3's DictReplayBuffer if needed, else the standard one adapted
     # Check if standard ReplayBuffer handles DictSpace well enough
@@ -88,7 +102,7 @@ try:
         # Fallback or raise error depending on strictness
         ReplayBuffer = SB3ReplayBuffer # Keep trying with standard, monitor logs
 
-    from stable_baselines3.common.vec_env import SubprocVecEnv, VecEnv, VecVideoRecorder, DummyVecEnv
+    from stable_baselines3.common.vec_env import SubprocVecEnv, VecEnv, DummyVecEnv
 except ImportError as e:
     log.exception(f"Error importing project modules. Ensure PYTHONPATH includes project root: {e}")
     sys.exit(1)
@@ -364,7 +378,7 @@ class RLFineTuner:
 
         # [SOTA PATCH] Create a single, separate env for reliable video rendering.
         log.info("Initializing single environment for video recording...")
-        self.video_env = self._make_vec_env(is_eval=True, n_envs_override=1)
+        
 
         # --- Action Space properties ---
         self.action_dim = self.env.action_space.shape[0]
@@ -380,14 +394,13 @@ class RLFineTuner:
         log.info("Initializing Replay Buffer...")
         # Ensure DictReplayBuffer is used if standard ReplayBuffer fails
         try:
-             # Use DictReplayBuffer for robustness with complex observations
              from stable_baselines3.common.buffers import DictReplayBuffer
              self.replay_buffer = DictReplayBuffer(
                  buffer_size=self.cfg.rl_algorithm.buffer_size,
                  observation_space=history_obs_space,
                  action_space=self.env.action_space,
                  device=self.device,
-                 n_envs=self.n_envs,
+                 n_envs=self.n_envs, 
                  handle_timeout_termination=False, # Important for PBRS
              )
              log.info("Using sb3_contrib.common.buffers.DictReplayBuffer.")
@@ -395,7 +408,6 @@ class RLFineTuner:
               log.warning("sb3_contrib not found. Falling back to standard ReplayBuffer. "
                          "Install sb3_contrib (`pip install sb3-contrib`) for robust Dict observation handling.")
               raise ImportError("Please install sb3-contrib to use DictReplayBuffer - pip install sb3-contrib" )
-
 
 
         self.obs_history = ObsHistoryBuffer(self.n_envs, self.history_len, single_step_obs_space)
@@ -416,8 +428,80 @@ class RLFineTuner:
         self.grad_accumulation_counter = 0 # For gradient accumulation
 
         # --- Checkpointing ---
-        self.checkpoint_path = self.output_dir / "checkpoints" / "last_checkpoint.pth"
-        self._load_checkpoint() # Attempt to load if exists
+        if cfg.resume_from_ckpt:
+            # This is a RESUME RUN. Load the full training state.
+            self._load_full_rl_checkpoint(Path(cfg.resume_from_ckpt))
+        else:
+            # This is a FRESH RUN. Load only the BC policy weights.
+            self._load_pretrained_bc_policy(Path(cfg.pretrained_policy_path))
+
+    def _load_pretrained_bc_policy(self, bc_ckpt_path: Path):
+        """For a fresh run, loads weights from a BC checkpoint into the actor and critic."""
+        if not bc_ckpt_path.is_file():
+            log.warning(f"Pre-trained BC policy path not found: {bc_ckpt_path}. Actor will be randomly initialized.")
+            return
+
+        log.info(f"Starting FRESH run. Loading actor weights from BC checkpoint: {bc_ckpt_path}")
+        try:
+            checkpoint = torch.load(bc_ckpt_path, map_location=self.device, weights_only=False)
+            
+            if 'policy_state_dict' in checkpoint:
+                policy_state_dict = checkpoint.get('ema_state_dict', checkpoint['policy_state_dict'])
+            else:
+                policy_state_dict = checkpoint
+            
+            # Load into main actor and sync target actor
+            self.actor.diffusion_policy.load_state_dict(policy_state_dict)
+            self.actor_target.diffusion_policy.load_state_dict(policy_state_dict)
+            
+            # Sync the critic's vision encoder
+            self.critic.features_extractor.load_state_dict(self.actor.diffusion_policy.vision_fusion_encoder.state_dict())
+            self.critic_target.features_extractor.load_state_dict(self.actor.diffusion_policy.vision_fusion_encoder.state_dict())
+            
+            log.info("Successfully synchronized actor, target actor, and critic encoders with BC weights.")
+
+        except Exception as e:
+            log.error(f"Error loading BC weights. Actor will remain randomly initialized. Error: {e}", exc_info=True)
+
+    def _load_full_rl_checkpoint(self, rl_ckpt_path: Path):
+        """For a resume run, loads the ENTIRE training state from an RL checkpoint."""
+        if not rl_ckpt_path.is_file():
+            log.error(f"Resume checkpoint not found: {rl_ckpt_path}. Cannot resume.")
+            # We exit here because the user's intent to resume cannot be fulfilled.
+            sys.exit(1)
+
+        log.info(f"Attempting to resume training from RL checkpoint: {rl_ckpt_path}")
+        try:
+            state = torch.load(rl_ckpt_path, map_location=self.device,weights_only=False)
+
+            # Load models
+            self.actor.load_state_dict(state['actor_state_dict'])
+            self.critic.load_state_dict(state['critic_state_dict'])
+            self.actor_target.load_state_dict(state['actor_target_state_dict'])
+            self.critic_target.load_state_dict(state['critic_target_state_dict'])
+
+            # Load optimizers
+            self.actor_optimizer.load_state_dict(state['actor_optimizer_state_dict'])
+            self.critic_optimizer.load_state_dict(state['critic_optimizer_state_dict'])
+
+            # Load training progress
+            self.total_timesteps = state.get('total_timesteps', 0)
+            self.best_eval_success_rate = state.get('best_eval_success_rate', -1.0)
+            self.timesteps_since_eval = 0 # Always reset eval timer after loading
+
+            # Restore RNG states for perfect reproducibility
+            if 'torch_rng_state' in state:
+                torch.set_rng_state(state['torch_rng_state'])
+            if 'np_rng_state' in state:
+                np.random.set_state(state['np_rng_state'])
+            if 'random_rng_state' in state:
+                random.setstate(state['random_rng_state'])
+            
+            log.info(f"Successfully resumed from checkpoint. Continuing from timestep {self.total_timesteps}.")
+
+        except Exception as e:
+            log.error(f"Error loading full RL checkpoint. Cannot resume. Error: {e}", exc_info=True)
+            sys.exit(1)
 
     def _create_history_obs_space(self, obs_space: DictSpace, history_len: int) -> DictSpace:
         """Takes a single-step Dict obs space and adds the history dimension."""
@@ -769,7 +853,42 @@ class RLFineTuner:
                  log.info("torch.compile applied successfully.")
              except Exception as e:
                  log.warning(f"torch.compile failed: {e}. Continuing without compilation.")
-  
+
+    def _save_backup_checkpoint(self):
+        """Saves a high-frequency, rolling backup checkpoint atomically."""
+        if not self.cfg.logging.get("backup_freq_steps", 0) > 0:
+            return # Do nothing if backup is disabled
+
+        backup_path = self.output_dir / "checkpoints" / "backup.pth"
+        temp_backup_path = backup_path.with_suffix(".pth.tmp")
+        
+        # State dictionary is the same as for other checkpoints
+        state = {
+            'total_timesteps': self.total_timesteps,
+            'actor_state_dict': self.actor.state_dict(),
+            'critic_state_dict': self.critic.state_dict(),
+            'actor_target_state_dict': self.actor_target.state_dict(),
+            'critic_target_state_dict': self.critic_target.state_dict(),
+            'actor_optimizer_state_dict': self.actor_optimizer.state_dict(),
+            'critic_optimizer_state_dict': self.critic_optimizer.state_dict(),
+            'best_eval_success_rate': self.best_eval_success_rate,
+            'np_rng_state': np.random.get_state(),
+            'random_rng_state': random.getstate(),
+            'torch_rng_state': torch.get_rng_state(),
+            'torch_cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            'config_dict': OmegaConf.to_container(self.cfg, resolve=True),
+        }
+        
+        try:
+            torch.save(state, temp_backup_path)
+            # Atomic rename operation to replace the old backup
+            os.replace(temp_backup_path, backup_path)
+            log.debug(f"Saved rolling backup checkpoint to {backup_path} at step {self.total_timesteps}")
+        except Exception as e:
+            log.error(f"Failed to save backup checkpoint: {e}", exc_info=True)
+            if temp_backup_path.exists():
+                os.remove(temp_backup_path) # Clean up temp file on failure
+
     def select_action(self, obs_history_batch: Dict[str, np.ndarray]) -> np.ndarray:
         """Selects a batch of actions from the actor, adding exploration noise."""
         obs_torch = {
@@ -984,113 +1103,130 @@ class RLFineTuner:
         # Each loop processes self.n_envs steps
         num_loops = int(self.cfg.training.total_timesteps) // self.n_envs
 
-        for loop_idx in tqdm(range(num_loops), desc="Total Timesteps"):
 
-            current_loop_timestep = loop_idx * self.n_envs
+        try:
+            for loop_idx in tqdm(range(num_loops), desc="Total Timesteps"):
 
-            # --- Action Selection ---
-            if current_loop_timestep < self.cfg.rl_algorithm.learning_starts:
-                # Sample random actions before learning starts
-                action = np.array([self.env.action_space.sample() for _ in range(self.n_envs)])
-            else:
-                # Get stacked history for policy inference
-                stacked_obs_batch = self.obs_history.get_batch_stacked()
-                action = self.select_action(stacked_obs_batch)
+                current_loop_timestep = loop_idx * self.n_envs
 
-            # --- Environment Interaction ---
-            try:
-                next_raw_obs_list, rewards, dones, infos = self.env.step(action)
-                # Handle potential discrepancies if step doesn't return dict directly
-                if not isinstance(next_raw_obs_list, dict):
-                    if isinstance(next_raw_obs_list, (list, tuple)) and len(next_raw_obs_list) == self.n_envs:
-                         keys = next_raw_obs_list[0].keys()
-                         next_raw_obs_list = {k: np.stack([next_raw_obs_list[i][k] for i in range(self.n_envs)]) for k in keys}
-                    else:
-                        raise TypeError(f"VecEnv.step() returned unexpected type for observations: {type(next_raw_obs_list)}")
+                # --- Action Selection ---
+                if current_loop_timestep < self.cfg.rl_algorithm.learning_starts:
+                    # Sample random actions before learning starts
+                    action = np.array([self.env.action_space.sample() for _ in range(self.n_envs)])
+                else:
+                    # Get stacked history for policy inference
+                    stacked_obs_batch = self.obs_history.get_batch_stacked()
+                    action = self.select_action(stacked_obs_batch)
 
-            except Exception as e:
-                log.exception(f"Error during environment step: {e}")
-                # Decide how to handle env errors: continue, break, etc.
-                continue # Skip this step
-
-            try:
-                # 1. Get s_t (history *before* this step's observation is added).
-                # This is already a batched dictionary of numpy arrays.
-                obs_history_t = self.obs_history.get_batch_stacked()
-
-                # 2. Update the history buffer for all environments to get s_{t+1}.
-                # The 'infos' dict will contain the "real" next observation for terminal states.
-                # SB3's replay buffer uses this `infos` dict to store the correct terminal observation.
-                # Therefore, we can safely update our history buffer with the `next_raw_obs_list`
-                # and then handle terminal resets separately.
-                for i in range(self.n_envs):
-                    env_next_obs = {k: v[i] for k, v in next_raw_obs_list.items()}
-                    self.obs_history.append(i, env_next_obs)
-                
-                # Note: For the replay buffer, the "next_obs" is handled internally by SB3
-                # using the `infos` array for terminal states. We don't need to manually create `s_{t+1}`.
-                # We simply add the current history (`s_t`) and the raw `next_raw_obs_list`. The buffer
-                # is smart enough to use `infos[i]["terminal_observation"]` when `dones[i]` is True.
-                # However, the sb3-contrib DictReplayBuffer *does* expect the full next_obs dictionary.
-                # The logic below is more robust for both buffer types.
-
-                # Let's prepare the next_obs properly for the buffer.
-                # It's mostly the updated history, but for dones, it's special.
-                # For simplicity and correctness with sb3-contrib, we just pass the *updated* history.
-                # The buffer's `handle_timeout_termination=False` ensures it stores what we give it.
-                obs_history_t_plus_1 = self.obs_history.get_batch_stacked()
-
-                # 3. Add the entire batch of transitions to the replay buffer in ONE call.
-                self.replay_buffer.add(
-                    obs=obs_history_t,
-                    next_obs=obs_history_t_plus_1,
-                    action=action,          # Shape (n_envs, action_dim)
-                    reward=rewards,         # Shape (n_envs,)
-                    done=dones,             # Shape (n_envs,)
-                    infos=infos,            # List of info dicts, length n_envs
-                )
-
-                # 4. Handle Episode Terminations (Reset History Buffers for next loop iteration).
-                # This must happen *after* adding to the buffer.
-                for i in range(self.n_envs):
-                    if dones[i]:
-                        env_info = infos[i] if isinstance(infos, (list, tuple)) else infos
-                        if "terminal_observation" in env_info:
-                            terminal_obs = env_info["terminal_observation"]
-                            self.obs_history.reset(i, terminal_obs)
+                # --- Environment Interaction ---
+                try:
+                    next_raw_obs_list, rewards, dones, infos = self.env.step(action)
+                    # Handle potential discrepancies if step doesn't return dict directly
+                    if not isinstance(next_raw_obs_list, dict):
+                        if isinstance(next_raw_obs_list, (list, tuple)) and len(next_raw_obs_list) == self.n_envs:
+                            keys = next_raw_obs_list[0].keys()
+                            next_raw_obs_list = {k: np.stack([next_raw_obs_list[i][k] for i in range(self.n_envs)]) for k in keys}
                         else:
-                            log.warning(f"No 'terminal_observation' in info dict for env {i} on done. History buffer reset might be inaccurate.")
-                            last_obs_for_env_i = {k: v[i] for k, v in next_raw_obs_list.items()}
-                            self.obs_history.reset(i, last_obs_for_env_i)
-            
-            except Exception as e:
-                log.exception(f"Error processing vectorized step and adding to buffer: {e}")
-                continue # Skip this entire batch if an error occurs
+                            raise TypeError(f"VecEnv.step() returned unexpected type for observations: {type(next_raw_obs_list)}")
 
-            # --- Update Timestep Counter ---
-            # Correctly increment based on number of parallel environments
-            self.total_timesteps = (loop_idx + 1) * self.n_envs
+                except Exception as e:
+                    log.exception(f"Error during environment step: {e}")
+                    # Decide how to handle env errors: continue, break, etc.
+                    continue # Skip this step
 
-            # --- Training Step ---
-            if self.total_timesteps >= self.cfg.rl_algorithm.learning_starts:
-                # Perform gradient updates using sampled data
-                self.train_step()
+                try:
+                    # 1. Get s_t (history *before* this step's observation is added).
+                    # This is already a batched dictionary of numpy arrays.
+                    obs_history_t = self.obs_history.get_batch_stacked()
 
-            # --- Evaluation and Checkpointing ---
-            if self.total_timesteps - self.timesteps_since_eval >= self.cfg.logging.eval_freq:
-                self.evaluate()
-                self._save_checkpoint() # Save checkpoint after evaluation
-                self.timesteps_since_eval = self.total_timesteps
+                    # 2. Update the history buffer for all environments to get s_{t+1}.
+                    # The 'infos' dict will contain the "real" next observation for terminal states.
+                    # SB3's replay buffer uses this `infos` dict to store the correct terminal observation.
+                    # Therefore, we can safely update our history buffer with the `next_raw_obs_list`
+                    # and then handle terminal resets separately.
+                    for i in range(self.n_envs):
+                        env_next_obs = {k: v[i] for k, v in next_raw_obs_list.items()}
+                        self.obs_history.append(i, env_next_obs)
+                    
+                    # Note: For the replay buffer, the "next_obs" is handled internally by SB3
+                    # using the `infos` array for terminal states. We don't need to manually create `s_{t+1}`.
+                    # We simply add the current history (`s_t`) and the raw `next_raw_obs_list`. The buffer
+                    # is smart enough to use `infos[i]["terminal_observation"]` when `dones[i]` is True.
+                    # However, the sb3-contrib DictReplayBuffer *does* expect the full next_obs dictionary.
+                    # The logic below is more robust for both buffer types.
 
-        # --- Final Save ---
-        log.info("Training finished. Saving final checkpoint.")
-        self._save_checkpoint(is_final=True)
-        self.env.close()
-        self.eval_env.close()
-        self.video_env.close()
-        if self.use_wandb:
-            wandb.finish()
-        self.writer.close()
+                    # Let's prepare the next_obs properly for the buffer.
+                    # It's mostly the updated history, but for dones, it's special.
+                    # For simplicity and correctness with sb3-contrib, we just pass the *updated* history.
+                    # The buffer's `handle_timeout_termination=False` ensures it stores what we give it.
+                    obs_history_t_plus_1 = self.obs_history.get_batch_stacked()
+
+                    # 3. Add the entire batch of transitions to the replay buffer in ONE call.
+                    self.replay_buffer.add(
+                        obs=obs_history_t,
+                        next_obs=obs_history_t_plus_1,
+                        action=action,          # Shape (n_envs, action_dim)
+                        reward=rewards,         # Shape (n_envs,)
+                        done=dones,             # Shape (n_envs,)
+                        infos=infos,            # List of info dicts, length n_envs
+                    )
+
+                    # 4. Handle Episode Terminations (Reset History Buffers for next loop iteration).
+                    # This must happen *after* adding to the buffer.
+                    for i in range(self.n_envs):
+                        if dones[i]:
+                            env_post_reset_obs = {k: v[i] for k, v in next_raw_obs_list.items()}
+                            self.obs_history.reset(i, env_post_reset_obs)
+                
+                except Exception as e:
+                    log.exception(f"Error processing vectorized step and adding to buffer: {e}")
+                    continue # Skip this entire batch if an error occurs
+
+                # --- Update Timestep Counter ---
+                # Correctly increment based on number of parallel environments
+                self.total_timesteps = (loop_idx + 1) * self.n_envs
+
+                # --- Training Step ---
+                if self.total_timesteps >= self.cfg.rl_algorithm.learning_starts:
+                    # Perform gradient updates using sampled data
+                    self.train_step()
+
+                # --- Evaluation and Checkpointing ---
+                if self.total_timesteps - self.timesteps_since_eval >= self.cfg.logging.eval_freq:
+                    self.evaluate()
+                    self._save_checkpoint() # Save checkpoint after evaluation
+                    self.timesteps_since_eval = self.total_timesteps
+                    
+                backup_freq = self.cfg.logging.get("backup_freq_steps", 0)
+                if backup_freq > 0 and self.total_timesteps % backup_freq < self.n_envs:
+                    self._save_backup_checkpoint()
+
+        except KeyboardInterrupt:
+            log.warning("\nTraining interrupted by user (KeyboardInterrupt).")
+            log.info("Performing a final save of the interruption state...")
+            self._save_checkpoint(is_interrupted=True)
+            log.info("Interruption checkpoint saved. To resume, use this file path in `resume_from_ckpt`.")
+            # We exit gracefully, so no need to re-raise the exception
+        
+        except Exception as e:
+            log.exception(f"An unexpected error occurred during training loop: {e}")
+            log.error("Attempting to save an error-state backup...")
+            # Save a special checkpoint that indicates an error occurred
+            self._save_checkpoint(is_interrupted=True) # Re-use interruption logic for error saves
+        else:
+            # This block runs ONLY if the `try` block completes without any exceptions.
+            log.info("Training finished normally. Saving final checkpoint.")
+            self._save_checkpoint(is_final=True)
+        finally:
+            # This block will run regardless of how the try block exits
+            log.info("Closing environments...")
+            self.env.close()
+            self.eval_env.close()
+            if self.use_wandb:
+                wandb.finish()
+            self.writer.close()
+            log.info("--- Training script finished ---")
+        # --- END OF MAIN LOOP WRAPPER PATCH ---
 
     def evaluate(self):
         """
@@ -1161,51 +1297,6 @@ class RLFineTuner:
         if self.use_wandb: wandb.log(metrics, step=self.total_timesteps)
         for k, v in metrics.items(): self.writer.add_scalar(k, v, self.total_timesteps)
 
-        # ===================================================================
-        # 2. SEQUENTIAL VIDEO RECORDING (uses self.video_env)
-        # ===================================================================
-        current_eval_phase = (self.total_timesteps // self.cfg.logging.eval_freq) if self.cfg.logging.eval_freq > 0 else 0
-        if self.use_wandb and self.cfg.logging.video_log_freq > 0 and current_eval_phase % self.cfg.logging.video_log_freq == 0:
-            log.info("Starting video recording episode...")
-            video_frames = []
-            try:
-                raw_obs_dict_tuple = self.video_env.reset()
-                # DummyVecEnv with n=1 still returns a dict of batched arrays (batch_size=1)
-                raw_obs_dict = {k: v[0] for k, v in raw_obs_dict_tuple.items()}
-                # Use a single slot (index 0) of the history buffer for the video env
-                current_hist_obs = self.eval_obs_history.reset(0, raw_obs_dict)
-                done = False
-            except Exception as e:
-                log.exception("Error resetting video environment. Aborting video recording.")
-                done = True
-
-            while not done:
-                try:
-                    # render() on DummyVecEnv returns a list of frames
-                    frame = self.video_env.render()
-                    video_frames.append(frame.copy())
-                except Exception as e:
-                    log.warning(f"Could not render frame for video: {e}")
-
-                stacked_obs_batch = {k: v[np.newaxis, ...] for k, v in current_hist_obs.items()}
-                with torch.no_grad():
-                    action = self.select_action(stacked_obs_batch)
-                
-                try:
-                    next_raw_obs_list, _, dones, _ = self.video_env.step(action)
-                    done = dones[0]
-                    env_next_obs = {k: v[0] for k, v in next_raw_obs_list.items()}
-                    self.eval_obs_history.append(0, env_next_obs)
-                    current_hist_obs = self.eval_obs_history.get_stacked(0)
-                except Exception as e:
-                    log.exception("Error stepping video environment. Aborting episode.")
-                    break
-            
-            if video_frames:
-                video_np = np.stack(video_frames)
-                video_np = np.transpose(video_np, (0, 3, 1, 2)) # T, C, H, W for W&B
-                wandb.log({"eval/video": wandb.Video(video_np, fps=self.cfg.logging.get("video_fps", 20))}, step=self.total_timesteps)
-                log.info("Logged video to W&B.")
 
         # ===================================================================
         # 3. CHECKPOINTING AND CLEANUP
@@ -1222,7 +1313,7 @@ class RLFineTuner:
 
 
     # --- Checkpointing Methods ---
-    def _save_checkpoint(self, is_best: bool = False, is_final: bool = False):
+    def _save_checkpoint(self, is_best: bool = False, is_final: bool = False, is_interrupted: bool = False):
         """Saves a training checkpoint atomically."""
         state = {
             'total_timesteps': self.total_timesteps,
@@ -1241,33 +1332,41 @@ class RLFineTuner:
         }
 
         # Save latest checkpoint
-        latest_path = self.output_dir / "checkpoints" / "latest_checkpoint.pth"
-        try:
-            temp_latest_path = latest_path.with_suffix(".pth.tmp")
-            torch.save(state, temp_latest_path)
-            os.replace(temp_latest_path, latest_path) # Atomic operation
-            log.info(f"Saved latest checkpoint to {latest_path} at timestep {self.total_timesteps}")
-        except Exception as e:
-             log.exception(f"Error saving latest checkpoint: {e}")
-             if temp_latest_path.exists(): os.remove(temp_latest_path) # Cleanup temp
+        if is_interrupted:
+            save_path = self.output_dir / "checkpoints" / "interrupted_checkpoint.pth"
+            log.info(f"Saving interruption checkpoint to {save_path}...")
+        else:
+            save_path = self.output_dir / "checkpoints" / "latest_checkpoint.pth"
 
-        # Save best checkpoint
+        # Atomic save to the primary path
+        try:
+            temp_path = save_path.with_suffix(".pth.tmp")
+            torch.save(state, temp_path)
+            os.replace(temp_path, save_path)
+            if not is_interrupted:
+                log.info(f"Saved latest checkpoint to {save_path} at timestep {self.total_timesteps}")
+        except Exception as e:
+             log.exception(f"Error saving checkpoint to {save_path}: {e}")
+             if 'temp_path' in locals() and temp_path.exists(): os.remove(temp_path)
+             return # Abort further copies if the main save failed
+
+        # Copy to best_checkpoint.pth if it's the best model
         if is_best:
             best_path = self.output_dir / "checkpoints" / "best_checkpoint.pth"
             try:
-                shutil.copyfile(latest_path, best_path) # Copy latest if it's the best
-                log.info(f"Saved best checkpoint to {best_path}")
+                shutil.copyfile(save_path, best_path)
+                log.info(f"Copied new best checkpoint to {best_path}")
             except Exception as e:
-                 log.exception(f"Error saving best checkpoint: {e}")
+                 log.exception(f"Error copying best checkpoint: {e}")
 
-        # Save final checkpoint
+        # Copy to final_checkpoint.pth if it's the final model
         if is_final:
             final_path = self.output_dir / "checkpoints" / "final_checkpoint.pth"
             try:
-                 shutil.copyfile(latest_path, final_path)
-                 log.info(f"Saved final checkpoint to {final_path}")
+                 shutil.copyfile(save_path, final_path)
+                 log.info(f"Copied final checkpoint to {final_path}")
             except Exception as e:
-                 log.exception(f"Error saving final checkpoint: {e}")
+                 log.exception(f"Error copying final checkpoint: {e}")
 
 
     def _load_checkpoint(self):
@@ -1276,7 +1375,7 @@ class RLFineTuner:
         if load_path.exists():
             log.info(f"Attempting to load checkpoint from {load_path}")
             try:
-                state = torch.load(load_path, map_location=self.device)
+                state = torch.load(load_path, map_location=self.device,weights_only=False)
 
                 # Load models
                 self.actor.load_state_dict(state['actor_state_dict'])

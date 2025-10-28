@@ -1,103 +1,51 @@
-import argparse
-import json
-import logging
-from pathlib import Path
-import sys
+# FILE: train_rl.py
 
-# --- LMDB Imports and Helpers (for legacy fallback) ---
-try:
-    import lmdb
-except ImportError:
-    lmdb = None
+# ... (inside RLFineTuner.run method, inside the `for loop_idx ...` loop)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
-logger = logging.getLogger(__name__)
+                try:
+                    # 1. Get s_t (history *before* this step's observation is added)
+                    obs_history_t = self.obs_history.get_batch_stacked()
 
-def open_lmdb_env(path: str, readonly: bool = True, lock: bool = False):
-    if not lmdb:
-        raise ImportError("LMDB package not found. Please install with 'pip install lmdb'")
-    # Use a large map size for safety, but it won't be used if readonly.
-    map_size = int(1 * (1024**3)) # 1 GB
-    return lmdb.open(path, readonly=readonly, lock=lock, readahead=False, map_size=map_size, meminit=False)
+                    # 2. Update the history buffer for all environments to get s_{t+1}
+                    # We append the raw observation list, which contains post-reset obs
+                    for i in range(self.n_envs):
+                        env_next_obs = {k: v[i] for k, v in next_raw_obs_list.items()}
+                        self.obs_history.append(i, env_next_obs)
+                    
+                    # This is s_{t+1} (containing post-reset obs for any done envs)
+                    obs_history_t_plus_1 = self.obs_history.get_batch_stacked()
 
-def close_lmdb_env(env):
-    if env is not None:
-        env.close()
+                    # 3. Add the entire batch of transitions to the replay buffer.
+                    # SOTA PATCH 4:
+                    # Because `handle_timeout_termination=True` (from Patch 2),
+                    # the buffer will automatically look at `infos[i]` when `dones[i]`
+                    # is True. It will find `"terminal_observation"` and store
+                    # a history-padded version of *that* observation as the
+                    # `next_obs`, instead of the one from `obs_history_t_plus_1`.
+                    self.replay_buffer.add(
+                        obs=obs_history_t,
+                        next_obs=obs_history_t_plus_1,
+                        action=action,
+                        reward=rewards,
+                        done=dones,
+                        infos=infos,
+                    )
 
-def count_episodes_sota(lmdb_path: Path) -> int:
-    """Counts episodes by reading the SOTA JSON index file."""
-    
-    # --- START OF FIX ---
-    # Correctly construct the index path name
-    # e.g., 'file.lmdb' -> stem is 'file' -> 'file_index.json'
-    stem = lmdb_path.stem
-    index_path = lmdb_path.parent / f"{stem}_index.json"
-    # --- END OF FIX ---
+                    # 4. Handle Episode Terminations (Reset History Buffers for next loop).
+                    # This must happen *after* adding to the buffer.
+                    for i in range(self.n_envs):
+                        if dones[i]:
+                            # SOTA PATCH 4:
+                            # The environment has *already* reset. The observation
+                            # in `next_raw_obs_list[i]` is the *post-reset* observation.
+                            # We MUST reset the history buffer to be in sync with
+                            # the environment's *new* state.
+                            env_post_reset_obs = {k: v[i] for k, v in next_raw_obs_list.items()}
+                            self.obs_history.reset(i, env_post_reset_obs)
+                
+                except Exception as e:
+                    log.exception(f"Error processing vectorized step and adding to buffer: {e}")
+                    continue # Skip this entire batch if an error occurs
 
-    if not index_path.exists():
-        # Raise a more specific error for clarity
-        raise FileNotFoundError(f"SOTA index file not found at expected path: {index_path}")
-        
-    with open(index_path, 'r') as f:
-        index_data = json.load(f)
-        
-    return len(index_data.get("episodes", []))
-
-def count_episodes_legacy(lmdb_path: Path) -> int:
-    """Counts episodes by reading the number of keys in a legacy LMDB file."""
-    env = None
-    try:
-        env = open_lmdb_env(str(lmdb_path))
-        with env.begin(write=False) as txn:
-            # txn.stat() is the most efficient way to get the number of entries.
-            stats = txn.stat()
-            return stats['entries']
-    finally:
-        if env:
-            close_lmdb_env(env)
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Count the total number of episodes in a legacy or SOTA LMDB dataset."
-    )
-    parser.add_argument(
-        "lmdb_path",
-        type=str,
-        help="Path to the .lmdb file."
-    )
-    args = parser.parse_args()
-
-    db_path = Path(args.lmdb_path)
-
-    if not db_path.is_file():
-        logger.error(f"Error: File not found at '{db_path}'")
-        sys.exit(1)
-
-    try:
-        # --- Attempt 1: Try the fast SOTA method first ---
-        count = count_episodes_sota(db_path)
-        logger.info(f"Detected SOTA dataset with pre-computed index.")
-        print(f"\nTotal episodes: {count}\n")
-
-    except FileNotFoundError:
-        # --- Attempt 2: Fall back to the legacy method ---
-        logger.info("SOTA index file not found. Falling back to legacy scan method...")
-        try:
-            count = count_episodes_legacy(db_path)
-            logger.info("Scan complete.")
-            print(f"\nTotal episodes: {count}\n")
-        except Exception as e:
-            logger.error(f"Failed to scan LMDB file as a legacy dataset: {e}")
-            sys.exit(1)
-            
-    except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
-
-"""
-
-python -m s11 data/training/final_merged_dataset.lmdb
-"""
+                # --- Update Timestep Counter ---
+# ... (rest of run method)

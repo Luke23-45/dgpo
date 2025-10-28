@@ -9,8 +9,8 @@ hydra:
 # 1. RUN MANAGEMENT & REPRODUCIBILITY
 # ===================================================================
 seed: 42
-device: "cuda"
-resume_checkpoint: "/content/drive/MyDrive/pda/Models/backup_epoch_19.pth"
+device: "cpu"
+resume_checkpoint: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth"
 
 # ===================================================================
 # 2. LOGGING
@@ -25,8 +25,8 @@ logging:
 # 3. DATASET & DATALOADING
 # ===================================================================
 dataset:
-  path: "/content/drive/MyDrive/pda/data/shard_001/expert_training_run_99914b93_part001.lmdb"      # Replace with actual path
-  val_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"   # Replace with actual path
+  path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"      # Replace with actual path
+  val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"   # Replace with actual path
   batch_size: 128               # Maximized for 16GB RAM to get stable gradients.
   num_workers: 2                # Use 4 parallel workers to hide data loading latency. Set to 0 if errors occur.
 

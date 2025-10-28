@@ -11,7 +11,7 @@ hydra:
 # CRITICAL: Path to the trained model checkpoint (.pth file) to evaluate.
 # This should be overridden on the command line, e.g.,
 # python -m scripts.evaluate_policy ckpt_path=path/to/your/best.pth
-ckpt_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-24/13-14-50/checkpoints/backup/backup_epoch_17.pth"
+ckpt_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth"
 
 seed: 42
 device: "cpu" # 'cuda' for GPU
@@ -34,7 +34,7 @@ eval:
   guidance_scale: 1.5
 
   # --- Rollout parameters ---
-  n_rollouts: 10 # Number of episodes to run in the simulator
+  n_rollouts: 2 # Number of episodes to run in the simulator
   max_rollout_steps: 200 # Max steps per episode
 
 # ===================================================================

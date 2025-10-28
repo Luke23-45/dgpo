@@ -6,19 +6,29 @@
 # Hydra specific settings
 hydra:
   run:
-    dir: outputs/rl_finetune/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/rl_finetune/${run_name}/${now:%Y-%m-%d_%H-%M-%S}
 
 # ===================================================================
 # 1. RUN MANAGEMENT & REPRODUCIBILITY
 # ===================================================================
 seed: 42
 device: "cuda" # Change to "cuda" if you have a GPU
+run_name: "my_first_rl_run"
+
+
+# resume_from_ckpt: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/rl_finetune/my_first_rl_run/2025-10-28_19-11-00/checkpoints/interrupted_checkpoint.pth"
+
+
+resume_from_ckpt: "/content/drive/MyDrive/pda/Models/interrupted_checkpoint.pth"
 
 # ===================================================================
 # 2. REQUIRED PATHS
 # ===================================================================
 # Path to the pre-trained diffusion policy weights from the pre-training step.
 # CRITICAL: UPDATE THIS PATH to point to your `best.pth` or `last.pth` file.
+# pretrained_policy_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth"
+
+
 pretrained_policy_path: "/content/drive/MyDrive/pda/Models/backup_epoch_19.pth"
 
 # Path to the offline expert dataset. This is used for the "+BC" loss.
@@ -35,7 +45,7 @@ environment:
   
   # Number of parallel environments. Set to 1 for a simple test run.
   # Increase for faster data collection if you have multiple CPU cores.
-  n_envs: 2
+  n_envs: 4
 
   max_episode_steps: 500
   
@@ -93,7 +103,7 @@ rl_algorithm:
   # Controls how strongly the actor adheres to the learned distribution.
   # A value between 1.0 (no guidance) and 2.0 is a good starting point.
   guidance_scale: 1.5
-  sampling_steps: 1  #it was 4 before
+  sampling_steps: 50  #it was 4 before
   critic_net_arch: [512, 512]     # Hidden layers for the Q-networks
   use_critic_layernorm: true        # Enable/disable LayerNorm in critic MLPs
   critic_use_last_feature: false    # If true, use last obs feature. If false, average over history.
@@ -119,10 +129,10 @@ logging:
   wandb_run_name: null
   
   # How often to log training metrics (in total environment steps)
-  log_interval_steps: 800
+  log_interval_steps: 500
   
   # How often to run the evaluation loop (in total environment steps)
-  eval_freq: 2000
+  eval_freq: 5000
   
   # Number of episodes to run during each evaluation
   n_eval_episodes: 2 #3
@@ -130,6 +140,8 @@ logging:
   # How often to save a video during evaluation (e.g., every 1st evaluation)
   video_log_freq: 3
   video_fps: 20
+  backup_freq_steps: 1000
+
 
 
 # learning_starts , n_eval_episodes = 3 , sampling_steps = 4 initially
