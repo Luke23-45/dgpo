@@ -50,3 +50,4 @@ validation:
 [2025-10-28 02:02:13,149][__main__][INFO] - Inferred proprioception dimension from dataset index: 22
 [2025-10-28 02:02:13,781][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
 [2025-10-28 02:02:13,889][__main__][INFO] - Resuming training from checkpoint: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-28 02:02:14,397][__main__][INFO] - Starting training from epoch 20...

@@ -19,7 +19,9 @@ run_name: "my_first_rl_run"
 # resume_from_ckpt: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/rl_finetune/my_first_rl_run/2025-10-28_19-11-00/checkpoints/interrupted_checkpoint.pth"
 
 
-resume_from_ckpt: "/content/drive/MyDrive/pda/Models/interrupted_checkpoint.pth"
+resume_from_ckpt: null
+
+# resume_from_ckpt: "/content/drive/MyDrive/pda/Models/interrupted_checkpoint.pth"
 
 # ===================================================================
 # 2. REQUIRED PATHS
