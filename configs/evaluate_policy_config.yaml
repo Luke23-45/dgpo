@@ -35,7 +35,7 @@ eval:
 
   # --- Rollout parameters ---
   n_rollouts: 2 # Number of episodes to run in the simulator
-  max_rollout_steps: 200 # Max steps per episode
+  max_rollout_steps: 500 # Max steps per episode
 
 # ===================================================================
 # 4. REQUIRED PATHS & CONFIGS FOR REBUILDING

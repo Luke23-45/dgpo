@@ -1,0 +1,37 @@
+[2025-10-29 15:43:41,497][__main__][INFO] - Evaluation output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\evaluations\2025-10-29\15-43-41
+[2025-10-29 15:43:41,499][__main__][INFO] - Full evaluation config:
+ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth
+seed: 42
+device: cpu
+do_offline_eval: true
+do_online_eval: true
+eval:
+  batch_size: 32
+  sampling_steps: 50
+  guidance_scale: 1.5
+  n_rollouts: 2
+  max_rollout_steps: 500
+dataset:
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+environment:
+  xml_path: envs/panda_pick_place.xml
+
+[2025-10-29 15:43:41,510][scripts.pretrain_diffusion][INFO] - Global seed set to 42
+[2025-10-29 15:43:41,512][__main__][INFO] - Loading checkpoint from: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-29 15:43:41,963][__main__][INFO] - Successfully loaded training configuration from checkpoint.
+[2025-10-29 15:43:41,964][__main__][INFO] - Adapting legacy 'schedule_type' key to 'schedule' for model compatibility.
+[2025-10-29 15:43:41,965][__main__][WARNING] - proprio_dim not found in checkpoint config. Inferring from validation dataset...
+[2025-10-29 15:43:41,966][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-29 15:43:41,968][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-29 15:43:41,968][__main__][INFO] - Inferred proprioception dimension from validation dataset: 22
+[2025-10-29 15:43:42,398][models.diffusion_policy][INFO] - State-of-the-art DiffusionPolicy initialized on device: cpu
+[2025-10-29 15:43:42,508][__main__][INFO] - EMA weights loaded successfully.
+[2025-10-29 15:43:42,508][__main__][INFO] - Policy successfully reconstructed and loaded.
+[2025-10-29 15:43:42,511][__main__][INFO] - 
+==================================================
+OFFLINE EVALUATION
+==================================================
+[2025-10-29 15:43:42,512][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-29 15:43:42,513][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-29 15:43:42,516][__main__][INFO] - Using EMA weights for offline evaluation (via policy.sample(use_ema=True)).
+[2025-10-29 15:43:42,527][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93.lmdb | mode=RO | file-mode

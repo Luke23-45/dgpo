@@ -275,6 +275,8 @@ def main():
 if __name__ == "__main__":
     main()
 
-"""
-python -m evaluate.evaluate_policy "outputs\temp\latest_checkpoint.pth"
-"""
+def ty():
+    """
+    python -m evaluate.evaluate_policy "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\my_first_rl_run\2025-10-28_23-41-13\checkpoints\interrupted_checkpoint.pth"
+    """
+    pass

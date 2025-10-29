@@ -19,9 +19,9 @@ run_name: "my_first_rl_run"
 # resume_from_ckpt: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/rl_finetune/my_first_rl_run/2025-10-28_19-11-00/checkpoints/interrupted_checkpoint.pth"
 
 
-resume_from_ckpt: null
+# resume_from_ckpt: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/notes/interrupted_checkpoint.pth"
 
-# resume_from_ckpt: "/content/drive/MyDrive/pda/Models/interrupted_checkpoint.pth"
+resume_from_ckpt: "/content/drive/MyDrive/pda/Models/interrupted_checkpoint.pth"
 
 # ===================================================================
 # 2. REQUIRED PATHS
@@ -30,6 +30,7 @@ resume_from_ckpt: null
 # CRITICAL: UPDATE THIS PATH to point to your `best.pth` or `last.pth` file.
 # pretrained_policy_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth"
 
+# pretrained_policy_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth"
 
 pretrained_policy_path: "/content/drive/MyDrive/pda/Models/backup_epoch_19.pth"
 

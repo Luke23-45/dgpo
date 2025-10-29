@@ -1,0 +1,106 @@
+[2025-10-28 23:40:17,080][__main__][INFO] - ----------- RL Fine-tuning Configuration -----------
+[2025-10-28 23:40:17,086][__main__][INFO] - seed: 42
+device: cuda
+run_name: my_first_rl_run
+resume_from_ckpt: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/notes/interrupted_checkpoint.pth
+pretrained_policy_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  num_workers: 0
+environment:
+  xml_path: envs/panda_pick_place.xml
+  n_envs: 4
+  max_episode_steps: 500
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+  proprio_dim: 22
+scheduler:
+  schedule: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+training:
+  total_timesteps: 200000
+  curriculum_total_episodes: 2000
+  gradient_accumulation_steps: 8
+  use_torch_compile: false
+  use_reweighted_bc_actor_loss: true
+rl_algorithm:
+  buffer_size: 12000
+  learning_starts: 2000
+  batch_size: 128
+  gamma: 0.98
+  tau: 0.005
+  policy_delay: 4
+  policy_noise: 0.2
+  noise_clip: 0.5
+  exploration_noise: 0.1
+  guidance_scale: 1.5
+  sampling_steps: 50
+  critic_net_arch:
+  - 512
+  - 512
+  use_critic_layernorm: true
+  critic_use_last_feature: false
+  actor_loss_beta: 10.0
+optimizer:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+  actor_weight_decay: 0.0001
+  critic_weight_decay: 0.0001
+  actor_grad_clip_norm: 1.0
+  critic_grad_clip_norm: null
+logging:
+  use_wandb: false
+  wandb_project: dgpo_rl_finetune_v1
+  wandb_run_name: null
+  log_interval_steps: 500
+  eval_freq: 5000
+  n_eval_episodes: 2
+  video_log_freq: 3
+  video_fps: 20
+  backup_freq_steps: 1000
+
+[2025-10-28 23:40:17,087][__main__][INFO] - --------------------------------------------------
+[2025-10-28 23:40:17,091][__main__][INFO] - Global seed set to 42
+[2025-10-28 23:40:17,092][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\rl_finetune\my_first_rl_run\2025-10-28_23-40-17
+[2025-10-28 23:40:17,105][__main__][INFO] - Initializing 4 parallel training environments...
+[2025-10-28 23:40:17,105][__main__][WARNING] - [SAFEGUARD] Detected Windows OS. SubprocVecEnv uses 'spawn' multiprocessing which often breaks with PyTorch/CuDNN/MuJoCo. Falling back to DummyVecEnv.
+[2025-10-28 23:40:20,169][__main__][INFO] - [ENV INIT] rank=0 is_eval=False seed=42
+[2025-10-28 23:40:21,022][__main__][INFO] - [ENV INIT] rank=1 is_eval=False seed=43
+[2025-10-28 23:40:21,846][__main__][INFO] - [ENV INIT] rank=2 is_eval=False seed=44
+[2025-10-28 23:40:22,741][__main__][INFO] - [ENV INIT] rank=3 is_eval=False seed=45
+[2025-10-28 23:40:22,741][__main__][INFO] - [ENV BUILDER] Created 4 env(s) using DummyVecEnv in 5.636s on Windows | CUDA=OFF
+[2025-10-28 23:40:22,742][__main__][INFO] - Initializing 2 parallel envs for evaluation stats...
+[2025-10-28 23:40:22,743][__main__][WARNING] - [SAFEGUARD] Detected Windows OS. SubprocVecEnv uses 'spawn' multiprocessing which often breaks with PyTorch/CuDNN/MuJoCo. Falling back to DummyVecEnv.
+[2025-10-28 23:40:23,655][__main__][INFO] - [ENV INIT] rank=0 is_eval=True seed=1042
+[2025-10-28 23:40:24,586][__main__][INFO] - [ENV INIT] rank=1 is_eval=True seed=1043
+[2025-10-28 23:40:24,587][__main__][INFO] - [ENV BUILDER] Created 2 env(s) using DummyVecEnv in 1.843s on Windows | CUDA=OFF
+[2025-10-28 23:40:24,587][__main__][INFO] - Initializing single environment for video recording...
+[2025-10-28 23:40:24,598][__main__][INFO] - Initializing Replay Buffer...
+[2025-10-28 23:40:24,652][__main__][INFO] - Using sb3_contrib.common.buffers.DictReplayBuffer.
+[2025-10-28 23:40:24,685][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-28 23:40:24,687][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-28 23:40:24,693][__main__][INFO] - Building RL models and loading pre-trained actor...
+[2025-10-28 23:40:24,694][__main__][INFO] - Inferred proprioception dimension from expert dataset: 22
+[2025-10-28 23:40:25,335][__main__][ERROR] - An error occurred during the RL fine-tuning run.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 1433, in main
+    trainer = RLFineTuner(cfg)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 422, in __init__
+    self._build_models_and_optimizers(history_obs_space)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\scripts\train_rl.py", line 756, in _build_models_and_optimizers
+    diffusion_policy = DiffusionPolicy(**policy_kwargs)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\models\diffusion_policy.py", line 426, in __init__
+    self.scheduler = NoiseScheduler(scheduler_cfg).to(self.device)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo\models\diffusion_policy.py", line 136, in to
+    self.betas = self.betas.to(device)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\cuda\__init__.py", line 403, in _lazy_init
+    raise AssertionError("Torch not compiled with CUDA enabled")
+AssertionError: Torch not compiled with CUDA enabled
