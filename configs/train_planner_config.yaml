@@ -81,7 +81,7 @@ training:
   # --- END OF PATCH 3 ---
   
   gradient_accumulation_batches: 4
-  check_val_every_n_epoch: 1
+  check_val_every_n_epoch: 5
   run_full_validation_every_n_epoch: 5 
   limit_lpips_batches: 50
   save_top_k_checkpoints: 3
