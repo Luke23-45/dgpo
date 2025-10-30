@@ -61,8 +61,8 @@ scheduler:
 
 # --- Training Configuration ---
 training:
-  batch_size: 8 # CLIP-Large is bigger, may need to reduce batch size for memory
-  val_batch_size: 8
+  batch_size: 4 # CLIP-Large is bigger, may need to reduce batch size for memory
+  val_batch_size: 4
   max_epochs: 200 # May need more epochs for a larger model
   
   # --- START OF PATCH 3: SOTA TRAINING PARAMETERS ---
@@ -79,7 +79,7 @@ training:
   swa_lrs: 1.0e-4
   # --- END OF PATCH 3 ---
   
-  gradient_accumulation_batches: 1
+  gradient_accumulation_batches: 4
   check_val_every_n_epoch: 1
   save_top_k_checkpoints: 3
   resume_from_checkpoint: null
