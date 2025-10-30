@@ -22,7 +22,7 @@ try:
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
-    
+
 try:
     num_cores = len(os.sched_getaffinity(0))
 except AttributeError:
@@ -456,6 +456,7 @@ def main(cfg: DictConfig):
     trainer = pl.Trainer(
         logger=loggers,
         callbacks=callbacks,
+        num_sanity_val_steps=0,
         max_epochs=cfg.training.max_epochs,
         max_steps=cfg.training.get('max_steps', -1), # Allow setting max_steps
         accelerator=cfg.trainer.accelerator,

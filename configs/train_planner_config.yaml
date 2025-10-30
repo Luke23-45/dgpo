@@ -61,8 +61,8 @@ scheduler:
 
 # --- Training Configuration ---
 training:
-  batch_size: 16 # CLIP-Large is bigger, may need to reduce batch size for memory
-  val_batch_size: 16
+  batch_size: 8 # CLIP-Large is bigger, may need to reduce batch size for memory
+  val_batch_size: 8
   max_epochs: 200 # May need more epochs for a larger model
   
   # --- START OF PATCH 3: SOTA TRAINING PARAMETERS ---
@@ -102,7 +102,7 @@ optimizer:
 trainer:
   accelerator: "cuda"
   devices: "auto" # Use all available CPU cores
-  precision: "32-true" # Use 'bf16-mixed' if CPU supports bfloat16 for potential speedup
+  precision: "16-mixed"  # Use 'bf16-mixed' if CPU supports bfloat16 for potential speedup
   # deterministic: false # Set true for strict reproducibility (might slow down)
 
 # --- Logging Configuration ---
