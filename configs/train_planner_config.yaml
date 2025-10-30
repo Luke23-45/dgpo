@@ -8,10 +8,10 @@ hydra:
     chdir: true # Run from the script's directory for relative paths
 
 seed: 42
-
+#  train_path: "c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"
 # --- Dataset Configuration ---
 dataset:
-  train_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+  train_path: "/content/drive/MyDrive/pda/data/shard_001/expert_training_run_99914b93_part001.lmdb"
   val_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
   subgoal_horizon_k: 8 # How many steps ahead is the subgoal image?
   image_size: [224, 224] # Smaller for faster training, match model.image_size
@@ -19,7 +19,7 @@ dataset:
   img_std: [0.26862954, 0.26130258, 0.27577711]
   use_random_aug: false # Enable basic augmentations
   # val_split: 0.05 # 5% validation split
-  num_workers: 0 # Set > 0 for multi-process loading (careful on Windows)
+  num_workers: 4 # Set > 0 for multi-process loading (careful on Windows)
 
 # --- Model Configuration ---
 model:
@@ -28,7 +28,7 @@ model:
   # --- START OF PATCH 2: SOTA MODEL PARAMETERS ---
   # Use the powerful CLIP-Large model as the vision backbone
   vit_model_name: 'openai/clip-vit-base-patch32'
-  vit_feature_dim: 512 # Feature dimension for CLIP-Large
+  vit_feature_dim: 768  # Feature dimension for CLIP-Large
   freeze_vit: true
 
   # Embedding for the progress scalar
@@ -36,6 +36,7 @@ model:
 
   # U-Net structure (this can be tuned, but these are solid defaults)
   unet_block_out_channels: [128, 128, 256, 512, 512]
+  # unet_block_out_channels: [64, 64, 128, 256, 256]
   unet_down_block_types: [
       "DownBlock2D",
       "CrossAttnDownBlock2D",
@@ -81,6 +82,8 @@ training:
   
   gradient_accumulation_batches: 4
   check_val_every_n_epoch: 1
+  run_full_validation_every_n_epoch: 5 
+  limit_lpips_batches: 50
   save_top_k_checkpoints: 3
   resume_from_checkpoint: null
   max_steps: -1 # Optionally set a max number of steps instead of epochs

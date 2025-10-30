@@ -56,40 +56,7 @@ except ImportError as e:
 
 log = logging.getLogger(__name__)
 
-# --- PyTorch Lightning Module ---
-class EpochBackupCallback(pl.Callback):
-    """
-    SOTA Callback to save a high-frequency backup checkpoint after every training epoch.
-    This replicates the robust backup strategy from the original pretraining script.
-    """
-    def __init__(self, backup_dir: str, delete_previous: bool = True):
-        super().__init__()
-        self.backup_dir = Path(backup_dir)
-        self.delete_previous = delete_previous
-        self.last_backup_path = None
-        self.backup_dir.mkdir(parents=True, exist_ok=True)
-        log.info(f"EpochBackupCallback enabled. Backups will be saved to: {self.backup_dir}")
 
-    def on_train_epoch_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"):
-        """Hook that runs at the very end of a training epoch."""
-        epoch = trainer.current_epoch
-        
-        # Define the path for the current backup
-        current_backup_path = self.backup_dir / f"backup_epoch_{epoch}.ckpt"
-        
-        # Save the checkpoint using Lightning's built-in method
-        trainer.save_checkpoint(current_backup_path)
-        log.info(f"Saved epoch backup to {current_backup_path}")
-
-        # Delete the previous backup to save disk space
-        if self.delete_previous and self.last_backup_path and self.last_backup_path.exists():
-            try:
-                self.last_backup_path.unlink()
-            except OSError as e:
-                log.warning(f"Could not delete previous backup {self.last_backup_path}: {e}")
-
-        # Update the path of the last saved backup
-        self.last_backup_path = current_backup_path
 
 
 class PlannerLightningModule(pl.LightningModule):
@@ -131,6 +98,11 @@ class PlannerLightningModule(pl.LightningModule):
                 self.lpips_loss = None
         else:
             self.lpips_loss = None
+
+        self.backup_dir = Path.cwd() / "checkpoints" / "backup"
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        self.last_backup_path = None
+        log.info(f"Manual backup enabled. Backups will be saved to: {self.backup_dir}")
 
     def forward(self,
                 current_image: torch.Tensor,
@@ -178,66 +150,82 @@ class PlannerLightningModule(pl.LightningModule):
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         return loss
 
+
+
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
-        # Unpack batch
+        # Unpack batch for clarity
         current_img = batch['current_image']
         goal_img = batch['goal_image']
         progress = batch['progress']
         gt_subgoal_img = batch['gt_subgoal_image']
 
-        # --- SOTA: 1. Calculate Validation MSE Loss ---
-        # This gives a stable, non-perceptual metric
-
+        # -----------------------------------------------------------------
+        # STAGE 1: FAST PATH (Always Runs)
+        # Calculate and log val_mse_loss for every batch in the validation set.
+        # This provides a consistent and fast metric every time validation is run.
+        # -----------------------------------------------------------------
         predicted_noise, target_noise = self.model(
             gt_subgoal_image=gt_subgoal_img,
             current_image=current_img,
             goal_image=goal_img,
             progress=progress
         )
-
         val_mse_loss = self.mse_loss(predicted_noise, target_noise)
         self.log('val_mse_loss', val_mse_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
-        # --- SOTA: 2. Generate Guided Subgoal Image ---
-        # Use the `forward` method (which calls `sample`) with CFG
-        generated_subgoal_guided = self(
-            current_img,
-            goal_img,
-            progress,
-            guidance_scale=self.cfg.training.guidance_scale
-        )
+        # -----------------------------------------------------------------
+        # STAGE 2 & 3: SLOW PATH (Runs Periodically)
+        # Check if the current epoch is one of the designated "full validation" epochs.
+        # We use .get() for safety in case the config option isn't set, defaulting to 1.
+        # -----------------------------------------------------------------
+        full_val_freq = self.cfg.training.get('run_full_validation_every_n_epoch', 1)
+        
+        # The (self.trainer.current_epoch == 0 and self.trainer.global_step > 0) part ensures
+        # we run full validation after the first epoch (epoch 0), but not during the initial sanity check.
+        is_full_val_epoch = (self.trainer.current_epoch % full_val_freq == 0 and self.trainer.global_step > 0)
+        
+        if is_full_val_epoch:
+            # Check if we are within the batch limit for LPIPS calculation.
+            limit_batches = self.cfg.training.get('limit_lpips_batches', float('inf'))
 
-        # --- 3. Calculate LPIPS Loss (Perceptual Similarity) ---
-        if self.cfg.training.use_lpips_loss and self.lpips_loss is not None:
-             # LPIPS expects images in range [-1, 1].
-             # Clamp generated image to be safe
-             generated_clamped = generated_subgoal_guided.clamp(-1, 1)
-             gt_rescaled = gt_subgoal_img # Assume already [-1, 1]
+            if batch_idx < limit_batches:
+                # --- STAGE 2: Perceptual Metric (Expensive) ---
+                generated_subgoal_guided = self(
+                    current_img,
+                    goal_img,
+                    progress,
+                    guidance_scale=self.cfg.training.guidance_scale
+                )
 
-             val_lpips_loss = self.lpips_loss(generated_clamped, gt_rescaled).mean()
-             self.log('val_lpips_loss', val_lpips_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+                if self.cfg.training.use_lpips_loss and self.lpips_loss is not None:
+                    generated_clamped = generated_subgoal_guided.clamp(-1, 1)
+                    val_lpips_loss = self.lpips_loss(generated_clamped, gt_subgoal_img).mean()
+                    # Log with on_epoch=True, Lightning will average it correctly over the limited batches.
+                    self.log('val_lpips_loss', val_lpips_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+                # --- STAGE 3: Qualitative Logging (Most Expensive, runs only once) ---
+                if batch_idx == 0 and self.trainer.is_global_zero:
+                    log.info(f"Epoch {self.trainer.current_epoch}: Running full qualitative validation (logging images)...")
+                    generated_subgoal_unguided = self(
+                        current_img,
+                        goal_img,
+                        progress,
+                        guidance_scale=1.0  # no guidance
+                    )
+                    self._log_image_samples(
+                        current_img,
+                        goal_img,
+                        gt_subgoal_img,
+                        generated_subgoal_guided,
+                        generated_subgoal_unguided
+                    )
         else:
-             # Log 0 if LPIPS is not used, so checkpointing doesn't fail
-             self.log('val_lpips_loss', 0.0, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            # For the "fast" validation epochs, we must still log a placeholder for LPIPS.
+            # This is critical for the ModelCheckpoint callback if it monitors 'val_lpips_loss'.
+            # We set prog_bar=False so it doesn't clutter the UI on fast epochs.
+            self.log('val_lpips_loss', 0.0, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
 
-
-        # --- SOTA: 4. Log Sample Images (first batch only) ---
-        if batch_idx == 0 and self.trainer.is_global_zero:
-            # SOTA: Generate an *unguided* sample for comparison
-            generated_subgoal_unguided = self(
-                current_img,
-                goal_img,
-                progress,
-                guidance_scale=1.0 # 1.0 = no guidance
-            )
-            
-            self._log_image_samples(
-                current_img,
-                goal_img,
-                gt_subgoal_img,
-                generated_subgoal_guided,
-                generated_subgoal_unguided # Pass unguided image for logging
-            )
+    # --- END: ROBUST PATCH 2 ---
 
     def _log_image_samples(self, current, goal, gt_subgoal, generated_guided, generated_unguided):
         """SOTA: Logs a 5-image comparison grid to configured loggers."""
@@ -322,6 +310,37 @@ class PlannerLightningModule(pl.LightningModule):
             },
         }
 
+
+    def on_train_batch_end(self, outputs, batch, batch_idx: int):
+        """
+        This hook is called after every training batch. We use it to manually
+        save a backup checkpoint on the last batch of the epoch.
+        """
+        # Check if this is the last batch of the training epoch
+        is_last_batch = (batch_idx + 1) == self.trainer.num_training_batches
+
+        if is_last_batch:
+            epoch = self.trainer.current_epoch
+            log.info(f"--- [Manual Backup] Last training batch of epoch {epoch} finished. Saving backup... ---")
+            
+            current_backup_path = self.backup_dir / f"backup_epoch_{epoch}.ckpt"
+
+            try:
+                # Use the trainer's save function, which is aware of the full training state.
+                self.trainer.save_checkpoint(current_backup_path)
+                log.info(f"--- [Manual Backup] SUCCESS: Saved backup to {current_backup_path}")
+
+                # Verify the file was created
+                if not current_backup_path.exists():
+                    log.error(f"--- [Manual Backup] CRITICAL ERROR: save_checkpoint call completed but file does NOT exist!")
+                
+                # Delete the previous backup
+                if self.last_backup_path and self.last_backup_path.exists():
+                    self.last_backup_path.unlink()
+                
+                self.last_backup_path = current_backup_path
+            except Exception as e:
+                log.exception(f"--- [Manual Backup] FAILED to save backup checkpoint: {e}")
 # --- PyTorch Lightning DataModule ---
 
 class PlannerDataModule(pl.LightningDataModule):
@@ -440,10 +459,8 @@ def main(cfg: DictConfig):
     )
     lr_monitor = LearningRateMonitor(logging_interval='step')
     progress_bar = TQDMProgressBar(refresh_rate=cfg.logging.progress_bar_refresh_rate)
-    backup_callback = EpochBackupCallback(
-        backup_dir=str(Path.cwd() / "checkpoints" / "backup")
-    )
-    callbacks = [checkpoint_callback, lr_monitor, progress_bar, backup_callback]
+
+    callbacks = [checkpoint_callback, lr_monitor, progress_bar]
 
     # SOTA: Add Stochastic Weight Averaging (SWA) if configured
     if cfg.training.get('use_swa', False):
