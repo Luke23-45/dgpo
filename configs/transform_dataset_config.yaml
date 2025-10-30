@@ -1,0 +1,18 @@
+
+hydra:
+  run:
+    dir: outputs/transform_dataset/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: true
+
+input_db_path: "c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"
+
+output_dir: data/training
+
+transform:
+  num_workers: 1 # Number of CPU cores to use. Set 0 for single-threaded.
+  worker_chunk_size: 1040 # How many episodes each worker processes at a time
+  image_compression: "jpeg"
+  jpeg_quality: 90
+
+

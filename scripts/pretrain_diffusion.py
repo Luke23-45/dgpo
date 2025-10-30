@@ -73,7 +73,7 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 # Project-Specific
-from utils.expert_dataset import ExpertTrajectoryDataset, collate_fn
+from utils.controller_dataset import HierarchicalControllerDataset, collate_fn # Use the new dataset
 from models.diffusion_policy import DiffusionPolicy, NoiseSchedulerConfig
 
 # Setup a logger for the script
@@ -107,7 +107,7 @@ def save_checkpoint(state: Dict[str, Any], is_best: bool, checkpoint_dir: Path):
 # 3. The Trainer Class
 # -------------------------
 
-class DiffusionPretrainer:
+class ControllerBCTrainer:
     """
     Encapsulates the entire pretraining pipeline for the Diffusion Policy.
     Manages the model, data, optimization, logging, and validation.
@@ -172,16 +172,30 @@ class DiffusionPretrainer:
             self._load_checkpoint(Path(cfg.resume_checkpoint))
 
   
-
     def _build_dataloaders(self) -> Tuple[DataLoader, Optional[DataLoader]]:
-        """Constructs train and validation dataloaders."""
-        # This assumes your dataset can be split or you provide separate paths
-        # For now, we'll use the same path and rely on shuffling for variation.
-        train_dataset = ExpertTrajectoryDataset(
-            demo_path=self.cfg.dataset.path,
+        """SOTA: Constructs train and validation dataloaders using a robust random split."""
+        # --- START OF SOTA PATCH 1 ---
+        full_dataset = HierarchicalControllerDataset(
+            dataset_path=self.cfg.dataset.path,
             observation_horizon=self.cfg.model.observation_horizon,
             action_horizon=self.cfg.model.action_horizon,
+            subgoal_horizon_k=self.cfg.dataset.subgoal_horizon_k
         )
+        
+        # Split dataset (e.g., 95% train, 5% val)
+        val_split = self.cfg.dataset.get("val_split", 0.05)
+        total_len = len(full_dataset)
+        val_len = int(total_len * val_split)
+        train_len = total_len - val_len
+        log.info(f"Splitting dataset: Train={train_len}, Val={val_len}")
+
+        # Ensure consistent split across runs
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, [train_len, val_len],
+            generator=torch.Generator().manual_seed(self.cfg.seed)
+        )
+        # --- END OF SOTA PATCH 1 ---
+
         pin_memory_enabled = (self.device.type == 'cuda')
         train_loader = DataLoader(
             train_dataset,
@@ -193,28 +207,24 @@ class DiffusionPretrainer:
             drop_last=True,
         )
 
-        val_loader = None
-        if self.cfg.dataset.get("val_path"):
-            val_dataset = ExpertTrajectoryDataset(
-                demo_path=self.cfg.dataset.val_path,
-                observation_horizon=self.cfg.model.observation_horizon,
-                action_horizon=self.cfg.model.action_horizon,
-            )
-            val_loader = DataLoader(
-                val_dataset,
-                batch_size=self.cfg.dataset.batch_size,
-                shuffle=False,
-                num_workers=self.cfg.dataset.num_workers,
-                pin_memory=pin_memory_enabled,
-                collate_fn=collate_fn,
-            )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=self.cfg.dataset.batch_size,
+            shuffle=False,
+            num_workers=self.cfg.dataset.num_workers,
+            pin_memory=pin_memory_enabled,
+            collate_fn=collate_fn,
+        ) if val_len > 0 else None
+        
         return train_loader, val_loader
+
+
 
     def _build_policy(self) -> DiffusionPolicy:
         """Constructs the DiffusionPolicy from the configuration."""
         try:
-            proprio_dim = self.train_loader.dataset.get_proprioception_dim()
-            log.info(f"Inferred proprioception dimension from dataset index: {proprio_dim}")
+            proprio_dim = self.train_loader.dataset.dataset.expert_reader.get_proprioception_dim()
+            log.info(f"Inferred proprioception dimension from dataset: {proprio_dim}")
         except Exception as e:
             log.critical(f"FATAL: Failed to infer proprioception dimension from the dataset. "
                          f"Check if the dataset is in the correct SOTA format and the index is valid. Error: {e}")
@@ -281,14 +291,18 @@ class DiffusionPretrainer:
             desc=f"Epoch {epoch}/{self.cfg.training.epochs}",
             leave=False,
         )
-        for obs_chunk, action_chunk in progress_bar:
-            # Move data to the correct device
+        for (obs_chunk, subgoal_img_chunk), action_chunk in progress_bar:
+            # Unpack the new data format
             obs_chunk = {k: v.to(self.device).float() for k, v in obs_chunk.items()}
+            subgoal_img_chunk = subgoal_img_chunk.to(self.device).float()
             action_chunk = action_chunk.to(self.device).float()
 
             self.optimizer.zero_grad()
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.cfg.training.use_amp):
-                loss, diagnostics = self.policy.compute_loss(action_chunk, obs_chunk)
+                # Pass the subgoal image to the compute_loss method
+                loss, diagnostics = self.policy.compute_loss(
+                    action_chunk, obs_chunk, subgoal_image=subgoal_img_chunk
+                )
 
             self.scaler.scale(loss).backward()
             if self.cfg.optimizer.grad_clip_norm:
@@ -328,15 +342,21 @@ class DiffusionPretrainer:
         progress_bar = tqdm(self.val_loader, desc="Validating", leave=False)
 
         with torch.no_grad():
-            for obs_chunk, action_chunk in progress_bar:
+            for (obs_chunk, subgoal_img_chunk), action_chunk in progress_bar:
+                # Unpack new data format
                 obs_chunk = {k: v.to(self.device).float() for k, v in obs_chunk.items()}
+                subgoal_img_chunk = subgoal_img_chunk.to(self.device).float()
                 action_chunk = action_chunk.to(self.device).float()
 
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.cfg.training.use_amp):
-                    loss, _ = self.policy.compute_loss(action_chunk, obs_chunk)
-                    # Get a deterministic prediction for quantitative metrics
+                    # Pass subgoal to compute_loss
+                    loss, _ = self.policy.compute_loss(
+                        action_chunk, obs_chunk, subgoal_image=subgoal_img_chunk
+                    )
+                    # Pass subgoal to sample for quantitative metrics
                     predicted_action = self.policy.sample(
-                        obs_chunk, 
+                        obs_chunk,
+                        subgoal_image=subgoal_img_chunk,
                         steps=self.cfg.validation.sampling_steps, 
                         use_ema=True
                     )
@@ -386,16 +406,24 @@ class DiffusionPretrainer:
         )
 
     def _generate_diagnostic_rollout(self, epoch: int):
-        """Creates and saves a visualization of the denoising process."""
         log.info("Generating diagnostic denoising rollout...")
         # Get a single sample from the validation set
-        obs_chunk, action_chunk = next(iter(self.val_loader))
+        # --- START OF SOTA PATCH 5: ADAPT DIAGNOSTICS ---
+        (obs_chunk, subgoal_img_chunk), action_chunk = next(iter(self.val_loader))
+        
+        # Prepare single sample
         obs_sample = {k: v[:1].to(self.device).float() for k, v in obs_chunk.items()}
+        subgoal_sample = subgoal_img_chunk[:1].to(self.device).float()
         action_gt = action_chunk[:1].to(self.device).float()
-        # Get the denoising trajectory
+
+        # Get the denoising trajectory, now conditioned on the subgoal
         with torch.no_grad():
             _, intermediates = self.policy.sample(
-                obs_sample, steps=self.cfg.scheduler.timesteps, use_ema=True, return_intermediates=True
+                obs_sample,
+                subgoal_image=subgoal_sample,
+                steps=self.cfg.scheduler.timesteps,
+                use_ema=True,
+                return_intermediates=True
             )
         
         # Convert to numpy for plotting
@@ -403,18 +431,33 @@ class DiffusionPretrainer:
         action_gt_np = action_gt.cpu().numpy().squeeze(axis=0) # (H_a, D_a)
 
         # Create an animation
-        fig, ax = plt.subplots(figsize=(10, 6))
+        subgoal_img_np = subgoal_sample.cpu().numpy().squeeze(axis=0) # Shape: (C, H, W)
+        # Convert from CHW to HWC for matplotlib
+        subgoal_img_np = np.transpose(subgoal_img_np, (1, 2, 0))
+        # Denormalize for viewing (assuming ImageNet stats)
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        subgoal_img_np = np.clip(std * subgoal_img_np + mean, 0, 1)
+
+        # Create a figure with two subplots: one for the action, one for the subgoal image
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), gridspec_kw={'width_ratios': [3, 1]})
         
+        # Display the static subgoal image on the right subplot
+        ax2.imshow(subgoal_img_np)
+        ax2.set_title("Visual Subgoal")
+        ax2.axis('off')
+
         def animate(i):
-            ax.clear()
-            ax.plot(action_gt_np.T, color='green', linestyle='--', label='Ground Truth' if i==0 else "")
-            ax.plot(trajectory[i].T, color='blue', label='Denoised Action' if i==0 else "")
-            ax.set_title(f"Denoising Process | Epoch {epoch} | Step {i}/{len(trajectory)}")
-            ax.set_xlabel("Action Dimension")
-            ax.set_ylabel("Action Value")
-            ax.set_ylim(-1.5, 1.5)
+            ax1.clear()
+            ax1.plot(action_gt_np.T, color='green', linestyle='--', label='Ground Truth' if i==0 else "")
+            ax1.plot(trajectory[i].T, color='blue', label='Denoised Action' if i==0 else "")
+            ax1.set_title(f"Denoising Process | Epoch {epoch} | Step {i}/{len(trajectory)}")
+            ax1.set_xlabel("Action Dimension")
+            ax1.set_ylabel("Action Value")
+            ax1.set_ylim(-1.5, 1.5)
             if i == 0:
-                ax.legend()
+                ax1.legend()
+        # --- END OF SOTA PATCH 2 ---
 
         save_path = self.output_dir / "diagnostics"
         save_path.mkdir(exist_ok=True)
@@ -545,7 +588,7 @@ def main(cfg: DictConfig):
     log.info("------------------------------------")
 
     try:
-        trainer = DiffusionPretrainer(cfg)
+        trainer = ControllerBCTrainer(cfg)
         trainer.run()
     except Exception as e:
         log.exception("An error occurred during training.")

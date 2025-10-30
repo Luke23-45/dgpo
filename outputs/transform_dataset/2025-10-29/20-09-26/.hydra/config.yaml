@@ -1,0 +1,7 @@
+input_db_path: c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+output_dir: data/training
+transform:
+  num_workers: 0
+  worker_chunk_size: 1040
+  image_compression: jpeg
+  jpeg_quality: 90

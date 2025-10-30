@@ -1,0 +1,117 @@
+# FILE: configs/train_planner_config.yaml
+# Hydra Configuration for Training the Visual Planner
+
+hydra:
+  run:
+    dir: outputs/planner_train/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: true # Run from the script's directory for relative paths
+
+seed: 42
+
+# --- Dataset Configuration ---
+dataset:
+  train_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+  val_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+  subgoal_horizon_k: 8 # How many steps ahead is the subgoal image?
+  image_size: [224, 224] # Smaller for faster training, match model.image_size
+  img_mean: [0.48145466, 0.4578275, 0.40821073]
+  img_std: [0.26862954, 0.26130258, 0.27577711]
+  use_random_aug: false # Enable basic augmentations
+  # val_split: 0.05 # 5% validation split
+  num_workers: 0 # Set > 0 for multi-process loading (careful on Windows)
+
+# --- Model Configuration ---
+model:
+  image_size: 224 # Must match dataset.image_size
+  
+  # --- START OF PATCH 2: SOTA MODEL PARAMETERS ---
+  # Use the powerful CLIP-Large model as the vision backbone
+  vit_model_name: 'openai/clip-vit-large-patch14'
+  vit_feature_dim: 768 # Feature dimension for CLIP-Large
+  freeze_vit: true
+
+  # Embedding for the progress scalar
+  progress_embed_dim: 64
+
+  # U-Net structure (this can be tuned, but these are solid defaults)
+  unet_block_out_channels: [128, 128, 256, 512, 512]
+  unet_down_block_types: [
+      "DownBlock2D",
+      "CrossAttnDownBlock2D",
+      "CrossAttnDownBlock2D",
+      "CrossAttnDownBlock2D",
+      "DownBlock2D",
+  ]
+  unet_up_block_types: [
+      "UpBlock2D",
+      "CrossAttnUpBlock2D",
+      "CrossAttnUpBlock2D",
+      "CrossAttnUpBlock2D",
+      "UpBlock2D",
+  ]
+  unet_attention_head_dim: 8 # Explicitly define attention head dimension
+
+  # Probability of dropping conditioning for Classifier-Free Guidance training
+  condition_drop_prob: 0.1
+
+# --- Diffusion Scheduler Config ---
+scheduler:
+  timesteps: 50 # Fewer timesteps for faster training/sampling
+
+# --- Training Configuration ---
+training:
+  batch_size: 16 # CLIP-Large is bigger, may need to reduce batch size for memory
+  val_batch_size: 16
+  max_epochs: 200 # May need more epochs for a larger model
+  
+  # --- START OF PATCH 3: SOTA TRAINING PARAMETERS ---
+  # Perceptual loss is highly recommended for image generation
+  use_lpips_loss: true
+  lpips_loss_weight: 0.1
+
+  # Parameters for validation and diagnostics
+  eval_inference_steps: 20 # DPM-Solver is fast, 20 steps is often enough
+  guidance_scale: 4.0      # CFG scale to use during validation image generation
+
+  # Optional SOTA technique for better generalization
+  use_swa: false # Stochastic Weight Averaging (try enabling this near the end of training)
+  swa_lrs: 1.0e-4
+  # --- END OF PATCH 3 ---
+  
+  gradient_accumulation_batches: 1
+  check_val_every_n_epoch: 1
+  save_top_k_checkpoints: 3
+  resume_from_checkpoint: null
+  max_steps: -1 # Optionally set a max number of steps instead of epochs
+
+# --- Optimizer Configuration ---
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  gradient_clip_val: 1.0
+  find_lr: false
+  
+  # --- START OF PATCH 4: ADD WARMUP CONFIG ---
+  # SOTA: Use a learning rate warmup for stable training of large models.
+  # Can be a float (percentage of total steps) or an int (number of steps).
+  warmup_steps: 0.05 # Warm up for the first 5% of training steps
+  # --- END OF PATCH 4 ---
+
+# --- Trainer Configuration (PyTorch Lightning) ---
+trainer:
+  accelerator: "cuda"
+  devices: "auto" # Use all available CPU cores
+  precision: "32-true" # Use 'bf16-mixed' if CPU supports bfloat16 for potential speedup
+  # deterministic: false # Set true for strict reproducibility (might slow down)
+
+# --- Logging Configuration ---
+logging:
+  use_tensorboard: true
+  use_wandb: false # Set true to enable W&B
+  wandb_project: "vidhis_planner_train"
+  wandb_run_name: null # Auto-generated if null
+  wandb_log_model: false # Log model checkpoints to W&B (can be large)
+  wandb_watch_log_freq: 100 # How often to log gradients to W&B
+  log_every_n_steps: 50 # How often to log metrics within an epoch
+  progress_bar_refresh_rate: 10 # Update tqdm bar frequency

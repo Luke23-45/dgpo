@@ -1,0 +1,18 @@
+[2025-10-29 19:28:00,224][transform_dataset][INFO] - ----------- Dataset Transformation Script -----------
+[2025-10-29 19:28:00,225][transform_dataset][INFO] - input_db_path: c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+output_dir: data/training
+transform:
+  num_workers: 2
+  worker_chunk_size: 25
+  image_compression: jpeg
+  jpeg_quality: 90
+
+[2025-10-29 19:28:00,226][transform_dataset][INFO] - --------------------------------------------------
+[2025-10-29 19:28:00,226][transform_dataset][INFO] - Scanning source database: c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+[2025-10-29 19:28:00,229][lmdb_utils][INFO] -  Opened LMDB at c:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93.lmdb | mode=RO | file-mode
+[2025-10-29 19:28:00,230][transform_dataset][INFO] - Found 1040 episodes to transform.
+[2025-10-29 19:28:17,795][transform_dataset][INFO] - Merging 2 shards into final dataset at: data\training\expert_training_1040_samples_SOTA
+[2025-10-29 19:28:17,797][transform_dataset][WARNING] - Shard at data\training\shards\worker_0 is incomplete (missing index or lmdb file), skipping.
+[2025-10-29 19:28:17,798][transform_dataset][WARNING] - Shard at data\training\shards\worker_1 is incomplete (missing index or lmdb file), skipping.
+[2025-10-29 19:28:17,799][transform_dataset][INFO] - Merge complete. Total episodes transformed: 0
+[2025-10-29 19:28:17,800][transform_dataset][INFO] - Dataset transformation complete.

@@ -121,7 +121,8 @@ class ExpertDatasetWriter:
         """
         self.episodes_in_memory.append(ep_dict)
 
-
+  
+    
     def save_batch(self, episode_list: List[Dict[str, Any]]):
         """Append a list of episodes directly to LMDB (safe for large datasets)."""
         if not episode_list:
@@ -141,7 +142,7 @@ class ExpertDatasetWriter:
         lmdb_path = self._lmdb_path
 
         # open env (match same args as save())
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=2.0, subdir=False)
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=5.0, subdir=False)
         try:
             with env.begin(write=True) as txn:
                 for ep_dict in episode_list:
@@ -212,6 +213,11 @@ class ExpertDatasetWriter:
                     # D) 'image_wrist' (Compressed Images)
                     img_w_list = [o["image_wrist"] for o in ep_dict["obs_list"]] 
                     self._write_compressed_images(txn, ep_meta, episode_key_prefix, "image_wrist", img_w_list)
+                    if "goal_image_primary" in ep_dict:
+                        goal_img_list = [ep_dict["goal_image_primary"]]
+                        self._write_compressed_images(txn, ep_meta, episode_key_prefix, "goal_image_primary", goal_img_list)
+                    else:
+                        logger.warning(f"Episode {episode_key_prefix} is missing 'goal_image_primary'. This key will not be saved for this episode.")
 
                     # --- 4. Add this episode's metadata to the main index ---
                     self.index_data["episodes"].append(ep_meta)
@@ -354,7 +360,41 @@ class ExpertTrajectoryDataset(Dataset):
             f"Loaded {len(self.episode_metadata)} episodes, "
             f"{self.total_chunks} total valid chunks (Virtually Indexed)."
         ) 
-  
+
+    def get_goal_image(self, ep_idx: int) -> np.ndarray:
+        """
+        Efficiently loads and decodes the static goal image for a specific episode.
+
+        This method leverages the main SoA loading pipeline, including the per-worker
+        LRU cache, to provide fast access to the visual goal.
+
+        Args:
+            ep_idx: The index of the episode for which to retrieve the goal image.
+
+        Returns:
+            A NumPy array of the goal image in RGB, uint8 format.
+        """
+        if not (0 <= ep_idx < len(self.episode_metadata)):
+            raise IndexError(f"Episode index {ep_idx} is out of range for {len(self.episode_metadata)} episodes.")
+
+        ep_meta = self.episode_metadata[ep_idx]
+        try:
+            # Look for the metadata of our new modality
+            meta = ep_meta["modalities"]["goal_image_primary"]
+        except KeyError:
+            raise KeyError(f"Modality 'goal_image_primary' not found in the index for episode {ep_idx}. "
+                           "Please ensure the dataset was enhanced correctly.")
+
+        # This call is fast and cached. It returns the goal image wrapped in an array of shape (1, H, W, 3).
+        # It leverages the existing, powerful _get_full_modality_array method.
+        full_array = self._get_full_modality_array(
+            meta["key"], meta["compression"], meta["dtype"], tuple(meta["shape"])
+        )
+
+        # The result is an array containing a single image. We return just that image.
+        return full_array[0]
+
+
     def get_proprioception_dim(self) -> int:
         """
         Returns the dimension of the 'proprio' modality from the dataset's metadata.
@@ -833,7 +873,11 @@ class ExpertDataset(IterableDataset):
                         if filtered:
                             # append to the in-memory episode buffer which will be yielded
                             self._episode_buffer.extend(filtered) 
+                            final_obs = unfiltered_obs[-1]
 
+                            goal_image_primary = np.copy(final_obs.get("image_primary"))
+                            if goal_image_primary is None:
+                                raise ValueError("Final observation is missing 'image_primary', cannot create goal image.")
                             # Build full episode dict (store unfiltered trajectory for offline writer)
                             ep_id = f"w{getattr(self,'_worker_id',0)}_e{self._episode_id_counter}"
                             episode_dict = { 
@@ -843,6 +887,7 @@ class ExpertDataset(IterableDataset):
                                               for k, v in o.items()} for o in unfiltered_obs],
                                  "actions": [np.asarray(a, dtype=np.float32).copy() for a in unfiltered_actions], 
                                 "ik_fail_flags": list(unfiltered_ik_flags),
+                                "goal_image_primary": goal_image_primary,
                                 "success": True,
                              } 
                             self.episodes.append(episode_dict)

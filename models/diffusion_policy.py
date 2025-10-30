@@ -210,24 +210,37 @@ class ResNetEncoder(nn.Module):
         # Project the ResNet feature map to the desired embedding dimension
         self.projection = nn.Conv2d(512, out_features, kernel_size=1)
         self.layer_norm = nn.LayerNorm(out_features)
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 1, 3, 1, 1))
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x (torch.Tensor): Input images of shape (B, H_o, C, H_img, W_img).
+            x (torch.Tensor): Input images of shape (B, H_o, C, H_img, W_img) or (B, H_o, H_img, W_img, C).
+                              Can be uint8 [0-255] or float [0-1].
         Returns:
             torch.Tensor: Encoded features of shape (B, H_o, D_v).
         """
+        # --- START OF SOTA PATCH 2 (continued) ---
+        # Robust input normalization
+        if x.shape[2] != 3: # If not CHW, assume HWC
+            x = x.permute(0, 1, 4, 2, 3) # B, H_o, H, W, C -> B, H_o, C, H, W
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+        # Apply ImageNet normalization
+        x = (x - self.mean) / self.std
+        # --- END OF SOTA PATCH 2 (continued) ---
+
         B, H_o, C, H_img, W_img = x.shape
-        x = x.view(B * H_o, C, H_img, W_img)
+        x = x.reshape(B * H_o, C, H_img, W_img) # Use reshape for efficiency
 
-        # Freeze backbone during training for stability
+        # Freeze backbone for stability. No gradients will flow through here.
         with torch.no_grad():
-            x = self.backbone(x)  # Shape: (B*H_o, 512, H_feat, W_feat)
+            x = self.backbone(x)
 
-        x = self.projection(x)  # Shape: (B*H_o, D_v, H_feat, W_feat)
-        # Global average pooling
-        x = x.mean(dim=[-1, -2])  # Shape: (B*H_o, D_v)
+        x = self.projection(x)
+        x = x.mean(dim=[-1, -2])
         x = self.layer_norm(x)
         return x.view(B, H_o, self.features_dim)
 
@@ -350,13 +363,20 @@ class DiffusionTransformer(nn.Module):
         ])
         self.out_proj = nn.Linear(d_model, action_dim)
 
-    def forward(self, noisy_actions: torch.Tensor, timesteps: torch.Tensor, vision_cond: torch.Tensor, proprio_cond: torch.Tensor):
+    def forward(self, 
+                noisy_actions: torch.Tensor, 
+                timesteps: torch.Tensor, 
+                vision_cond: torch.Tensor, 
+                proprio_cond: torch.Tensor,
+                subgoal_cond: Optional[torch.Tensor] = None
+                ):
         """
         Args:
             noisy_actions (torch.Tensor): (B, H_a, D_a)
             timesteps (torch.Tensor): (B,)
             vision_cond (torch.Tensor): (B, L_v, D_model)
             proprio_cond (torch.Tensor): (B, L_p, D_model)
+            subgoal_cond (torch.Tensor, optional): (B, L_s, D_model).
         Returns:
             torch.Tensor: Predicted noise, shape (B, H_a, D_a).
         """
@@ -364,13 +384,14 @@ class DiffusionTransformer(nn.Module):
         action_tokens = self.action_proj(noisy_actions)
         action_tokens += self.action_pos_emb(torch.arange(H_a, device=noisy_actions.device))
         
-        # Combine conditioning tokens
-        cond_tokens = torch.cat([vision_cond, proprio_cond], dim=1)
+        # Combine all available conditioning tokens into a single sequence
+        cond_tokens_list = [vision_cond, proprio_cond]
+        if subgoal_cond is not None:
+            cond_tokens_list.append(subgoal_cond)
+        cond_tokens = torch.cat(cond_tokens_list, dim=1)
         
-        # Process timestep embedding
         t_emb = self.time_mlp(timesteps)
         
-        # Pass through transformer blocks
         x = action_tokens
         for block in self.blocks:
             x = block(x, cond=cond_tokens, t_emb=t_emb)
@@ -405,128 +426,223 @@ class EMA:
 
 class DiffusionPolicy(nn.Module):
     """
-    Top-level diffusion policy wrapper, integrating all state-of-the-art components.
+    SOTA ViDHiS Controller. Top-level diffusion policy wrapper, adapted for
+    hierarchical control with visual subgoal conditioning.
     """
     def __init__(self, *,
                  proprio_dim: int, H_o: int, H_a: int, action_dim: int,
-                 image_feat_dim: int, scheduler_cfg: NoiseSchedulerConfig,
-                 d_model: int, denoiser_layers: int, denoiser_heads: int,
+                 image_feat_dim: int, # This is now the ResNetEncoder output dim
+                 d_model: int,        # This is now the Transformer's internal dim
+                 denoiser_layers: int, denoiser_heads: int,
+                 scheduler_cfg: NoiseSchedulerConfig,
                  cfg_p_uncond: float = 0.1,
                  ema_decay: Optional[float] = 0.999,
                  device: Optional[Union[torch.device, str]] = None):
         super().__init__()
         self.device = torch.device(default(device, "cuda" if torch.cuda.is_available() else "cpu"))
-        self.H_a = H_a
-        self.action_dim = action_dim
+        self.H_o, self.H_a, self.action_dim = H_o, H_a, action_dim
         self.cfg_p_uncond = cfg_p_uncond
 
-        # Core Components
-        self.vision_fusion_encoder = VisionFusionEncoder(image_feat_dim, proprio_dim, d_model)
+        # --- SOTA PATCH 3: Refactored Encoders ---
+        # 1. Encoders for Observation History
+        self.primary_encoder = ResNetEncoder(out_features=image_feat_dim)
+        self.wrist_encoder = ResNetEncoder(out_features=image_feat_dim)
+        self.proprio_proj = nn.Linear(proprio_dim, d_model)
+
+        # 2. Dedicated Encoder for the Visual Subgoal
+        self.subgoal_encoder = ResNetEncoder(out_features=d_model)
+
+        # 3. Optional Fusion/Projection layers
+        # Project ResNet features to the Transformer's dimension
+        self.vision_proj = nn.Linear(image_feat_dim * 2, d_model) # Fused primary + wrist
+        # --- End Refactored Encoders ---
+
         self.denoiser = DiffusionTransformer(action_dim, d_model, denoiser_layers, denoiser_heads, H_a)
         self.scheduler = NoiseScheduler(scheduler_cfg).to(self.device)
-        
-        # Learnable embedding for unconditional generation (for CFG)
-        self.uncond_vis_embedding = nn.Parameter(torch.randn(1, H_o, d_model))
-        self.uncond_proprio_embedding = nn.Parameter(torch.randn(1, H_o, d_model))
+
+        # --- SOTA PATCH 3: Refactored Unconditional Embeddings ---
+        # Create a dictionary for clean management of unconditional tokens
+        self.uncond_embeddings = nn.ParameterDict({
+            'primary': nn.Parameter(torch.randn(1, H_o, d_model)),
+            'wrist': nn.Parameter(torch.randn(1, H_o, d_model)),
+            'proprio': nn.Parameter(torch.randn(1, H_o, d_model)),
+            'subgoal': nn.Parameter(torch.randn(1, 1, d_model)),
+        })
+        # --- End Refactored Embeddings ---
 
         self.to(self.device)
-        log.info(f"State-of-the-art DiffusionPolicy initialized on device: {self.device}")
         self.ema = EMA(self, decay=ema_decay) if ema_decay is not None else None
+        log.info(f"ViDHiS Controller (DiffusionPolicy) initialized on device: {self.device}")
 
-    def _cond_embed(self, obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Generates conditioning tokens from observations."""
+    def _get_condition_tokens(self, obs: Dict[str, torch.Tensor], subgoal_image: Optional[torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """SOTA: Encodes all inputs and returns a structured dictionary of conditioning tokens."""
         obs_on_device = {k: v.to(self.device) for k, v in obs.items()}
-        return self.vision_fusion_encoder(obs_on_device)
+        
+        # 1. Process Observation History
+        primary_tokens = self.primary_encoder(obs_on_device["image_primary"])
+        wrist_tokens = self.wrist_encoder(obs_on_device["image_wrist"])
+        # Simple fusion by concatenation
+        vision_tokens = self.vision_proj(torch.cat([primary_tokens, wrist_tokens], dim=-1))
+        proprio_tokens = self.proprio_proj(obs_on_device["proprio"])
+        
+        # 2. Process Optional Subgoal
+        subgoal_tokens = None
+        if subgoal_image is not None:
+            # Subgoal is (B, H, W, C). ResNetEncoder needs (B, H_o=1, H, W, C).
+            subgoal_tokens = self.subgoal_encoder(subgoal_image.to(self.device).unsqueeze(1))
+        
+        return {
+            'vision': vision_tokens,
+            'proprio': proprio_tokens,
+            'subgoal': subgoal_tokens
+        }
 
-    def compute_loss(self, 
-                     actions: torch.Tensor, 
-                     obs: Dict[str, torch.Tensor], 
+    def compute_loss(self,
+                     actions: torch.Tensor,
+                     obs: Dict[str, torch.Tensor],
+                     subgoal_image: Optional[torch.Tensor] = None,
                      weights: Optional[torch.Tensor] = None
                      ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
-        Computes the diffusion MSE loss with support for Classifier-Free Guidance
-        and optional per-sample weighting for RL fine-tuning.
+        Computes the diffusion MSE loss for training.
+
+        This SOTA version correctly handles:
+        - Unified conditioning from observation history, proprioception, and an optional visual subgoal.
+        - Classifier-Free Guidance (CFG) during training by randomly dropping conditioning.
+        - Optional per-sample weighting for advanced training strategies like RL fine-tuning.
         """
+        # 1. Basic setup: move data to device and get batch size.
         actions = actions.to(self.device)
         B = actions.shape[0]
+        device = self.device
 
+        # 2. Prepare for diffusion forward process: sample noise and timesteps.
         noise = torch.randn_like(actions)
-        timesteps = torch.randint(0, self.scheduler.T, (B,), device=self.device).long()
+        timesteps = torch.randint(0, self.scheduler.T, (B,), device=device).long()
+
+        # 3. Apply noise to the clean actions to get the noisy input for the denoiser.
         noisy_actions = self.scheduler.add_noise(actions, timesteps, noise)
 
-        # Get conditioning tokens
-        vision_cond, proprio_cond = self._cond_embed(obs)
-        
-        # Implement unconditional training for CFG
-        uncond_mask = (torch.rand(B, device=self.device) < self.cfg_p_uncond)
-        vision_cond[uncond_mask] = self.uncond_vis_embedding
-        proprio_cond[uncond_mask] = self.uncond_proprio_embedding
+        # 4. Get all conditioning tokens in a structured dictionary using the unified helper method.
+        cond = self._get_condition_tokens(obs, subgoal_image)
 
-        predicted_noise = self.denoiser(noisy_actions, timesteps, vision_cond, proprio_cond)
-        
-        # --- START OF SOTA PATCH FOR WEIGHTED LOSS ---
-        # 1. Compute per-sample loss by preventing reduction
+        # 5. Apply Classifier-Free Guidance mask for unconditional training.
+        #    With a probability of `cfg_p_uncond`, we replace the real conditioning
+        #    tokens with learned unconditional embeddings.
+        if self.training and self.cfg_p_uncond > 0:
+            uncond_mask = (torch.rand(B, device=device) < self.cfg_p_uncond)
+            
+            # Replace conditioning tokens with their unconditional counterparts where the mask is active.
+            # The `expand` call is necessary to match the batch dimension.
+            if cond.get('vision') is not None:
+                cond['vision'][uncond_mask] = self.uncond_embeddings['vision'].expand(B, -1, -1)[uncond_mask]
+            if cond.get('proprio') is not None:
+                cond['proprio'][uncond_mask] = self.uncond_embeddings['proprio'].expand(B, -1, -1)[uncond_mask]
+            if cond.get('subgoal') is not None:
+                cond['subgoal'][uncond_mask] = self.uncond_embeddings['subgoal'].expand(B, -1, -1)[uncond_mask]
+
+        # 6. Assemble the final unified conditioning sequence for the denoiser.
+        #    This gathers all non-None token sets into a single long sequence.
+        cond_tokens_list = [t for t in cond.values() if t is not None]
+        cond_tokens = torch.cat(cond_tokens_list, dim=1)
+
+        # 7. Predict the noise using the denoiser.
+        predicted_noise = self.denoiser(noisy_actions, timesteps, cond_tokens)
+
+        # 8. Calculate the loss. This uses your SOTA weighted loss logic.
+        #    It computes a per-sample loss, averages it over the sequence/action dims,
+        #    and then applies optional weights before the final mean reduction.
         per_sample_loss = F.mse_loss(predicted_noise, noise, reduction='none')
-        
-        # 2. Average loss across the action horizon and action dimension
-        # Shape changes from (B, H_a, D_a) to (B,)
         per_sample_loss = per_sample_loss.mean(dim=list(range(1, per_sample_loss.ndim)))
-
-        # 3. Apply weights if provided (for RL fine-tuning)
+        
         if weights is not None:
-            # Ensure weights tensor is the correct shape (B,)
             if weights.ndim > 1:
                 weights = weights.squeeze()
             loss = (per_sample_loss * weights).mean()
         else:
-            # Fallback to standard un-weighted loss (for pre-training)
             loss = per_sample_loss.mean()
-        # --- END OF SOTA PATCH FOR WEIGHTED LOSS ---
 
+        # 9. Update the Exponential Moving Average (EMA) of the model weights if in training mode.
         if self.training and self.ema is not None:
             self.ema.update(self)
 
         return loss, {"loss": loss.item()}
 
     @torch.no_grad()
-    def sample(self, obs: Dict[str, torch.Tensor],
+    def sample(self,
+               obs: Dict[str, torch.Tensor],
+               subgoal_image: Optional[torch.Tensor] = None,
                steps: Optional[int] = None,
                guidance_scale: float = 1.5,
                use_ema: bool = True,
                return_intermediates: bool = False
                ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
         """
-        Samples an action sequence using DDIM and Classifier-Free Guidance.
+        Samples an action sequence from the diffusion model using DDIM and Classifier-Free Guidance.
+
+        This SOTA version ensures a consistent conditioning pipeline with training and
+        implements an efficient batched CFG forward pass.
         """
-        model = self.ema.ema_model if use_ema and self.ema else self
+        # 1. Select the model for inference (EMA weights are preferred for stability).
+        model = self.ema.ema_model if use_ema and self.ema is not None else self
         model.eval()
-
-        vision_cond, proprio_cond = self._cond_embed(obs)
-        B = vision_cond.shape[0]
-
+        
+        B, device = next(iter(obs.values())).shape[0], self.device
         T = steps if steps is not None else self.scheduler.T
-        timesteps = list(reversed(range(0, self.scheduler.T, self.scheduler.T // T)))
-        x_t = torch.randn((B, self.H_a, self.action_dim), device=self.device)
-        intermediates = [x_t]
 
-        for i, t in enumerate(timesteps):
-            t_tensor = torch.full((B,), t, device=self.device, dtype=torch.long)
-            t_prev = timesteps[i + 1] if i < len(timesteps) - 1 else -1
+        # 2. Get the conditional tokens using the unified helper method.
+        cond = self._get_condition_tokens(obs, subgoal_image)
+        cond_tokens_list = [t for t in cond.values() if t is not None]
+        cond_tokens = torch.cat(cond_tokens_list, dim=1)
 
-            # CFG forward passes
-            eps_cond = model.denoiser(x_t, t_tensor, vision_cond, proprio_cond)
-            eps_uncond = model.denoiser(x_t, t_tensor, self.uncond_vis_embedding.expand(B,-1,-1), self.uncond_proprio_embedding.expand(B,-1,-1))
+        # 3. Assemble the unconditional tokens for CFG.
+        #    These are expanded to match the batch size.
+        uncond_tokens_list = [
+            self.uncond_embeddings['vision'].expand(B, -1, -1),
+            self.uncond_embeddings['proprio'].expand(B, -1, -1)
+        ]
+        if cond['subgoal'] is not None:
+            uncond_tokens_list.append(self.uncond_embeddings['subgoal'].expand(B, -1, -1))
+        uncond_tokens = torch.cat(uncond_tokens_list, dim=1)
+
+        # 4. Set up the DDIM scheduler and initialize latents from pure noise.
+        self.scheduler.set_timesteps(T, device=device)
+        timesteps = self.scheduler.timesteps
+        latents = torch.randn((B, self.H_a, self.action_dim), device=device)
+        
+        # Optional: store intermediate steps for visualization.
+        intermediates = [latents] if return_intermediates else None
+
+        # 5. The DDIM denoising loop.
+        for t in timesteps:
+            # For CFG, we predict noise for both conditional and unconditional inputs in a single batch.
+            # This is more efficient than two separate forward passes.
             
-            # Combine predictions
-            eps_pred = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+            # a. Create a batched input for the denoiser: [unconditional_latents, conditional_latents]
+            latent_model_input = torch.cat([latents] * 2)
             
-            x_t = self.scheduler.ddim_step(x_t, t, t_prev, eps_pred)
+            # b. Assemble the full context for the denoiser: [unconditional_tokens, conditional_tokens]
+            combined_cond_tokens = torch.cat([uncond_tokens, cond_tokens], dim=0)
+            
+            # c. Predict noise for the combined batch.
+            #    The `t` tensor is also duplicated to match the batch size.
+            noise_pred = model.denoiser(latent_model_input, torch.cat([t.expand(B)] * 2), combined_cond_tokens)
+            
+            # d. Perform guidance: split the predictions and combine them.
+            #    `guided_noise = uncond_pred + guidance_scale * (cond_pred - uncond_pred)`
+            noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+            guided_noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            
+            # e. Scheduler step to compute the previous noisy sample (denoise one step).
+            latents = self.scheduler.step(guided_noise_pred, t, latents).prev_sample
+            
             if return_intermediates:
-                intermediates.append(x_t)
+                intermediates.append(latents)
 
         if return_intermediates:
-            return x_t, intermediates
-        return x_t
+            return latents, intermediates
+        
+        return latents
 
     def save(self, path: Path):
         """Saves the policy and EMA weights to a file."""

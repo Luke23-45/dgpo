@@ -1,0 +1,23 @@
+# FILE: configs/train_controller_bc_config.yaml
+
+# (Keep hydra, seed, model, scheduler, optimizer, trainer, logging sections mostly the same)
+# ...
+
+# --- Dataset Configuration (THE MAIN CHANGE) ---
+dataset:
+  # REQUIRED: Set path to your ENHANCED expert LMDB dataset
+  path: ???
+  # This script now requires the subgoal horizon for the dataset
+  subgoal_horizon_k: 8 # Must match the horizon used for Planner training
+  
+  # val_path: (optional)
+  # num_workers: (as before)
+  # batch_size: (as before)
+
+# ...
+
+# Change run name in W&B for clarity
+logging:
+  # ...
+  wandb_project: "vidhis_controller_train_bc"
+  # ...

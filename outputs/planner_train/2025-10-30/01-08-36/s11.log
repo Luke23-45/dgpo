@@ -1,0 +1,54 @@
+[2025-10-30 01:08:36,328][dataloader_debugger][INFO] - ----------- DataLoader Debugger -----------
+[2025-10-30 01:08:36,329][dataloader_debugger][INFO] - This script will attempt to replicate the PyTorch Lightning sanity check.
+[2025-10-30 01:08:36,330][dataloader_debugger][INFO] - Using config: train_path: c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+val_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb
+subgoal_horizon_k: 8
+image_size:
+- 224
+- 224
+img_mean:
+- 0.48145466
+- 0.4578275
+- 0.40821073
+img_std:
+- 0.26862954
+- 0.26130258
+- 0.27577711
+use_random_aug: false
+num_workers: 2
+
+[2025-10-30 01:08:36,333][dataloader_debugger][INFO] - -----------------------------------------
+[2025-10-30 01:08:36,333][dataloader_debugger][INFO] - Step 1: Initializing PlannerDataModule...
+[2025-10-30 01:08:36,334][dataloader_debugger][INFO] - PlannerDataModule initialized successfully.
+[2025-10-30 01:08:36,335][dataloader_debugger][INFO] - 
+Step 2: Calling datamodule.setup(stage='fit')...
+[2025-10-30 01:08:36,336][train.train_planner][INFO] - Loading TRAINING dataset from: c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+[2025-10-30 01:08:36,338][utils.planner_dataset][INFO] - Initializing underlying ExpertTrajectoryDataset reader...
+[2025-10-30 01:08:36,339][utils.expert_dataset][INFO] - Loading index from c:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93_index.json...
+[2025-10-30 01:08:36,345][utils.expert_dataset][INFO] - Loaded 260 episodes, 67656 total valid chunks (Virtually Indexed).
+[2025-10-30 01:08:36,346][utils.planner_dataset][INFO] - Loaded index for 260 episodes.
+[2025-10-30 01:08:36,353][utils.planner_dataset][INFO] - Precomputed 65576 valid planner samples (k=8).
+[2025-10-30 01:08:36,354][train.train_planner][INFO] - Loading VALIDATION dataset from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb
+[2025-10-30 01:08:36,356][utils.planner_dataset][INFO] - Initializing underlying ExpertTrajectoryDataset reader...
+[2025-10-30 01:08:36,357][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validations\expert_validation_run_99914b93_index.json...
+[2025-10-30 01:08:36,358][utils.expert_dataset][INFO] - Loaded 12 episodes, 3041 total valid chunks (Virtually Indexed).
+[2025-10-30 01:08:36,359][utils.planner_dataset][INFO] - Loaded index for 12 episodes.
+[2025-10-30 01:08:36,360][utils.planner_dataset][INFO] - Precomputed 2945 valid planner samples (k=8).
+[2025-10-30 01:08:36,360][dataloader_debugger][INFO] - datamodule.setup() completed successfully.
+[2025-10-30 01:08:36,361][dataloader_debugger][INFO] - Train dataset size: 65576
+[2025-10-30 01:08:36,361][dataloader_debugger][INFO] - Validation dataset size: 2945
+[2025-10-30 01:08:36,362][dataloader_debugger][INFO] - 
+Step 3: Calling datamodule.val_dataloader()...
+[2025-10-30 01:08:36,363][dataloader_debugger][INFO] - Validation dataloader created successfully.
+[2025-10-30 01:08:36,363][dataloader_debugger][INFO] - Number of workers: 2
+[2025-10-30 01:08:36,363][dataloader_debugger][WARNING] - WARNING: Debugging with num_workers > 0 can be complex due to multiprocessing.
+[2025-10-30 01:08:36,364][dataloader_debugger][INFO] - 
+Step 4: Attempting to fetch the first batch... (This is where the hang occurs)
+[2025-10-30 01:08:36,364][dataloader_debugger][INFO] - If the script hangs here, the issue is inside the dataset's __getitem__ method or with a file lock.
+[2025-10-30 01:09:16,816][dataloader_debugger][INFO] - SUCCESS! Fetched one batch in 40.45 seconds.
+[2025-10-30 01:09:16,817][dataloader_debugger][INFO] - 
+Step 5: Inspecting the fetched batch...
+[2025-10-30 01:09:16,817][dataloader_debugger][INFO] -   - Key: 'current_image', Type: <class 'torch.Tensor'>, Shape/Size: torch.Size([16, 3, 224, 224])
+[2025-10-30 01:09:16,818][dataloader_debugger][INFO] -   - Key: 'goal_image', Type: <class 'torch.Tensor'>, Shape/Size: torch.Size([16, 3, 224, 224])
+[2025-10-30 01:09:16,818][dataloader_debugger][INFO] -   - Key: 'progress', Type: <class 'torch.Tensor'>, Shape/Size: torch.Size([16])
+[2025-10-30 01:09:16,819][dataloader_debugger][INFO] -   - Key: 'gt_subgoal_image', Type: <class 'torch.Tensor'>, Shape/Size: torch.Size([16, 3, 224, 224])

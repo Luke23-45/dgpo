@@ -1,0 +1,84 @@
+# FILE: configs/run_vidhis_config.yaml
+# Hydra Configuration for Running ViDHiS Inference and Evaluation
+
+hydra:
+  run:
+    dir: outputs/vidhis_eval/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: true # Run from script's directory
+
+# --- Paths ---
+# REQUIRED: Update these paths to your trained models
+planner_ckpt_path: ??? # e.g., outputs/planner_train/YYYY-MM-DD/HH-MM-SS/checkpoints/planner-epoch=XX-....ckpt
+controller_ckpt_path: ??? # e.g., outputs/controller_bc_train/YYYY-MM-DD/HH-MM-SS/checkpoints/last.pth OR RL finetuned checkpoint
+# REQUIRED: Update path to the final goal image
+evaluation:
+  goal_image_path: ??? # e.g., data/goal_images/red_block_on_green_square.png
+
+# --- Environment ---
+environment:
+  xml_path: "envs/panda_pick_place.xml"
+  max_episode_steps: 500 # Timeout for evaluation episodes
+
+# --- Data Preprocessing (Must match training!) ---
+data_preprocessing:
+  image_size: [128, 128] # Should match Planner/Controller training image size
+  img_mean: [0.485, 0.456, 0.406]
+  img_std: [0.229, 0.224, 0.225]
+
+# --- Model Architectures (Need enough info to load models) ---
+# These should ideally mirror the training configs or be loadable from checkpoints
+model:
+  planner:
+    # Need parameters matching VisualPlannerDiffusion init to load correctly
+    image_size: ${data_preprocessing.image_size[0]}
+    vit_model_name: 'google/vit-base-patch16-224-in21k'
+    vit_feature_dim: 768
+    freeze_vit: true # Should match training
+    progress_embed_dim: 64
+    unet_block_out_channels: [64, 64, 128, 128, 256]
+    unet_down_block_types: ["DownBlock2D","DownBlock2D","CrossAttnDownBlock2D","CrossAttnDownBlock2D","DownBlock2D"]
+    unet_up_block_types: ["UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "UpBlock2D","UpBlock2D"]
+    num_diffusion_timesteps: 50 # Match scheduler training
+
+  controller:
+    # Need parameters matching DiffusionPolicy init used for Controller training
+    observation_horizon: 2 # Match training
+    action_horizon: 8      # Match training
+    action_dim: 8          # Match environment
+    proprio_dim: 22        # Match dataset used for training
+    image_feat_dim: 128    # Match training
+    d_model: 128           # Match training
+    denoiser_layers: 4     # Match training
+    denoiser_heads: 4      # Match training
+    # Add other params if needed (e.g., subgoal encoder details if separate)
+
+# Diffusion Scheduler (Used by Controller, maybe Planner if not in checkpoint)
+scheduler:
+  schedule: "cosine"
+  timesteps: 50 # Match Planner/Controller training
+  beta_start: 1.0e-4
+  beta_end: 0.02
+
+# --- Inference Parameters ---
+inference:
+  device: "cpu"
+  planner_inference_steps: 10 # Number of DDIM steps for planner (faster)
+  # Controller inference steps (often 1 if EDP-like training was used)
+  # This depends on the `predict_action` or `sample` method of your Controller/DiffusionPolicy
+  controller_inference_steps: 1
+  mpc_horizon_k: 4 # Execute first 4 actions from Controller trajectory
+  use_torch_compile: false # Set true for PyTorch 2.0+ CPU optimization attempt
+  torch_compile_mode: "reduce-overhead"
+  cpu_threads: null # Set to integer (e.g., 4) to manually limit, null uses default/auto
+
+# --- Evaluation Parameters ---
+evaluation:
+  num_episodes: 20 # Number of episodes to run
+  seed: 100
+
+# --- Visualization Parameters ---
+visualization:
+  save_video: true
+  video_fps: 20
+  save_subgoals: true

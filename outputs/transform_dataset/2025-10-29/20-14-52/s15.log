@@ -1,0 +1,16 @@
+[2025-10-29 20:14:52,146][transform_dataset][INFO] - ----------- Dataset Transformation Script -----------
+[2025-10-29 20:14:52,148][transform_dataset][INFO] - input_db_path: c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+output_dir: data/training
+transform:
+  num_workers: 0
+  worker_chunk_size: 1040
+  image_compression: jpeg
+  jpeg_quality: 90
+
+[2025-10-29 20:14:52,149][transform_dataset][INFO] - --------------------------------------------------
+[2025-10-29 20:14:52,149][transform_dataset][INFO] - Scanning source database: c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+[2025-10-29 20:14:52,151][lmdb_utils][INFO] -  Opened LMDB at c:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93.lmdb | mode=RO | file-mode
+[2025-10-29 20:14:52,152][transform_dataset][INFO] - Found 48 episodes to transform.
+[2025-10-29 20:15:05,916][transform_dataset][WARNING] - Worker 0 finished but created an empty/incomplete shard. Skipping.
+[2025-10-29 20:15:07,037][transform_dataset][WARNING] - One or more workers failed or produced empty shards. The final dataset might be smaller than expected.
+[2025-10-29 20:15:07,037][transform_dataset][ERROR] - No shards were successfully generated. Nothing to merge.
