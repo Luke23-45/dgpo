@@ -161,7 +161,6 @@ class PlannerLightningModule(pl.LightningModule):
         progress = batch['progress']
         gt_subgoal_img = batch['gt_subgoal_image']
 
-        print(":::::::::::::before this statement ---> predicted_noise, target_noise = self.model(")
 
         # Model forward pass for training (SOTA model's forward handles CFG dropout)
         predicted_noise, target_noise = self.model(
@@ -170,7 +169,7 @@ class PlannerLightningModule(pl.LightningModule):
             goal_image=goal_img,
             progress=progress
         )
-        print(":::::::::::::after this statement ---> predicted_noise, target_noise = self.model(")
+
 
         # Calculate MSE loss on noise (standard diffusion objective)
         loss = self.mse_loss(predicted_noise, target_noise)
@@ -188,14 +187,14 @@ class PlannerLightningModule(pl.LightningModule):
 
         # --- SOTA: 1. Calculate Validation MSE Loss ---
         # This gives a stable, non-perceptual metric
-        print(":::::::::::::before this statement ---> predicted_noise, target_noise = self.model( in def validation_step(self, batch")
+
         predicted_noise, target_noise = self.model(
             gt_subgoal_image=gt_subgoal_img,
             current_image=current_img,
             goal_image=goal_img,
             progress=progress
         )
-        print(":::::::::::::After this statement ---> predicted_noise, target_noise = self.model( in def validation_step(self, batch")
+
         val_mse_loss = self.mse_loss(predicted_noise, target_noise)
         self.log('val_mse_loss', val_mse_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
@@ -380,10 +379,10 @@ class PlannerDataModule(pl.LightningDataModule):
 
     def val_dataloader(self):
         if self.val_dataset is None:
-            print("inside ::::: if self.val_dataset is None: ------------------------ >>>>")
+
             return None # PyTorch Lightning handles this gracefully
             
-        print("From valid dataloader ------------------------ >>>>")
+
 
         return DataLoader(
             self.val_dataset,
