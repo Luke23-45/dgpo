@@ -27,8 +27,8 @@ model:
   
   # --- START OF PATCH 2: SOTA MODEL PARAMETERS ---
   # Use the powerful CLIP-Large model as the vision backbone
-  vit_model_name: 'openai/clip-vit-large-patch14'
-  vit_feature_dim: 768 # Feature dimension for CLIP-Large
+  vit_model_name: 'openai/clip-vit-base-patch32'
+  vit_feature_dim: 512 # Feature dimension for CLIP-Large
   freeze_vit: true
 
   # Embedding for the progress scalar

@@ -12,7 +12,7 @@ try:
     from transformers import CLIPVisionModel, ViTConfig
     from diffusers import (
         UNet2DConditionModel,
-        DPMSolverMultistepScheduler, # Use SOTA scheduler
+        DDIMScheduler, # Use SOTA scheduler
         DDIMScheduler, # Keep for compatibility if needed
     )
     from diffusers.configuration_utils import ConfigMixin
@@ -176,112 +176,87 @@ class VisualPlannerDiffusion( ModelMixin, ConfigMixin):
 
         # --- 5. SOTA Noise Scheduler (DPM-Solver++) ---
         # This scheduler provides SOTA results in few inference steps
-        self.noise_scheduler = DPMSolverMultistepScheduler(
+        print("before noise_scheduler::::::")
+        log.info("Using DDIMScheduler for robust CPU compatibility.")
+        self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=num_diffusion_timesteps,
-            beta_schedule='squaredcos_cap_v2', # A common SOTA schedule
-            
-            prediction_type='epsilon' # Predict noise
-            
+            beta_schedule='squaredcos_cap_v2',
+            prediction_type='epsilon'
         )
         log.info("SOTA Planner components initialized.")
 
     def encode_condition(self, current_image: torch.Tensor, goal_image: torch.Tensor, progress: torch.Tensor) -> torch.Tensor:
-        """
-        Encodes inputs into the conditioning vector for the U-Net.
-        [cite: 48]
-        Args:
-            current_image (torch.Tensor): Batch of current images, shape (B, 3, H, W).
-            goal_image (torch.Tensor): Batch of goal images, shape (B, 3, H, W).
-            progress (torch.Tensor): Batch of progress scalars, shape (B,).
-        Returns:
-            torch.Tensor: Combined conditioning vector, shape (B, 1, cross_attn_dim).
-        """
+        """... docstring ..."""
         batch_size = current_image.shape[0]
 
         # --- Process images with SOTA (CLIP) Vision Encoder ---
         with torch.no_grad() if self.config.freeze_vit else torch.enable_grad():
-            outputs_current = self.vision_encoder(current_image)
             
-            outputs_goal = self.vision_encoder(goal_image)
+            # --- HIGH-PRECISION DEBUGGING ---
+            print("        [encode_condition] ==> ABOUT TO CALL vision_encoder for current_image...")
+            outputs_current = self.vision_encoder(pixel_values=current_image)
+            print("        [encode_condition] ==> SUCCESS: vision_encoder for current_image COMPLETED.")
             
+            print("        [encode_condition] ==> ABOUT TO CALL vision_encoder for goal_image...")
+            outputs_goal = self.vision_encoder(pixel_values=goal_image)
+            print("        [encode_condition] ==> SUCCESS: vision_encoder for goal_image COMPLETED.")
+            # ---------------------------------
 
-        # Use the standard CLIP 'pooler_output' (from [CLS] token)
-        # This is semantically richer than mean pooling 
-        current_features = outputs_current.pooler_output # (B, vit_feature_dim)
-        goal_features = outputs_goal.pooler_output     # (B, vit_feature_dim)
+        current_features = outputs_current.pooler_output
+        goal_features = outputs_goal.pooler_output
 
-        # --- Process progress scalar with SOTA (Sinusoidal) Encoder ---
-        # (B,) -> (B, progress_embed_dim) -> (B, progress_embed_dim)
+        # --- Process progress scalar ---
         progress_emb = self.progress_encoder(self.progress_embedding(progress))
 
         # --- Concatenate all features ---
-      
-        condition = torch.cat([current_features, goal_features, progress_emb], dim=-1) # (B, condition_dim)
+        condition = torch.cat([current_features, goal_features, progress_emb], dim=-1)
+        condition = self.condition_proj(condition)
 
-        # Project to final cross-attention dimension
-        condition = self.condition_proj(condition) # (B, cross_attn_dim)
+        return condition.unsqueeze(1)
 
-        # U-Net expects conditioning shape (B, sequence_length, cross_attn_dim)
-        return condition.unsqueeze(1) # (B, 1, cross_attn_dim)
+# In models/planner.py -> VisualPlannerDiffusion class
 
     def forward(self,
                 gt_subgoal_image: torch.Tensor,
-                
                 current_image: torch.Tensor,
-                
                 goal_image: torch.Tensor,
-                
                 progress: torch.Tensor
                ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        SOTA Training forward pass with Classifier-Free Guidance (CFG) logic.
-        Predicts noise given noisy ground truth subgoal.
-        [cite: 52]
-        Returns:
-            predicted_epsilon (torch.Tensor): The noise predicted by the U-Net.
-            [cite: 52]
-            epsilon (torch.Tensor): The actual noise added to the image.
-            [cite: 53]
-        """
+        """... docstring ..."""
         device = gt_subgoal_image.device
         batch_size = gt_subgoal_image.shape[0]
 
         # --- 1. Encode conditioning vectors ---
+        # --- HIGH-PRECISION DEBUGGING ---
+        print("        [model.forward] ==> ABOUT TO CALL self.encode_condition...")
         condition = self.encode_condition(current_image, goal_image, progress)
+        print("        [model.forward] ==> SUCCESS: self.encode_condition COMPLETED.")
+        # ---------------------------------
 
-        # --- 2. SOTA: Implement CFG (Training) ---
-        # Create a random mask for dropping conditions
+        # --- 2. Implement CFG (Training) ---
         drop_mask = (torch.rand(batch_size, 1, 1, device=device) < self.config.condition_drop_prob)
-
-        # Get the learned unconditional embedding, expanded to batch size
         uncond_condition = self.uncond_embedding.expand(batch_size, -1, -1)
-
-        # Select between conditional and unconditional embeddings based on the mask
-        # This is the final conditioning tensor for the U-Net
         final_condition = torch.where(drop_mask, uncond_condition, condition)
 
         # --- 3. Standard Diffusion Training Steps ---
-        # 3a. Sample noise
         epsilon = torch.randn_like(gt_subgoal_image)
-
-        # 3b. Sample timesteps
         timesteps = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (batch_size,), device=device).long()
-
-        # 3c. Create noisy image
-        
         noisy_subgoal = self.noise_scheduler.add_noise(gt_subgoal_image, epsilon, timesteps)
 
-        # 3d. Predict noise using U-Net
+        # --- HIGH-PRECISION DEBUGGING ---
+        print(f"        [model.forward] ==> ABOUT TO CALL self.unet... (Input shape: {noisy_subgoal.shape})")
         predicted_epsilon = self.unet(
-            sample=noisy_subgoal,            # Noisy image input
-            timestep=timesteps,              # Timestep conditioning
-            
-            encoder_hidden_states=final_condition  # CFG-ready conditioning
-            
-        ).sample # Get the predicted noise tensor
+            sample=noisy_subgoal,
+            timestep=timesteps,
+            encoder_hidden_states=final_condition
+        ).sample
+        print("        [model.forward] ==> SUCCESS: self.unet COMPLETED.")
+        # ---------------------------------
 
         return predicted_epsilon, epsilon
 
+
+# In models/planner.py -> VisualPlannerDiffusion class
 
     @torch.no_grad()
     def sample(self,
@@ -292,9 +267,7 @@ class VisualPlannerDiffusion( ModelMixin, ConfigMixin):
                guidance_scale: float = 7.5,
                generator: Optional[torch.Generator] = None
               ) -> torch.Tensor:
-        """
-        SOTA Inference pass with Classifier-Free Guidance (CFG).
-        """
+        """... docstring ..."""
         device = current_image.device
         batch_size = current_image.shape[0]
 
@@ -302,52 +275,39 @@ class VisualPlannerDiffusion( ModelMixin, ConfigMixin):
         self.noise_scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.noise_scheduler.timesteps
 
-        # 2. Encode condition (and unconditional)
+        # 2. Encode condition
         cond_condition = self.encode_condition(current_image, goal_image, progress)
         uncond_condition = self.uncond_embedding.expand(batch_size, -1, -1)
-        # SOTA: Combine for CFG. This part is correct.
         condition = torch.cat([uncond_condition, cond_condition], dim=0)
 
-        # 3. Initialize latents (noisy image)
-        # --- START OF SOTA PATCH: CORRECT LATENT HANDLING ---
-        # The `latents` variable should ALWAYS have the original batch size (e.g., 16).
+        # 3. Initialize latents
         latents = torch.randn((batch_size, 3, self.config.image_size, self.config.image_size),
                               generator=generator, device=device, dtype=condition.dtype)
-        # --- END OF SOTA PATCH ---
-        
         latents = latents * self.noise_scheduler.init_noise_sigma
+        
+        print("        [model.sample] ==> SETUP COMPLETE. About to enter denoising loop...")
 
         # 4. SOTA Denoising loop (with CFG)
-        for t in tqdm(timesteps, desc="Planner Sampling", leave=False, disable=True):
-            # --- START OF SOTA PATCH (continued) ---
-            # a. Create a temporary, duplicated input for the model.
-            #    `latents` (shape [16,...]) is duplicated to `latent_model_input` (shape [32,...])
-            latent_model_input = torch.cat([latents] * 2)
-            # --- END OF SOTA PATCH (continued) ---
-            
-            latent_model_input = self.noise_scheduler.scale_model_input(latent_model_input, t)
+        for i, t in enumerate(tqdm(timesteps, desc="Planner Sampling", leave=False, disable=True)):
+            print(f"        [model.sample] ==> LOOP START: Iteration {i}, Timestep {t.item()}")
 
-            # b. Predict noise for *both* cond and uncond in one pass. Output is shape [32, ...]
+            latent_model_input = torch.cat([latents] * 2)
+            latent_model_input = self.noise_scheduler.scale_model_input(latent_model_input, t)
+            
+            print(f"        [model.sample] ==> ABOUT TO CALL self.unet (inside loop)...")
             noise_pred = self.unet(
                 sample=latent_model_input,
                 timestep=t,
                 encoder_hidden_states=condition
             ).sample
+            print(f"        [model.sample] ==> SUCCESS: self.unet (inside loop) COMPLETED.")
 
-            # c. Perform Classifier-Free Guidance.
             noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-            # `guided_noise_pred` is the final noise, shape is back to [16, ...]
             guided_noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-            # --- START OF SOTA PATCH (continued) ---
-            # d. Scheduler step.
-            #    Crucially, it uses the guided noise (shape [16,...]) and the
-            #    original, non-duplicated latents (shape [16,...]).
-            #    The shapes now match.
             latents = self.noise_scheduler.step(guided_noise_pred, t, latents).prev_sample
-            # --- END OF SOTA PATCH (continued) ---
+            print(f"        [model.sample] ==> LOOP END: Iteration {i}")
 
-        # 5. We no longer need to chunk the final latents, as they are already the correct shape.
+        print("        [model.sample] ==> SUCCESS: Denoising loop finished.")
         image = latents
         return image
 

@@ -1,85 +1,123 @@
-# FILE: debug/test_dataloader.py
-# A SOTA Diagnostic Script to Isolate and Debug DataLoader Issues
+# FILE: debug_sanity_check.py
 
-import os
-import sys
-import logging
-from pathlib import Path
-import hydra
-from omegaconf import DictConfig, OmegaConf
 import torch
-import time
+import hydra
+from omegaconf import DictConfig
+import logging
 
-# --- Project Imports ---
-# Add project root to sys.path for robust execution
-try:
-    ROOT = Path(__file__).resolve().parents[1]
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-    # Import the exact DataModule used by the failing training script
-    from train.train_planner import PlannerDataModule
-except ImportError as e:
-    print(f"Error importing project modules: {e}. Please run from the project root.")
-    sys.exit(1)
+# Import the actual modules we want to test
+from train.train_planner import PlannerDataModule, PlannerLightningModule
 
-# --- Setup ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
-log = logging.getLogger("dataloader_debugger")
+# Configure logging to see outputs
+log = logging.getLogger(__name__)
 
 @hydra.main(version_base=None, config_path="./configs", config_name="train_planner_config")
 def main(cfg: DictConfig):
-    log.info("----------- DataLoader Debugger -----------")
-    log.info("This script will attempt to replicate the PyTorch Lightning sanity check.")
-    log.info(f"Using config: {OmegaConf.to_yaml(cfg.dataset)}")
-    log.info("-----------------------------------------")
-
+    """
+    Manually replicates the PyTorch Lightning sanity check process with detailed printouts.
+    """
+    print("----------- STARTING MANUAL SANITY CHECK -----------")
+    
+    # --- IMPORTANT: Override config for debugging ---
+    # We already know the issue happens with num_workers=0
+    cfg.dataset.num_workers = 0
+    # Let's also disable pin_memory as it's a common suspect
+    # In your DataLoader, you might need to manually set this to False if it's not in the config.
+    
+    # ----------------------------------------------------------------------
+    # 1. INITIALIZE THE DATAMODULE AND MODEL (just like the trainer does)
+    # ----------------------------------------------------------------------
+    print("\n--- [PHASE 1] Initializing Modules ---")
     try:
-        # --- 1. Initialize the DataModule (Same as in trainer) ---
-        log.info("Step 1: Initializing PlannerDataModule...")
+        print("   -> Initializing PlannerDataModule...")
         datamodule = PlannerDataModule(cfg)
-        log.info("PlannerDataModule initialized successfully.")
+        print("   -> Initializing PlannerLightningModule (the model)...")
+        model = PlannerLightningModule(cfg)
+        print("--- [PHASE 1] SUCCESS: Modules initialized. ---\n")
+    except Exception as e:
+        print(f"--- [PHASE 1] FAILED: Could not initialize modules: {e}")
+        return
 
-        # --- 2. Setup the DataModule (Same as in trainer) ---
-        log.info("\nStep 2: Calling datamodule.setup(stage='fit')...")
+    # ----------------------------------------------------------------------
+    # 2. SETUP DATA AND GET DATALOADER (just like the trainer does)
+    # ----------------------------------------------------------------------
+    print("\n--- [PHASE 2] Setting up Data ---")
+    try:
+        print("   -> Calling datamodule.setup(stage='fit')...")
         datamodule.setup(stage='fit')
-        log.info("datamodule.setup() completed successfully.")
-        log.info(f"Train dataset size: {len(datamodule.train_dataset)}")
-        log.info(f"Validation dataset size: {len(datamodule.val_dataset)}")
-
-
-        # --- 3. Get the Validation DataLoader (Same as in trainer) ---
-        log.info("\nStep 3: Calling datamodule.val_dataloader()...")
-        val_dataloader = datamodule.val_dataloader()
-        if val_dataloader is None:
-            log.error("Validation dataloader is None. Check your config and dataset split.")
+        print("   -> Getting validation dataloader...")
+        
+        # --- Manually create the DataLoader with debug settings ---
+        # This bypasses the datamodule's method to ensure we control the settings
+        val_loader = torch.utils.data.DataLoader(
+            datamodule.val_dataset,
+            batch_size=cfg.training.val_batch_size,
+            shuffle=False,
+            num_workers=0,  # Explicitly 0
+            pin_memory=False, # Explicitly False
+            drop_last=False
+        )
+        
+        if val_loader is None:
+            print("   -> Validation dataloader is None. Cannot proceed.")
             return
-        log.info("Validation dataloader created successfully.")
-        log.info(f"Number of workers: {val_dataloader.num_workers}")
-        if val_dataloader.num_workers > 0:
-            log.warning("WARNING: Debugging with num_workers > 0 can be complex due to multiprocessing.")
+        print("--- [PHASE 2] SUCCESS: DataLoader is ready. ---\n")
+    except Exception as e:
+        print(f"--- [PHASE 2] FAILED: Could not setup data: {e}")
+        return
 
-        # --- 4. The Core Test: Attempt to fetch ONE batch ---
-        log.info("\nStep 4: Attempting to fetch the first batch... (This is where the hang occurs)")
-        log.info("If the script hangs here, the issue is inside the dataset's __getitem__ method or with a file lock.")
-        
-        start_time = time.time()
-        
-        # This is the command that hangs
-        batch = next(iter(val_dataloader))
-        
-        end_time = time.time()
-        log.info(f"SUCCESS! Fetched one batch in {end_time - start_time:.2f} seconds.")
+    # ----------------------------------------------------------------------
+    # 3. PREPARE FOR EXECUTION (just like the trainer does)
+    # ----------------------------------------------------------------------
+    print("\n--- [PHASE 3] Preparing for Execution ---")
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() and cfg.trainer.accelerator != 'cpu' else "cpu")
+        print(f"   -> Target device is: {device}")
+        print(f"   -> Moving model to {device}...")
+        model.to(device)
+        # Manually set the model to eval mode for validation
+        model.eval()
+        print("--- [PHASE 3] SUCCESS: Model is on device and in eval mode. ---\n")
+    except Exception as e:
+        print(f"--- [PHASE 3] FAILED: Could not move model to device: {e}")
+        return
 
-        # --- 5. Inspect the Batch (If successful) ---
-        log.info("\nStep 5: Inspecting the fetched batch...")
-        if isinstance(batch, dict):
-            for key, value in batch.items():
-                log.info(f"  - Key: '{key}', Type: {type(value)}, Shape/Size: {value.shape if isinstance(value, torch.Tensor) else len(value)}")
-        else:
-            log.error(f"Batch is not a dictionary as expected. Type: {type(batch)}")
+    # ----------------------------------------------------------------------
+    # 4. RUN THE SANITY CHECK LOOP (this is where the magic happens)
+    # ----------------------------------------------------------------------
+    num_batches_to_check = 2
+    print(f"\n--- [PHASE 4] Starting manual sanity loop for {num_batches_to_check} batches ---")
+    try:
+        # Manually disable gradients, just like Lightning does for validation
+        with torch.no_grad():
+            for i, batch in enumerate(val_loader):
+                if i >= num_batches_to_check:
+                    break
+
+                print(f"\n--- Processing Batch {i} ---")
+                
+                # STEP A: Getting the batch (already done by the for loop)
+                print("   [STEP A] SUCCESS: Batch received from DataLoader.")
+                print(f"      -> Batch keys: {batch.keys()}")
+
+                # STEP B: Move the batch to the correct device
+                print(f"   [STEP B] Moving batch to {device}...")
+                batch_on_device = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
+                print("   [STEP B] SUCCESS: Batch moved to device.")
+
+                # STEP C: Execute the validation_step
+                print("   [STEP C] Executing model.validation_step...")
+                model.validation_step(batch_on_device, i)
+                print("   [STEP C] SUCCESS: validation_step completed.")
+
+        print(f"\n--- [PHASE 4] SUCCESS: Manual sanity check loop finished. ---")
 
     except Exception as e:
-        log.exception("An error occurred during the debug run.")
+        print(f"\n\n--- [PHASE 4] FAILED: An error occurred during the sanity loop! ---")
+        import traceback
+        traceback.print_exc()
+
+    print("\n----------- DEBUG SCRIPT FINISHED -----------")
 
 if __name__ == "__main__":
     main()
