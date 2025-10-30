@@ -11,7 +11,7 @@ seed: 42
 #  train_path: "c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"
 # --- Dataset Configuration ---
 dataset:
-  train_path: "/content/drive/MyDrive/pda/data/shard_001/expert_training_run_99914b93_part001.lmdb"
+  train_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
   val_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
   subgoal_horizon_k: 8 # How many steps ahead is the subgoal image?
   image_size: [224, 224] # Smaller for faster training, match model.image_size
