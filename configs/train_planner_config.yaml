@@ -11,15 +11,17 @@ seed: 42
 #  train_path: "c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"
 # --- Dataset Configuration ---
 dataset:
-  train_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+  train_path: "/content/drive/MyDrive/pda/data/shard_001/expert_training_run_99914b93_part001.lmdb"
   val_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+  # train_path: "c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"
+  # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb"
   subgoal_horizon_k: 8 # How many steps ahead is the subgoal image?
   image_size: [224, 224] # Smaller for faster training, match model.image_size
   img_mean: [0.48145466, 0.4578275, 0.40821073]
   img_std: [0.26862954, 0.26130258, 0.27577711]
   use_random_aug: false # Enable basic augmentations
   # val_split: 0.05 # 5% validation split
-  num_workers: 2 # Set > 0 for multi-process loading (careful on Windows)
+  num_workers: 0 # Set > 0 for multi-process loading (careful on Windows)
 
 # --- Model Configuration ---
 model:
@@ -85,7 +87,7 @@ training:
   run_full_validation_every_n_epoch: 5 
   limit_lpips_batches: 50
   save_top_k_checkpoints: 3
-  resume_from_checkpoint: null
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/Models/backup_epoch_5.ckpt"
   max_steps: -1 # Optionally set a max number of steps instead of epochs
 
 # --- Optimizer Configuration ---

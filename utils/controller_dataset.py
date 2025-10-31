@@ -38,15 +38,11 @@ class HierarchicalControllerDataset(Dataset):
             observation_horizon (int): Number of observation steps to stack (H_o).
             action_horizon (int): Number of action steps to predict (H_a).
             subgoal_horizon_k (int): The future timestep `t+k` from which to draw the
-                                     visual subgoal image. For consistency, this should
-                                     typically match the Planner's training horizon.
+                                     visual subgoal image.
         """
         super().__init__()
         log.info(f"Initializing HierarchicalControllerDataset with H_o={observation_horizon}, H_a={action_horizon}, k={subgoal_horizon_k}")
 
-        # --- SOTA Principle: Composition over Re-implementation ---
-        # We instantiate our powerful reader to handle all low-level data access.
-        # This dataset becomes a lightweight orchestrator.
         self.expert_reader = ExpertTrajectoryDataset(
             demo_path=dataset_path,
             observation_horizon=observation_horizon,
@@ -54,72 +50,74 @@ class HierarchicalControllerDataset(Dataset):
         )
 
         self.subgoal_horizon_k = subgoal_horizon_k
-        self.total_chunks = len(self.expert_reader)
-
-        # Basic validation
-        if self.subgoal_horizon_k < 1:
-            raise ValueError("subgoal_horizon_k must be a positive integer.")
+        self.observation_horizon = observation_horizon
+        self.action_horizon = action_horizon
         
-        # Verify that the reader has enough runway to sample subgoals
-        # We check the first episode as a proxy.
-        if len(self.expert_reader.episode_metadata) > 0:
-            first_ep_len = self.expert_reader.episode_metadata[0]['length']
-            max_horizon = max(observation_horizon - 1, action_horizon, subgoal_horizon_k)
-            if first_ep_len <= max_horizon:
+        # --- NEW: Build a robust virtual index that respects ALL horizons ---
+        
+        # The maximum lookahead required is the largest of the action horizon or subgoal horizon.
+        # We also need to account for the observation history.
+        max_future_horizon = max(self.action_horizon, self.subgoal_horizon_k)
+        
+        self.episode_chunks = []
+        for ep_meta in self.expert_reader.episode_metadata:
+            # The number of valid starting points `t` for an action sequence in an
+            # episode of length L is determined by the need to have a full
+            # observation history AND a full future action/subgoal trajectory.
+            num_valid_chunks = ep_meta['length'] - (self.observation_horizon - 1) - max_future_horizon
+            
+            if num_valid_chunks > 0:
+                self.episode_chunks.append(num_valid_chunks)
+            else:
+                self.episode_chunks.append(0)
                 log.warning(
-                    f"Episodes may be too short for the specified horizons. "
-                    f"Example episode length: {first_ep_len}, Max required lookahead: {max_horizon}. "
-                    f"This may result in a smaller-than-expected dataset size."
+                    f"Episode {ep_meta['episode_id']} has length {ep_meta['length']} but requires "
+                    f"at least {(self.observation_horizon - 1) + max_future_horizon + 1} steps. "
+                    "This episode will be skipped."
                 )
-        log.info(f"Successfully initialized. Found {self.total_chunks} valid controller samples.")
+
+        self.cumulative_chunks = np.cumsum(self.episode_chunks)
+        self.total_chunks = self.cumulative_chunks[-1] if len(self.cumulative_chunks) > 0 else 0
+        
+        if self.subgoal_horizon_k != self.action_horizon:
+            log.warning(f"Configuration mismatch: subgoal_horizon_k ({self.subgoal_horizon_k}) does not equal action_horizon ({self.action_horizon}). Ensure this is intentional.")
+
+        log.info(f"Successfully initialized. Found {self.total_chunks} valid controller samples across {len(self.episode_chunks)} episodes.")
 
     def __len__(self) -> int:
         """Returns the total number of valid data chunks in the dataset."""
         return self.total_chunks
 
+
     def __getitem__(self, idx: int) -> Tuple[Tuple[Dict[str, np.ndarray], np.ndarray], np.ndarray]:
         """
-        Retrieves a complete training sample for the Controller.
-
-        Returns:
-            A tuple containing:
-            - A tuple of inputs: (observation_chunk, subgoal_image)
-            - The target: action_chunk
+        Retrieves a complete training sample for the Controller. This version uses
+        the robust internal index map to guarantee all lookaheads are valid.
         """
         if not (0 <= idx < self.total_chunks):
-            raise IndexError(f"Index {idx} out of range for dataset with {self.total_chunks} chunks.")
+            raise IndexError(f"Index {idx} out of range for dataset with {self.total_chunks} valid chunks.")
 
         try:
-            # --- 1. Delegate Primary Data Loading ---
-            # This single call efficiently loads the observation history and action
-            # trajectory using all the SOTA features of the underlying reader.
-            obs_chunk, action_chunk = self.expert_reader[idx]
-
-            # --- 2. Determine Subgoal Location ---
-            # We reuse the reader's internal virtual index to find the episode and timestep
-            # corresponding to this flat index `idx`. This is an O(log N) operation.
-            ep_idx = np.searchsorted(self.expert_reader._cumulative_chunks, idx, side='right')
-            ep_start_chunk_idx = self.expert_reader._cumulative_chunks[ep_idx - 1] if ep_idx > 0 else 0
+            # 1. Find the correct episode and local index using our robust index.
+            # This is a fast O(log N) binary search.
+            ep_idx = np.searchsorted(self.cumulative_chunks, idx, side='right')
+            ep_start_chunk_idx = self.cumulative_chunks[ep_idx - 1] if ep_idx > 0 else 0
             local_chunk_idx = idx - ep_start_chunk_idx
-            # This is the 't' that defines the start of the action trajectory
-            timestep_t = (self.expert_reader.observation_horizon - 1) + local_chunk_idx
-            
-            # The subgoal is at a future timestep t+k
-            subgoal_t = timestep_t + self.subgoal_horizon_k
-            ep_meta = self.expert_reader.episode_metadata[ep_idx]
-            
-            # Sanity check to ensure subgoal_t is within the episode bounds
-            if subgoal_t >= ep_meta["length"]:
-                # This should theoretically not happen if the reader's total_chunks is calculated correctly,
-                # but it's good defensive programming.
-                raise IndexError(
-                    f"Calculated subgoal timestep {subgoal_t} is out of bounds for "
-                    f"episode {ep_idx} with length {ep_meta['length']}."
-                )
 
-            # --- 3. Load the Subgoal Image via the Reader's Cache ---
-            # We get the full 'image_primary' array for the episode. This call is
-            # extremely fast on subsequent accesses due to the reader's LRU cache.
+            # 2. Calculate the starting timestep 't' of the action trajectory.
+            timestep_t = (self.observation_horizon - 1) + local_chunk_idx
+
+            # 3. Use the underlying expert_reader to load the obs/action chunks.
+            # We need to translate our robust local_chunk_idx to the reader's global index.
+            reader_global_start_idx = self.expert_reader._cumulative_chunks[ep_idx - 1] if ep_idx > 0 else 0
+            reader_idx = reader_global_start_idx + local_chunk_idx
+            obs_chunk, action_chunk = self.expert_reader[reader_idx]
+
+            # 4. Calculate the subgoal timestep and load the subgoal image.
+            # This is now guaranteed to be within the episode bounds.
+            subgoal_t = timestep_t + self.subgoal_horizon_k
+            
+            ep_meta = self.expert_reader.episode_metadata[ep_idx]
             img_primary_meta = ep_meta["modalities"]["image_primary"]
             full_image_array = self.expert_reader._get_full_modality_array(
                 img_primary_meta["key"],
@@ -127,18 +125,45 @@ class HierarchicalControllerDataset(Dataset):
                 img_primary_meta["dtype"],
                 tuple(img_primary_meta["shape"])
             )
-            
-            # Slice the single subgoal image from the full array. This is a near-zero-cost view.
             subgoal_image = full_image_array[subgoal_t]
 
-            # --- 4. Assemble and Return the Final Sample ---
+            # 5. Assemble and return the final sample.
             return (obs_chunk, subgoal_image), action_chunk
 
         except Exception as e:
-            log.error(f"Error loading data for index {idx}. This may indicate a corrupt dataset or a bug. Error: {e}", exc_info=True)
-            # To prevent training crashes, we could return a dummy sample,
-            # but raising the error is better for debugging.
+            log.error(f"Error loading data for index {idx}. Error: {e}", exc_info=True)
             raise
+
+
+def hierarchical_collate_fn(batch):
+    """
+    Custom collate_fn for the HierarchicalControllerDataset.
+    It correctly handles the nested structure and converts data to PyTorch Tensors.
+    """
+    # Deconstruct the batch of samples
+    obs_chunks = [item[0][0] for item in batch]
+    subgoal_images = [item[0][1] for item in batch]
+    action_chunks = [item[1] for item in batch]
+
+    # Batch the obs_chunks
+    batched_obs_chunk = {}
+    obs_keys = obs_chunks[0].keys()
+    for key in obs_keys:
+        # Stack numpy arrays for each observation modality
+        numpy_array = np.stack([obs[key] for obs in obs_chunks])
+        # CONVERT TO TENSOR
+        batched_obs_chunk[key] = torch.from_numpy(numpy_array)
+
+    # Batch the other components
+    numpy_subgoals = np.stack(subgoal_images)
+    numpy_actions = np.stack(action_chunks)
+    
+    # CONVERT TO TENSOR
+    batched_subgoal_image = torch.from_numpy(numpy_subgoals)
+    batched_action_chunk = torch.from_numpy(numpy_actions)
+
+    # Reconstruct the final batched sample in the expected nested format
+    return (batched_obs_chunk, batched_subgoal_image), batched_action_chunk
 
 
 # --- Example Usage and Validation Block ---

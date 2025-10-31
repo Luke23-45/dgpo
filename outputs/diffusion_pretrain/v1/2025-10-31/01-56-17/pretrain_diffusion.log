@@ -1,0 +1,78 @@
+[2025-10-31 01:56:17,347][__main__][INFO] - ----------- Configuration -----------
+[2025-10-31 01:56:17,350][__main__][INFO] - seed: 42
+device: cpu
+resume_checkpoint: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth
+logging:
+  use_wandb: false
+  wandb_project: dgpo_diffusion_pretrain
+  log_interval_steps: 100
+  val_interval_epochs: 3
+dataset:
+  train_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  batch_size: 128
+  num_workers: 2
+  subgoal_horizon_k: 8
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+scheduler:
+  schedule_type: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+optimizer:
+  lr: 0.0002
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+training:
+  epochs: 1000
+  use_amp: false
+  ema_decay: 0.999
+  cfg_p_uncond: 0.15
+validation:
+  guidance_scale: 1.5
+  sampling_steps: 50
+
+[2025-10-31 01:56:17,356][__main__][INFO] - ------------------------------------
+[2025-10-31 01:56:17,361][__main__][INFO] - Global seed set to 42
+[2025-10-31 01:56:17,362][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\diffusion_pretrain\v1\2025-10-31\01-56-17
+[2025-10-31 01:56:17,369][__main__][INFO] - Building datasets...
+[2025-10-31 01:56:17,370][__main__][INFO] - Loading TRAINING dataset from: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+[2025-10-31 01:56:17,371][utils.controller_dataset][INFO] - Initializing HierarchicalControllerDataset with H_o=2, H_a=8, k=8
+[2025-10-31 01:56:17,372][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93_index.json...
+[2025-10-31 01:56:17,377][utils.expert_dataset][INFO] - Loaded 260 episodes, 65576 total valid chunks (Virtually Indexed).
+[2025-10-31 01:56:17,378][utils.controller_dataset][INFO] - Successfully initialized. Found 65316 valid controller samples across 260 episodes.
+[2025-10-31 01:56:17,379][utils.samplers][INFO] - Building episode-to-index map for sampler...
+[2025-10-31 01:56:17,511][utils.samplers][INFO] - Map building complete.
+[2025-10-31 01:56:17,511][__main__][INFO] - Using EpisodeAwareSampler for training to optimize I/O.
+[2025-10-31 01:56:17,512][__main__][INFO] - Loading VALIDATION dataset from: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+[2025-10-31 01:56:17,512][utils.controller_dataset][INFO] - Initializing HierarchicalControllerDataset with H_o=2, H_a=8, k=8
+[2025-10-31 01:56:17,513][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-10-31 01:56:17,514][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-31 01:56:17,515][utils.controller_dataset][INFO] - Successfully initialized. Found 2933 valid controller samples across 12 episodes.
+[2025-10-31 01:56:17,515][__main__][INFO] - Building diffusion policy model...
+[2025-10-31 01:56:17,516][__main__][INFO] - Inferred proprioception dimension from dataset: 22
+[2025-10-31 01:56:18,383][models.diffusion_policy][INFO] - ViDHiS Controller (DiffusionPolicy) initialized on device: cpu
+[2025-10-31 01:56:18,388][__main__][INFO] - Configuring LR scheduler: Total steps=510000, Warmup steps=0
+[2025-10-31 01:56:18,389][__main__][INFO] - Loading checkpoint for migration/resumption: C:\Users\Hellx\Documents\Programming\python\Project\dgpo\outputs\diffusion_pretrain\v1\2025-10-25\00-16-18\checkpoints\backup\backup_epoch_19.pth
+[2025-10-31 01:56:18,580][__main__][INFO] - Migration rules applied to checkpoint.
+[2025-10-31 01:56:18,589][__main__][ERROR] - An error occurred during training.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 705, in main
+    trainer = ControllerBCTrainer(cfg)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 186, in __init__
+    self._load_checkpoint(Path(cfg.resume_checkpoint))
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 359, in _load_checkpoint
+    migrated_policy_dict, migration_occured = _migrate_and_warm_start(policy_state_dict, self.policy)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 345, in _migrate_and_warm_start
+    new_model_template.subgoal_encoder.load_state_dict(primary_weights)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\nn\modules\module.py", line 2629, in load_state_dict
+    raise RuntimeError(
+RuntimeError: Error(s) in loading state_dict for ResNetEncoder:
+	Missing key(s) in state_dict: "mean", "std". 

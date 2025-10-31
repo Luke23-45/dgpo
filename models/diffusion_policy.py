@@ -49,7 +49,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, List, Union
 from pathlib import Path
-
+from transformers import get_scheduler
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -366,17 +366,14 @@ class DiffusionTransformer(nn.Module):
     def forward(self, 
                 noisy_actions: torch.Tensor, 
                 timesteps: torch.Tensor, 
-                vision_cond: torch.Tensor, 
-                proprio_cond: torch.Tensor,
-                subgoal_cond: Optional[torch.Tensor] = None
+                cond_tokens: torch.Tensor,
                 ):
         """
         Args:
             noisy_actions (torch.Tensor): (B, H_a, D_a)
             timesteps (torch.Tensor): (B,)
-            vision_cond (torch.Tensor): (B, L_v, D_model)
-            proprio_cond (torch.Tensor): (B, L_p, D_model)
-            subgoal_cond (torch.Tensor, optional): (B, L_s, D_model).
+            cond_tokens (torch.Tensor): A single tensor of all conditioning
+                                        tokens, pre-concatenated. Shape (B, L_cond, D_model).
         Returns:
             torch.Tensor: Predicted noise, shape (B, H_a, D_a).
         """
@@ -384,16 +381,18 @@ class DiffusionTransformer(nn.Module):
         action_tokens = self.action_proj(noisy_actions)
         action_tokens += self.action_pos_emb(torch.arange(H_a, device=noisy_actions.device))
         
-        # Combine all available conditioning tokens into a single sequence
-        cond_tokens_list = [vision_cond, proprio_cond]
-        if subgoal_cond is not None:
-            cond_tokens_list.append(subgoal_cond)
-        cond_tokens = torch.cat(cond_tokens_list, dim=1)
+        # REMOVED: The logic for combining conditioning tokens is now handled
+        #          at a higher level in the DiffusionPolicy class.
+        # cond_tokens_list = [vision_cond, proprio_cond]
+        # if subgoal_cond is not None:
+        #     cond_tokens_list.append(subgoal_cond)
+        # cond_tokens = torch.cat(cond_tokens_list, dim=1)
         
         t_emb = self.time_mlp(timesteps)
         
         x = action_tokens
         for block in self.blocks:
+            # The cross-attention block now correctly receives the single `cond_tokens` tensor.
             x = block(x, cond=cond_tokens, t_emb=t_emb)
             
         return self.out_proj(x)
@@ -418,7 +417,11 @@ class EMA:
                     ema_param.copy_(self.decay * ema_param + (1 - self.decay) * param.data)
 
     def state_dict(self): return self.ema_model.state_dict()
-    def load_state_dict(self, sd): self.ema_model.load_state_dict(sd)
+
+
+    def load_state_dict(self, sd, **kwargs):
+        """Passes all arguments and returns the result from the underlying model."""
+        return self.ema_model.load_state_dict(sd, **kwargs)
 
 # -------------------------
 # Main DiffusionPolicy Class
@@ -463,8 +466,9 @@ class DiffusionPolicy(nn.Module):
         # --- SOTA PATCH 3: Refactored Unconditional Embeddings ---
         # Create a dictionary for clean management of unconditional tokens
         self.uncond_embeddings = nn.ParameterDict({
-            'primary': nn.Parameter(torch.randn(1, H_o, d_model)),
-            'wrist': nn.Parameter(torch.randn(1, H_o, d_model)),
+            # 'primary': nn.Parameter(torch.randn(1, H_o, d_model)),
+            # 'wrist': nn.Parameter(torch.randn(1, H_o, d_model)),
+            'vision': nn.Parameter(torch.randn(1, H_o, d_model)), 
             'proprio': nn.Parameter(torch.randn(1, H_o, d_model)),
             'subgoal': nn.Parameter(torch.randn(1, 1, d_model)),
         })

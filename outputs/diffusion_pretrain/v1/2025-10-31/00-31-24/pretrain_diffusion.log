@@ -1,0 +1,80 @@
+[2025-10-31 00:31:24,682][__main__][INFO] - ----------- Configuration -----------
+[2025-10-31 00:31:24,687][__main__][INFO] - seed: 42
+device: cpu
+resume_checkpoint: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth
+logging:
+  use_wandb: false
+  wandb_project: dgpo_diffusion_pretrain
+  log_interval_steps: 100
+  val_interval_epochs: 3
+dataset:
+  train_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  batch_size: 128
+  num_workers: 2
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+scheduler:
+  schedule_type: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+optimizer:
+  lr: 0.0002
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+training:
+  epochs: 1000
+  use_amp: false
+  ema_decay: 0.999
+  cfg_p_uncond: 0.15
+validation:
+  guidance_scale: 1.5
+  sampling_steps: 50
+
+[2025-10-31 00:31:24,693][__main__][INFO] - ------------------------------------
+[2025-10-31 00:31:24,699][__main__][INFO] - Global seed set to 42
+[2025-10-31 00:31:24,699][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\diffusion_pretrain\v1\2025-10-31\00-31-24
+[2025-10-31 00:31:24,706][__main__][INFO] - Building datasets...
+[2025-10-31 00:31:24,707][__main__][INFO] - Loading TRAINING dataset from: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+[2025-10-31 00:31:24,708][__main__][ERROR] - An error occurred during training.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 617, in main
+    trainer = ControllerBCTrainer(cfg)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 144, in __init__
+    self.train_loader, self.val_loader = self._build_dataloaders()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 202, in _build_dataloaders
+    subgoal_horizon_k=self.cfg.dataset.subgoal_horizon_k
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\dictconfig.py", line 359, in __getattr__
+    self._format_and_raise(key=key, value=None, cause=e)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\base.py", line 231, in _format_and_raise
+    format_and_raise(
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\_utils.py", line 819, in format_and_raise
+    _raise(ex, cause)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\_utils.py", line 797, in _raise
+    raise ex.with_traceback(sys.exc_info()[2])  # set env var OC_CAUSE=1 for full trace
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\dictconfig.py", line 351, in __getattr__
+    return self._get_impl(
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\dictconfig.py", line 442, in _get_impl
+    node = self._get_child(
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\basecontainer.py", line 73, in _get_child
+    child = self._get_node(
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\dictconfig.py", line 475, in _get_node
+    self._validate_get(key)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\dictconfig.py", line 164, in _validate_get
+    self._format_and_raise(
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\base.py", line 231, in _format_and_raise
+    format_and_raise(
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\_utils.py", line 899, in format_and_raise
+    _raise(ex, cause)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\omegaconf\_utils.py", line 797, in _raise
+    raise ex.with_traceback(sys.exc_info()[2])  # set env var OC_CAUSE=1 for full trace
+omegaconf.errors.ConfigAttributeError: Key 'subgoal_horizon_k' is not in struct
+    full_key: dataset.subgoal_horizon_k
+    object_type=dict

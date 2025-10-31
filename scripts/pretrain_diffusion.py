@@ -72,10 +72,24 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-# Project-Specific
-from utils.controller_dataset import HierarchicalControllerDataset, collate_fn # Use the new dataset
-from models.diffusion_policy import DiffusionPolicy, NoiseSchedulerConfig
+try:
+    num_cores = len(os.sched_getaffinity(0))
+except AttributeError:
+    # os.sched_getaffinity is not available on Windows, use os.cpu_count()
+    num_cores = os.cpu_count()
 
+# 2. Set the number of threads for PyTorch.
+if num_cores:
+    torch.set_num_threads(num_cores)
+    print(f" PyTorch has been instructed to use all {num_cores} available CPU cores.")
+else:
+    print(" Could not determine the number of CPU cores. Using PyTorch defaults.")
+
+from transformers import get_scheduler
+# Project-Specific
+from utils.controller_dataset import HierarchicalControllerDataset, collate_fn, hierarchical_collate_fn
+from models.diffusion_policy import DiffusionPolicy, NoiseSchedulerConfig
+from utils.samplers import EpisodeAwareSampler
 # Setup a logger for the script
 log = logging.getLogger(__name__)
 
@@ -154,9 +168,23 @@ class ControllerBCTrainer:
             lr=cfg.optimizer.lr,
             weight_decay=cfg.optimizer.weight_decay,
         )
-        self.lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=cfg.training.epochs * len(self.train_loader),
+
+        # Configure the SOTA scheduler with warmup
+        warmup_steps_config = self.cfg.optimizer.get('warmup_steps', 0)
+        total_steps = self.cfg.training.epochs * len(self.train_loader)
+        
+        if isinstance(warmup_steps_config, float):
+            num_warmup_steps = int(total_steps * warmup_steps_config)
+        else:
+            num_warmup_steps = int(warmup_steps_config)
+
+        log.info(f"Configuring LR scheduler: Total steps={total_steps}, Warmup steps={num_warmup_steps}")
+
+        self.lr_scheduler = get_scheduler(
+            name="cosine",  # or "linear"
+            optimizer=self.optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=total_steps
         )
 
         # --- Setup AMP ---
@@ -173,49 +201,61 @@ class ControllerBCTrainer:
 
   
     def _build_dataloaders(self) -> Tuple[DataLoader, Optional[DataLoader]]:
-        """SOTA: Constructs train and validation dataloaders using a robust random split."""
-        # --- START OF SOTA PATCH 1 ---
-        full_dataset = HierarchicalControllerDataset(
-            dataset_path=self.cfg.dataset.path,
+        """
+        Constructs train and validation dataloaders from separate dataset paths
+        and uses the EpisodeAwareSampler for high-performance training.
+        """
+        pin_memory_enabled = (self.device.type == 'cuda')
+
+        # 1. Instantiate the Training Dataset
+        log.info(f"Loading TRAINING dataset from: {self.cfg.dataset.train_path}")
+        train_dataset = HierarchicalControllerDataset(
+            dataset_path=self.cfg.dataset.train_path,
             observation_horizon=self.cfg.model.observation_horizon,
             action_horizon=self.cfg.model.action_horizon,
             subgoal_horizon_k=self.cfg.dataset.subgoal_horizon_k
         )
         
-        # Split dataset (e.g., 95% train, 5% val)
-        val_split = self.cfg.dataset.get("val_split", 0.05)
-        total_len = len(full_dataset)
-        val_len = int(total_len * val_split)
-        train_len = total_len - val_len
-        log.info(f"Splitting dataset: Train={train_len}, Val={val_len}")
-
-        # Ensure consistent split across runs
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            full_dataset, [train_len, val_len],
-            generator=torch.Generator().manual_seed(self.cfg.seed)
+        # 2. Use the EpisodeAwareSampler for the training loader
+        train_sampler = EpisodeAwareSampler(
+            dataset=train_dataset,
+            shuffle=True,
+            seed=self.cfg.seed
         )
-        # --- END OF SOTA PATCH 1 ---
+        log.info("Using EpisodeAwareSampler for training to optimize I/O.")
 
-        pin_memory_enabled = (self.device.type == 'cuda')
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.cfg.dataset.batch_size,
-            shuffle=True,
+            sampler=train_sampler,  # Use the custom sampler
+            shuffle=False,          # Sampler handles shuffling
             num_workers=self.cfg.dataset.num_workers,
             pin_memory=pin_memory_enabled,
-            collate_fn=collate_fn,
+            collate_fn=hierarchical_collate_fn,
             drop_last=True,
         )
 
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.cfg.dataset.batch_size,
-            shuffle=False,
-            num_workers=self.cfg.dataset.num_workers,
-            pin_memory=pin_memory_enabled,
-            collate_fn=collate_fn,
-        ) if val_len > 0 else None
-        
+        # 3. Instantiate the Validation Dataset (if path is provided)
+        val_loader = None
+        if self.cfg.dataset.get("val_path"):
+            log.info(f"Loading VALIDATION dataset from: {self.cfg.dataset.val_path}")
+            val_dataset = HierarchicalControllerDataset(
+                dataset_path=self.cfg.dataset.val_path,
+                observation_horizon=self.cfg.model.observation_horizon,
+                action_horizon=self.cfg.model.action_horizon,
+                subgoal_horizon_k=self.cfg.dataset.subgoal_horizon_k
+            )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=self.cfg.dataset.batch_size,
+                shuffle=False, # No shuffling or special sampler needed for validation
+                num_workers=self.cfg.dataset.num_workers,
+                pin_memory=pin_memory_enabled,
+                collate_fn=hierarchical_collate_fn,
+            )
+        else:
+            log.warning("No `dataset.val_path` provided. Validation will not be run.")
+            
         return train_loader, val_loader
 
 
@@ -223,7 +263,7 @@ class ControllerBCTrainer:
     def _build_policy(self) -> DiffusionPolicy:
         """Constructs the DiffusionPolicy from the configuration."""
         try:
-            proprio_dim = self.train_loader.dataset.dataset.expert_reader.get_proprioception_dim()
+            proprio_dim = self.train_loader.dataset.expert_reader.get_proprioception_dim()
             log.info(f"Inferred proprioception dimension from dataset: {proprio_dim}")
         except Exception as e:
             log.critical(f"FATAL: Failed to infer proprioception dimension from the dataset. "
@@ -261,27 +301,137 @@ class ControllerBCTrainer:
         )
         return policy
 
+
+
+
+
     def _load_checkpoint(self, path: Path):
-        """Loads a full training state from a checkpoint file."""
+        """
+        Loads a full training state, performing SOTA "checkpoint surgery" to:
+        1. Migrate all compatible weights from previous architectures.
+        2. Warm-start new components (subgoal encoder) using pre-trained weights.
+        3. Safely reset the optimizer state after migration.
+        """
         if not path.exists():
             log.warning(f"Checkpoint not found at {path}, starting from scratch.")
             return
-        log.info(f"Resuming training from checkpoint: {path}")
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        self.policy.load_state_dict(ckpt["policy_state_dict"])
-        if self.policy.ema and "ema_state_dict" in ckpt:
-            self.policy.ema.load_state_dict(ckpt["ema_state_dict"])
-        self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        self.lr_scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        self.start_epoch = ckpt["epoch"] + 1
-        self.global_step = ckpt["global_step"]
-        self.best_val_loss = ckpt.get("best_val_loss", float("inf"))
 
-        # Load random states for perfect reproducibility
-        if "rng_states" in ckpt:
-            torch.set_rng_state(ckpt["rng_states"]["torch"])
-            np.random.set_state(ckpt["rng_states"]["numpy"])
-            random.setstate(ckpt["rng_states"]["random"])
+        log.info(f"Loading checkpoint for migration/resumption: {path}")
+        # Load checkpoint to CPU first to perform surgery safely.
+        ckpt = torch.load(path, map_location=torch.device('cpu'), weights_only=False)
+        
+        # Helper function to perform the migration for any state dict.
+        def _migrate_and_warm_start(state_dict_to_migrate, new_model_template):
+            migrated_dict = {}
+            is_migrated = False
+
+            # --- Stage 1: Direct Migration ---
+            for key, value in state_dict_to_migrate.items():
+                new_key = key
+                if key.startswith("vision_fusion_encoder.primary_encoder."):
+                    new_key = key.replace("vision_fusion_encoder.primary_encoder.", "primary_encoder.", 1)
+                elif key.startswith("vision_fusion_encoder.wrist_encoder."):
+                    new_key = key.replace("vision_fusion_encoder.wrist_encoder.", "wrist_encoder.", 1)
+                elif key.startswith("vision_fusion_encoder.proprio_proj."):
+                    new_key = key.replace("vision_fusion_encoder.proprio_proj.", "proprio_proj.", 1)
+                elif key.startswith("vision_fusion_encoder.fusion_proj."): # Fixes Flaw 1
+                    new_key = key.replace("vision_fusion_encoder.fusion_proj.", "vision_proj.", 1)
+                elif key == "uncond_proprio_embedding":
+                    new_key = "uncond_embeddings.proprio"
+                elif key == "uncond_vis_embedding": # Fixes Flaw 1
+                    new_key = "uncond_embeddings.vision"
+                elif "vision_fusion_encoder.fusion_attention" in key:
+                    continue # Skip obsolete keys
+
+                if new_key != key:
+                    is_migrated = True
+                migrated_dict[new_key] = value
+            
+            if is_migrated:
+                log.info("Migration rules applied to checkpoint.")
+
+            # --- Stage 2: SOTA Warm-Starting (Fixes Flaw 2) ---
+            # Warm-start subgoal_encoder from primary_encoder weights
+            primary_keys = [k for k in migrated_dict if k.startswith("primary_encoder.")]
+            if not primary_keys:
+                log.warning("Could not find `primary_encoder` weights for warm-starting. `subgoal_encoder` will be random.")
+            else:
+                for key in primary_keys:
+                    # Create the new key for the subgoal_encoder
+                    new_key = key.replace("primary_encoder.", "subgoal_encoder.", 1)
+                    # Copy the value
+                    migrated_dict[new_key] = migrated_dict[key].clone() # Use .clone() for safety
+                log.info("Warm-started `subgoal_encoder` with `primary_encoder` weights.")
+
+            # Rule 10: Warm-start uncond_embeddings.subgoal from uncond_embeddings.vision
+            vision_uncond_key = "uncond_embeddings.vision"
+            subgoal_uncond_key = "uncond_embeddings.subgoal"
+            
+            if vision_uncond_key in migrated_dict:
+                # Get the source tensor from the old checkpoint.
+                vision_uncond_tensor = migrated_dict[vision_uncond_key]
+                
+                # Perform intelligent slicing instead of a direct clone.
+                # The 'vision' uncond embedding has shape (1, H_o, D).
+                # The 'subgoal' uncond embedding needs shape (1, 1, D).
+                # Slicing with [:, 0:1, :] takes the first token while preserving the sequence dimension.
+                subgoal_uncond_tensor = vision_uncond_tensor[:, 0:1, :].clone()
+                
+                # Assign the correctly-shaped tensor to the dictionary.
+                migrated_dict[subgoal_uncond_key] = subgoal_uncond_tensor
+                
+                # Add robust logging to confirm the operation.
+                log.info(f"Warm-started `{subgoal_uncond_key}` (shape {subgoal_uncond_tensor.shape}) "
+                         f"using the first token of `{vision_uncond_key}` (shape {vision_uncond_tensor.shape}).")
+            else:
+                log.warning(f"Could not find `{vision_uncond_key}` for warm-starting. `{subgoal_uncond_key}` will be random.")
+            
+            # --- END: ROBUST PATCH ---
+            
+            return migrated_dict, is_migrated
+
+        # --- Apply migration to the main policy weights ---
+        policy_state_dict = ckpt["policy_state_dict"]
+        migrated_policy_dict, migration_occured = _migrate_and_warm_start(policy_state_dict, self.policy)
+        
+        incompatible_keys = self.policy.load_state_dict(migrated_policy_dict, strict=False)
+        if incompatible_keys.missing_keys:
+            log.warning(f"Policy weights not found in checkpoint (likely new layers): {incompatible_keys.missing_keys}")
+        if incompatible_keys.unexpected_keys:
+            log.warning(f"Checkpoint weights ignored (obsolete layers): {incompatible_keys.unexpected_keys}")
+        log.info("Policy state dict loaded successfully.")
+
+        # --- Apply migration to EMA weights ---
+        if self.policy.ema and "ema_state_dict" in ckpt:
+            ema_state_dict = ckpt["ema_state_dict"]
+            migrated_ema_dict, _ = _migrate_and_warm_start(ema_state_dict, self.policy.ema.ema_model)
+            self.policy.ema.load_state_dict(migrated_ema_dict, strict=False)
+            log.info("EMA state dict loaded successfully.")
+
+        # --- Safely Load Optimizer, Scheduler, and Training State (Fixes Flaw 3) ---
+        if migration_occured:
+            log.warning("Model architecture changed. Starting with a fresh optimizer and scheduler from Epoch 1.")
+            self.start_epoch = 1
+            self.global_step = 0
+        else:
+            # If no migration happened, it's a normal resumption.
+            log.info("No migration needed. Resuming optimizer, scheduler, and epoch count.")
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            self.lr_scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            self.start_epoch = ckpt["epoch"] + 1
+            self.global_step = ckpt["global_step"]
+            self.best_val_loss = ckpt.get("best_val_loss", float("inf"))
+            if "rng_states" in ckpt:
+                torch.set_rng_state(ckpt["rng_states"]["torch"])
+                np.random.set_state(ckpt["rng_states"]["numpy"])
+                random.setstate(ckpt["rng_states"]["random"])
+            log.info(f"Successfully resumed training state. Starting from epoch {self.start_epoch}.")
+            
+
+
+
+
+
 
     def _train_one_epoch(self, epoch: int):
         """Runs a single epoch of training."""
