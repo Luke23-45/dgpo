@@ -1,0 +1,24 @@
+planner_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_5.ckpt
+evaluation:
+  goal_image_path: path/to/your/final_goal_image.png
+  seed: 42
+planner:
+  subgoal_horizon_k: 8
+inference:
+  device: cpu
+  planner_inference_steps: 20
+environment:
+  xml_path: envs/panda_pick_place.xml
+  max_episode_steps: 400
+data_preprocessing:
+  image_size:
+  - 224
+  - 224
+  img_mean:
+  - 0.48145466
+  - 0.4578275
+  - 0.40821073
+  img_std:
+  - 0.26862954
+  - 0.26130258
+  - 0.27577711

@@ -1,0 +1,63 @@
+# FILE: configs/eval_planner_config.yaml
+# Hydra Configuration for ViDHiS Planner Evaluation
+
+hydra:
+  run:
+    dir: outputs/eval_planner/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: true
+
+seed: 42 # Use the same seed as training for train/val split consistency
+
+# --- Paths ---
+# REQUIRED: Path to the PyTorch Lightning checkpoint (.ckpt) from your training run.
+planner_ckpt_path: "/content/drive/MyDrive/pda/Models/backup_epoch_7.ckpt" # <-- EXAMPLE, CHANGE THIS
+
+# REQUIRED: Path to the dataset used for training. The script will derive the
+# validation split from this file using the same seed and split percentage.
+dataset_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+
+# --- Data Preprocessing (MUST BE IDENTICAL TO TRAINING) ---
+# These values are used to denormalize images for visualization.
+data_preprocessing:
+  image_size: [224, 224]
+  img_mean: [0.48145466, 0.4578275, 0.40821073]
+  img_std: [0.26862954, 0.26130258, 0.27577711]
+
+# --- Dataset Config (MUST BE IDENTICAL TO TRAINING) ---
+# This is used by the dataset loader.
+dataset:
+  subgoal_horizon_k: 8
+
+# --- Inference Parameters ---
+inference:
+  # Change this to "cuda" if you have a GPU available for evaluation.
+  device: "cuda"
+  # This should match the number of steps used during the "full validation" in training.
+  planner_inference_steps: 20
+  # Keep these optimizations enabled.
+  use_torch_compile: true
+  torch_compile_mode: "reduce-overhead"
+  cpu_threads: null # null = auto-detect all available cores
+
+# --- Evaluation Parameters ---
+evaluation:
+  # The training script used a separate val_path. To evaluate on that *same* data,
+  # you should set `dataset_path` above to your *validation* dataset path and set
+  # `val_split` to 1.0. Or, if you used a split from a single file, this must match.
+  val_split: 1.0 # Assuming dataset_path points to the validation set.
+  batch_size: 4 # Use a small batch size that fits your CPU/GPU memory.
+  num_workers: 0 # Safest for CPU and LMDB.
+  run_quantitative: false # Run metrics (LPIPS, SSIM, PSNR)
+  run_qualitative: true  # Generate video rollouts
+  num_video_rollouts: 5  # How many full episode videos to record
+  video_fps: 20
+
+# --- Visualization Parameters ---
+visualization:
+  video_fps: 20
+
+# --- Model & Scheduler Sections (REMOVED) ---
+# The evaluation script is now SOTA because it loads these parameters directly
+# from the checkpoint's `hyper_parameters`. Defining them here is redundant
+# and was the source of potential errors. We have removed them for robustness.

@@ -28,7 +28,8 @@ from torchvision import transforms
 import imageio # For saving videos
 import matplotlib.pyplot as plt
 import cv2 # For resizing if needed, ensure opencv-python-headless installed
-
+from torch import nn
+import json
 # Project Imports
 try:
     # Assuming standard project structure from previous steps
@@ -50,88 +51,109 @@ log = logging.getLogger(__name__)
 # --- Helper Functions ---
 
 def load_models(cfg: DictConfig, device: torch.device) -> Tuple[nn.Module, nn.Module]:
-    """Loads Planner and Controller models from checkpoints."""
-    log.info("Loading models...")
+    """
+    Loads Planner and Controller models from checkpoints using a SOTA, robust
+    method that infers architecture from the checkpoint's hyperparameters.
+    """
+    log.info("--- Loading SOTA Models ---")
 
     # --- Load Planner ---
     planner_path = Path(cfg.planner_ckpt_path)
     if not planner_path.exists():
         raise FileNotFoundError(f"Planner checkpoint not found: {planner_path}")
-    try:
-        # Assuming Planner uses PyTorch Lightning checkpoints
-        # Need to instantiate model first, then load state_dict OR use PL load_from_checkpoint
-        # Let's assume loading state_dict into a fresh instance for simplicity
-        planner = VisualPlannerDiffusion(
-             # Re-instantiate with config used during training (or load from ckpt's hparams)
-             # Assuming config structure matches model's __init__
-             image_size=cfg.model.planner.image_size,
-             vit_model_name=cfg.model.planner.vit_model_name,
-             # ... other planner args from its config ...
-        )
-        # Load state dict (adjust based on how checkpoints are saved)
-        # If saved via PL: state = torch.load(planner_path, map_location=device)['state_dict']
-        # Need to strip "model." prefix if saved by PL
-        state = torch.load(planner_path, map_location=device)
-        if 'state_dict' in state: state = state['state_dict']
-        planner_state_dict = {k.replace("model.", ""): v for k, v in state.items()}
-        planner.load_state_dict(planner_state_dict)
-        log.info(f"Loaded Planner state dict from {planner_path}")
+    
+    log.info(f"Loading Planner from: {planner_path}")
+    planner_ckpt = torch.load(planner_path, map_location=device)
+    
+    # SOTA: Instantiate the model using hyperparameters saved in the checkpoint.
+    # This ensures the architecture is identical to the one used during training.
+    planner_hparams = planner_ckpt['hyper_parameters']
+    planner = VisualPlannerDiffusion(**planner_hparams).to(device)
+    
+    # Robustly load the state dict, stripping the "model." prefix added by Lightning.
+    planner_state_dict = {k.replace("model.", ""): v for k, v in planner_ckpt['state_dict'].items()}
+    planner.load_state_dict(planner_state_dict)
+    planner.eval()
+    log.info("Planner loaded successfully.")
 
-    except Exception as e:
-        log.exception(f"Error loading Planner from {planner_path}: {e}")
-        raise
-    planner = planner.to(device).eval()
-
-    # --- Load Controller (Adapted DiffusionPolicy) ---
+    # --- Load Controller ---
     controller_path = Path(cfg.controller_ckpt_path)
     if not controller_path.exists():
         raise FileNotFoundError(f"Controller checkpoint not found: {controller_path}")
-    try:
-        # Re-instantiate adapted DiffusionPolicy
-        # Needs config details matching its training
-        # We need proprio_dim - should be in config or loadable from checkpoint
-        proprio_dim = cfg.model.controller.proprio_dim # Add this to config
-        controller = DiffusionPolicy(
-            proprio_dim=proprio_dim,
-            H_o=cfg.model.controller.observation_horizon,
-            H_a=cfg.model.controller.action_horizon,
-            action_dim=cfg.model.controller.action_dim, # Get from config
-            image_feat_dim=cfg.model.controller.image_feat_dim,
-            scheduler_cfg=NoiseSchedulerConfig(**cfg.scheduler), # Assuming same scheduler
-            d_model=cfg.model.controller.d_model,
-            denoiser_layers=cfg.model.controller.denoiser_layers,
-            denoiser_heads=cfg.model.controller.denoiser_heads,
-            # Ensure subgoal conditioning adaptation is included here if structural
-            device=device
-        )
-        # Load state dict (adjust based on how controller checkpoints are saved)
-        state = torch.load(controller_path, map_location=device)
-        # Handle potential nesting (e.g., if saved within a trainer checkpoint)
-        if 'state_dict' in state: state = state['state_dict'] # Common PL format
-        if 'model' in state: state = state['model'] # Another common format
-        if 'actor_state_dict' in state: state = state['actor_state_dict'] # From RL checkpoint
-        # Strip "diffusion_policy." prefix if saved via DiffusionActor wrapper
-        controller_state_dict = {k.replace("diffusion_policy.", ""): v for k, v in state.items()}
-        controller.load_state_dict(controller_state_dict)
-        log.info(f"Loaded Controller state dict from {controller_path}")
 
-    except Exception as e:
-        log.exception(f"Error loading Controller from {controller_path}: {e}")
-        raise
-    controller = controller.to(device).eval()
+    log.info(f"Loading Controller from: {controller_path}")
+    controller_ckpt = torch.load(controller_path, map_location=device)
+    
+    # SOTA: Instantiate using the config saved in our manual checkpoint.
+    controller_cfg = controller_ckpt['config']
+    model_cfg = controller_cfg['model']
+    scheduler_cfg_dict = controller_cfg['scheduler']
 
-    # Apply torch.compile if configured and available
+    controller = DiffusionPolicy(
+        proprio_dim=model_cfg['proprio_dim'],
+        H_o=model_cfg['observation_horizon'],
+        H_a=model_cfg['action_horizon'],
+        action_dim=model_cfg['action_dim'],
+        image_feat_dim=model_cfg['image_feat_dim'],
+        d_model=model_cfg['d_model'],
+        denoiser_layers=model_cfg['denoiser_layers'],
+        denoiser_heads=model_cfg['denoiser_heads'],
+        scheduler_cfg=NoiseSchedulerConfig(**scheduler_cfg_dict),
+        device=device
+    )
+    
+    # Robustly load the state dicts for both the policy and the EMA model.
+    controller.load_state_dict(controller_ckpt['policy_state_dict'])
+    if controller.ema and 'ema_state_dict' in controller_ckpt:
+        controller.ema.load_state_dict(controller_ckpt['ema_state_dict'])
+        log.info("Controller EMA weights loaded successfully.")
+    
+    controller.eval()
+    log.info("Controller loaded successfully.")
+
+    # Apply torch.compile if configured
     if cfg.inference.use_torch_compile and hasattr(torch, "compile"):
         log.info(f"Applying torch.compile (mode='{cfg.inference.torch_compile_mode}')...")
-        try:
-            planner = torch.compile(planner, mode=cfg.inference.torch_compile_mode)
-            controller = torch.compile(controller, mode=cfg.inference.torch_compile_mode)
-            log.info("torch.compile applied successfully.")
-        except Exception as e:
-            log.warning(f"torch.compile failed: {e}. Continuing without compilation.")
+        planner = torch.compile(planner, mode=cfg.inference.torch_compile_mode)
+        controller = torch.compile(controller, mode=cfg.inference.torch_compile_mode)
 
     return planner, controller
 
+
+
+def preprocess_obs_history(obs_history_dict: Dict[str, np.ndarray],
+                           cfg: DictConfig,
+                           device: torch.device) -> Dict[str, torch.Tensor]:
+    """
+    Takes a dictionary of NumPy observation histories (H, ...), converts them
+    to batched PyTorch Tensors (1, H, ...), and applies training-time normalization.
+    """
+    batched_tensors = {}
+    
+    # Define image transforms
+    img_size = tuple(cfg.data_preprocessing.image_size)
+    img_mean = tuple(cfg.data_preprocessing.img_mean)
+    img_std = tuple(cfg.data_preprocessing.img_std)
+    transform = transforms.Compose([
+        transforms.ToTensor(), # HWC:uint8 -> CHW:float[0,1]
+        transforms.Resize(img_size, antialias=True),
+        transforms.Normalize(mean=img_mean, std=img_std)
+    ])
+
+    for key, value in obs_history_dict.items():
+        if 'image' in key:
+            # Handle image history (H, H_img, W_img, C)
+            # Apply transform to each image in the history
+            processed_imgs = [transform(img) for img in value]
+            tensor = torch.stack(processed_imgs, dim=0)
+        else:
+            # Handle proprioception history (H, D_proprio)
+            tensor = torch.from_numpy(value).float()
+        
+        # Add a batch dimension and move to the target device
+        batched_tensors[key] = tensor.unsqueeze(0).to(device)
+        
+    return batched_tensors
 
 def load_and_preprocess_goal(cfg: DictConfig, device: torch.device) -> torch.Tensor:
     """Loads and preprocesses the final goal image."""
@@ -250,19 +272,20 @@ def run_vidhis_evaluation(cfg: DictConfig):
 
     # --- Initialize Environment ---
     log.info("Initializing environment...")
-    # Use _build_single_env for consistency, though VecEnv wrapper isn't strictly needed for n=1
-    env = RLFineTuner._build_single_env(None, cfg, rank=0, is_eval=True) # Assuming helper is part of RLFineTuner
-    # Need observation/action horizons from config
+    # Create the environment directly using the configuration.
+    # Assumes your config has `environment.env_kwargs` section.
+    env = PandaEnv(**cfg.environment.env_kwargs)
+    
+    # Wrap with a time limit for safety during evaluation.
+    env = gym.wrappers.TimeLimit(env, max_episode_steps=cfg.environment.max_episode_steps)
+    
     obs_horizon = cfg.model.controller.observation_horizon
-    # Need single_step_obs_space, get it from env
-    # IMPORTANT: Need to handle potential wrappers like TimeLimit to get base env space
-    base_env = env.unwrapped
-    while hasattr(base_env, "env"): # Unwrap potential nested wrappers
-         base_env = base_env.env
-         if isinstance(base_env, PandaEnv): break # Found it
-    if not isinstance(base_env, PandaEnv): raise TypeError("Could not find PandaEnv instance.")
-
-    obs_history_buffer = ObsHistoryBuffer(n_envs=1, history_len=obs_horizon, obs_space=base_env.observation_space)
+    # Get the base observation space from the unwrapped environment for the buffer.
+    obs_space = env.unwrapped.observation_space if hasattr(env, 'unwrapped') else env.observation_space
+    
+    # The ObsHistoryBuffer needs to be imported from our new utils file.
+    # Make sure you have `from utils.data_utils import ObsHistoryBuffer` at the top.
+    obs_history_buffer = ObsHistoryBuffer(n_envs=1, history_len=obs_horizon, obs_space=obs_space)
     log.info("Environment and history buffer initialized.")
 
     # --- Evaluation Loop ---
@@ -290,14 +313,17 @@ def run_vidhis_evaluation(cfg: DictConfig):
             loop_start_time = time.time()
 
             # 1. Prepare Inputs
-            obs_history_batch = { # Add batch dim for models
-                k: torch.as_tensor(v[np.newaxis, ...], device=device).float()
-                for k, v in current_hist_obs_dict.items()
-            }
-            # Assuming 'image_primary' is the key for the main camera
-            current_image_tensor = obs_history_batch['image_primary'][:, -1, ...] # Get last image in history (B, C, H, W)
-            progress_scalar = torch.tensor([[step_count / max_steps]], device=device, dtype=torch.float32) # Shape (1, 1)
+            current_hist_obs_dict_np = obs_history_buffer.get_stacked(0)
 
+            # 2. Preprocess the NumPy history into normalized PyTorch Tensors.
+            obs_history_batch_tensors = preprocess_obs_history(
+                current_hist_obs_dict_np, cfg, device
+            )
+
+            # 3. Prepare inputs for the Planner model.
+            current_image_tensor = obs_history_batch_tensors['image_primary'][:, -1, ...]
+            progress_scalar = torch.tensor([step_count / max_steps], device=device) # Shape (B,)
+            
             # 2. Planner Inference
             try:
                 with torch.no_grad():
@@ -318,12 +344,12 @@ def run_vidhis_evaluation(cfg: DictConfig):
             # 3. Controller Inference
             try:
                 with torch.no_grad():
-                    # Controller needs obs history and the generated subgoal
-                    # Assuming controller adapted to take subgoal tensor directly
-                    action_trajectory_tensor = controller.predict_action( # Check method name
-                        obs_history_batch, # (B, H, ...)
-                        subgoal_img_tensor # (B, C, H, W)
-                    ) # Output shape (B, H_a, A_dim)
+                    # Call the correct `sample` method with the correctly preprocessed arguments.
+                    action_trajectory_tensor = controller.sample(
+                        obs=obs_history_batch_tensors,
+                        subgoal_image=subgoal_img_tensor,
+                        guidance_scale=cfg.inference.controller_guidance_scale
+                    ) # Output shape (1, H_a, A_dim)
             except Exception as e:
                  log.exception("Error during Controller inference. Ending episode.")
                  break

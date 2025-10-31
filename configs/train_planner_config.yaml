@@ -11,7 +11,7 @@ seed: 42
 #  train_path: "c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"
 # --- Dataset Configuration ---
 dataset:
-  train_path: "/content/drive/MyDrive/pda/data/shard_001/expert_training_run_99914b93_part001.lmdb"
+  train_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
   val_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
   # train_path: "c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"
   # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb"
@@ -87,7 +87,7 @@ training:
   run_full_validation_every_n_epoch: 5 
   limit_lpips_batches: 50
   save_top_k_checkpoints: 3
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/Models/backup_epoch_5.ckpt"
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/Models/backup_epoch_7.ckpt"
   max_steps: -1 # Optionally set a max number of steps instead of epochs
 
 # --- Optimizer Configuration ---

@@ -1,0 +1,55 @@
+[2025-10-31 13:27:07,625][__main__][INFO] - ----------- ViDHiS Planner Evaluation -----------
+[2025-10-31 13:27:07,625][__main__][INFO] - Output Directory: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\eval_planner\2025-10-31\13-27-07
+[2025-10-31 13:27:07,628][__main__][INFO] - seed: 42
+planner_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_5.ckpt
+dataset_path: c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+data_preprocessing:
+  image_size:
+  - 224
+  - 224
+  img_mean:
+  - 0.48145466
+  - 0.4578275
+  - 0.40821073
+  img_std:
+  - 0.26862954
+  - 0.26130258
+  - 0.27577711
+dataset:
+  subgoal_horizon_k: 8
+inference:
+  device: cpu
+  planner_inference_steps: 20
+  use_torch_compile: true
+  torch_compile_mode: reduce-overhead
+  cpu_threads: null
+evaluation:
+  val_split: 1.0
+  batch_size: 4
+  num_workers: 0
+  run_quantitative: true
+  run_qualitative: true
+  num_video_rollouts: 5
+visualization:
+  video_fps: 10
+
+[2025-10-31 13:27:07,630][__main__][INFO] - -------------------------------------------------
+[2025-10-31 13:27:07,637][__main__][WARNING] - Running evaluation on CPU. LPIPS metric will be slow.
+[2025-10-31 13:27:07,637][__main__][WARNING] - Failed to set CPU thread counts: '<' not supported between instances of 'NoneType' and 'int'
+[2025-10-31 13:27:07,638][__main__][INFO] - Loading dataset from: c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+[2025-10-31 13:27:07,639][utils.planner_dataset][INFO] - Initializing underlying ExpertTrajectoryDataset reader...
+[2025-10-31 13:27:07,640][utils.expert_dataset][INFO] - Loading index from c:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93_index.json...
+[2025-10-31 13:27:07,646][utils.expert_dataset][INFO] - Loaded 260 episodes, 67656 total valid chunks (Virtually Indexed).
+[2025-10-31 13:27:07,646][utils.planner_dataset][INFO] - Loaded index for 260 episodes.
+[2025-10-31 13:27:07,654][utils.planner_dataset][INFO] - Precomputed 65576 valid planner samples (k=8).
+[2025-10-31 13:27:07,655][__main__][INFO] - Splitting dataset with seed 42: Train=0, Val=65576
+[2025-10-31 13:27:07,665][__main__][INFO] - Loading Planner checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_5.ckpt
+[2025-10-31 13:27:09,195][models.planner][INFO] - Initializing SOTA VisualPlannerDiffusion with Vision Encoder: openai/clip-vit-base-patch32
+[2025-10-31 13:27:10,576][models.planner][INFO] - Freezing Vision Encoder (CLIP) weights.
+[2025-10-31 13:27:10,578][models.planner][INFO] - Conditioning dim: 1600, U-Net Cross Attention dim: 1600
+[2025-10-31 13:27:10,578][models.planner][INFO] - Initializing Diffusion U-Net...
+[2025-10-31 13:27:11,634][models.planner][INFO] - SOTA Planner components initialized.
+[2025-10-31 13:27:12,014][__main__][INFO] - Successfully performed checkpoint surgery and loaded VisualPlannerDiffusion state dict.
+[2025-10-31 13:27:12,063][__main__][INFO] - Applying torch.compile (mode='reduce-overhead')...
+[2025-10-31 13:27:14,059][__main__][INFO] - Starting quantitative evaluation (LPIPS, SSIM, PSNR)...
+[2025-10-31 13:27:14,612][lmdb_utils][INFO] -  Opened LMDB at c:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93.lmdb | mode=RO | file-mode

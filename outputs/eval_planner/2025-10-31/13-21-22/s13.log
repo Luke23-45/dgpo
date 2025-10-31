@@ -1,0 +1,71 @@
+[2025-10-31 13:21:22,085][__main__][INFO] - ----------- ViDHiS Planner Evaluation -----------
+[2025-10-31 13:21:22,086][__main__][INFO] - Output Directory: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\eval_planner\2025-10-31\13-21-22
+[2025-10-31 13:21:22,089][__main__][INFO] - seed: 42
+planner_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_5.ckpt
+dataset_path: c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+data_preprocessing:
+  image_size:
+  - 224
+  - 224
+  img_mean:
+  - 0.48145466
+  - 0.4578275
+  - 0.40821073
+  img_std:
+  - 0.26862954
+  - 0.26130258
+  - 0.27577711
+dataset:
+  subgoal_horizon_k: 8
+inference:
+  device: cpu
+  planner_inference_steps: 20
+  use_torch_compile: true
+  torch_compile_mode: reduce-overhead
+  cpu_threads: null
+evaluation:
+  val_split: 0.05
+  batch_size: 4
+  num_workers: 0
+  run_quantitative: true
+  run_qualitative: true
+  num_video_rollouts: 5
+visualization:
+  video_fps: 10
+
+[2025-10-31 13:21:22,093][__main__][INFO] - -------------------------------------------------
+[2025-10-31 13:21:22,098][__main__][WARNING] - Running evaluation on CPU. LPIPS metric will be slow.
+[2025-10-31 13:21:22,099][__main__][WARNING] - Failed to set CPU thread counts: '<' not supported between instances of 'NoneType' and 'int'
+[2025-10-31 13:21:22,100][__main__][INFO] - Loading dataset from: c:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+[2025-10-31 13:21:22,100][utils.planner_dataset][INFO] - Initializing underlying ExpertTrajectoryDataset reader...
+[2025-10-31 13:21:22,101][utils.expert_dataset][INFO] - Loading index from c:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93_index.json...
+[2025-10-31 13:21:22,106][utils.expert_dataset][INFO] - Loaded 260 episodes, 67656 total valid chunks (Virtually Indexed).
+[2025-10-31 13:21:22,107][utils.planner_dataset][INFO] - Loaded index for 260 episodes.
+[2025-10-31 13:21:22,116][utils.planner_dataset][INFO] - Precomputed 65576 valid planner samples (k=8).
+[2025-10-31 13:21:22,117][__main__][INFO] - Splitting dataset with seed 42: Train=62298, Val=3278
+[2025-10-31 13:21:22,128][__main__][INFO] - Loading Planner checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_5.ckpt
+[2025-10-31 13:21:23,686][models.planner][INFO] - Initializing SOTA VisualPlannerDiffusion with Vision Encoder: openai/clip-vit-base-patch32
+[2025-10-31 13:21:25,684][models.planner][INFO] - Freezing Vision Encoder (CLIP) weights.
+[2025-10-31 13:21:25,686][models.planner][INFO] - Conditioning dim: 1600, U-Net Cross Attention dim: 1600
+[2025-10-31 13:21:25,687][models.planner][INFO] - Initializing Diffusion U-Net...
+[2025-10-31 13:21:26,739][models.planner][INFO] - SOTA Planner components initialized.
+[2025-10-31 13:21:27,116][__main__][ERROR] - Error loading the state_dict into the model: Error(s) in loading state_dict for VisualPlannerDiffusion:
+	Unexpected key(s) in state_dict: "lpips_loss.scaling_layer.shift", "lpips_loss.scaling_layer.scale", "lpips_loss.net.slice1.0.weight", "lpips_loss.net.slice1.0.bias", "lpips_loss.net.slice2.3.weight", "lpips_loss.net.slice2.3.bias", "lpips_loss.net.slice3.6.weight", "lpips_loss.net.slice3.6.bias", "lpips_loss.net.slice4.8.weight", "lpips_loss.net.slice4.8.bias", "lpips_loss.net.slice5.10.weight", "lpips_loss.net.slice5.10.bias", "lpips_loss.lin0.model.1.weight", "lpips_loss.lin1.model.1.weight", "lpips_loss.lin2.model.1.weight", "lpips_loss.lin3.model.1.weight", "lpips_loss.lin4.model.1.weight", "lpips_loss.lins.0.model.1.weight", "lpips_loss.lins.1.model.1.weight", "lpips_loss.lins.2.model.1.weight", "lpips_loss.lins.3.model.1.weight", "lpips_loss.lins.4.model.1.weight". 
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\s13.py", line 129, in load_planner_model
+    planner.load_state_dict(model_state_dict_cleaned)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\nn\modules\module.py", line 2629, in load_state_dict
+    raise RuntimeError(
+RuntimeError: Error(s) in loading state_dict for VisualPlannerDiffusion:
+	Unexpected key(s) in state_dict: "lpips_loss.scaling_layer.shift", "lpips_loss.scaling_layer.scale", "lpips_loss.net.slice1.0.weight", "lpips_loss.net.slice1.0.bias", "lpips_loss.net.slice2.3.weight", "lpips_loss.net.slice2.3.bias", "lpips_loss.net.slice3.6.weight", "lpips_loss.net.slice3.6.bias", "lpips_loss.net.slice4.8.weight", "lpips_loss.net.slice4.8.bias", "lpips_loss.net.slice5.10.weight", "lpips_loss.net.slice5.10.bias", "lpips_loss.lin0.model.1.weight", "lpips_loss.lin1.model.1.weight", "lpips_loss.lin2.model.1.weight", "lpips_loss.lin3.model.1.weight", "lpips_loss.lin4.model.1.weight", "lpips_loss.lins.0.model.1.weight", "lpips_loss.lins.1.model.1.weight", "lpips_loss.lins.2.model.1.weight", "lpips_loss.lins.3.model.1.weight", "lpips_loss.lins.4.model.1.weight". 
+[2025-10-31 13:21:27,123][__main__][ERROR] - Failed to load planner model: Error(s) in loading state_dict for VisualPlannerDiffusion:
+	Unexpected key(s) in state_dict: "lpips_loss.scaling_layer.shift", "lpips_loss.scaling_layer.scale", "lpips_loss.net.slice1.0.weight", "lpips_loss.net.slice1.0.bias", "lpips_loss.net.slice2.3.weight", "lpips_loss.net.slice2.3.bias", "lpips_loss.net.slice3.6.weight", "lpips_loss.net.slice3.6.bias", "lpips_loss.net.slice4.8.weight", "lpips_loss.net.slice4.8.bias", "lpips_loss.net.slice5.10.weight", "lpips_loss.net.slice5.10.bias", "lpips_loss.lin0.model.1.weight", "lpips_loss.lin1.model.1.weight", "lpips_loss.lin2.model.1.weight", "lpips_loss.lin3.model.1.weight", "lpips_loss.lin4.model.1.weight", "lpips_loss.lins.0.model.1.weight", "lpips_loss.lins.1.model.1.weight", "lpips_loss.lins.2.model.1.weight", "lpips_loss.lins.3.model.1.weight", "lpips_loss.lins.4.model.1.weight". . Aborting.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\s13.py", line 459, in main
+    planner = load_planner_model(cfg, device)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\s13.py", line 129, in load_planner_model
+    planner.load_state_dict(model_state_dict_cleaned)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\nn\modules\module.py", line 2629, in load_state_dict
+    raise RuntimeError(
+RuntimeError: Error(s) in loading state_dict for VisualPlannerDiffusion:
+	Unexpected key(s) in state_dict: "lpips_loss.scaling_layer.shift", "lpips_loss.scaling_layer.scale", "lpips_loss.net.slice1.0.weight", "lpips_loss.net.slice1.0.bias", "lpips_loss.net.slice2.3.weight", "lpips_loss.net.slice2.3.bias", "lpips_loss.net.slice3.6.weight", "lpips_loss.net.slice3.6.bias", "lpips_loss.net.slice4.8.weight", "lpips_loss.net.slice4.8.bias", "lpips_loss.net.slice5.10.weight", "lpips_loss.net.slice5.10.bias", "lpips_loss.lin0.model.1.weight", "lpips_loss.lin1.model.1.weight", "lpips_loss.lin2.model.1.weight", "lpips_loss.lin3.model.1.weight", "lpips_loss.lin4.model.1.weight", "lpips_loss.lins.0.model.1.weight", "lpips_loss.lins.1.model.1.weight", "lpips_loss.lins.2.model.1.weight", "lpips_loss.lins.3.model.1.weight", "lpips_loss.lins.4.model.1.weight". 

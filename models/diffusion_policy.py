@@ -195,6 +195,7 @@ class NoiseScheduler:
             x_prev += sigma_t * torch.randn_like(xt)
 
         return x_prev
+  
 
 class ResNetEncoder(nn.Module):
     """
@@ -583,62 +584,54 @@ class DiffusionPolicy(nn.Module):
                ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
         """
         Samples an action sequence from the diffusion model using DDIM and Classifier-Free Guidance.
-
-        This SOTA version ensures a consistent conditioning pipeline with training and
-        implements an efficient batched CFG forward pass.
+        This version is corrected to use our custom NoiseScheduler's API.
         """
-        # 1. Select the model for inference (EMA weights are preferred for stability).
+        # 1. Select the model for inference.
         model = self.ema.ema_model if use_ema and self.ema is not None else self
         model.eval()
         
         B, device = next(iter(obs.values())).shape[0], self.device
-        T = steps if steps is not None else self.scheduler.T
+        num_inference_steps = steps if steps is not None else self.scheduler.T
 
-        # 2. Get the conditional tokens using the unified helper method.
+        # 2. Get conditional and unconditional tokens.
         cond = self._get_condition_tokens(obs, subgoal_image)
         cond_tokens_list = [t for t in cond.values() if t is not None]
         cond_tokens = torch.cat(cond_tokens_list, dim=1)
 
-        # 3. Assemble the unconditional tokens for CFG.
-        #    These are expanded to match the batch size.
-        uncond_tokens_list = [
-            self.uncond_embeddings['vision'].expand(B, -1, -1),
-            self.uncond_embeddings['proprio'].expand(B, -1, -1)
-        ]
+        uncond_tokens_list = [self.uncond_embeddings['vision'].expand(B, -1, -1),
+                              self.uncond_embeddings['proprio'].expand(B, -1, -1)]
         if cond['subgoal'] is not None:
             uncond_tokens_list.append(self.uncond_embeddings['subgoal'].expand(B, -1, -1))
         uncond_tokens = torch.cat(uncond_tokens_list, dim=1)
 
-        # 4. Set up the DDIM scheduler and initialize latents from pure noise.
-        self.scheduler.set_timesteps(T, device=device)
-        timesteps = self.scheduler.timesteps
+        # 3. CORRECTED: Generate the sequence of timesteps manually.
+        # This creates a linear ramp from T-1 down to 0.
+        timesteps = torch.linspace(self.scheduler.T - 1, 0, num_inference_steps, device=device, dtype=torch.long)
+
+        # 4. Initialize latents from pure noise.
         latents = torch.randn((B, self.H_a, self.action_dim), device=device)
         
-        # Optional: store intermediate steps for visualization.
         intermediates = [latents] if return_intermediates else None
 
-        # 5. The DDIM denoising loop.
-        for t in timesteps:
-            # For CFG, we predict noise for both conditional and unconditional inputs in a single batch.
-            # This is more efficient than two separate forward passes.
-            
-            # a. Create a batched input for the denoiser: [unconditional_latents, conditional_latents]
+        # 5. CORRECTED: The DDIM denoising loop, compatible with our scheduler.
+        for i in range(num_inference_steps):
+            t = timesteps[i]
+            # Get the previous timestep, handling the last step where t_prev = -1
+            t_prev = timesteps[i+1] if i < num_inference_steps - 1 else torch.tensor(-1, device=device, dtype=torch.long)
+
+            # Batched forward pass for CFG
             latent_model_input = torch.cat([latents] * 2)
-            
-            # b. Assemble the full context for the denoiser: [unconditional_tokens, conditional_tokens]
             combined_cond_tokens = torch.cat([uncond_tokens, cond_tokens], dim=0)
+            t_batch = torch.cat([t.expand(B)] * 2)
             
-            # c. Predict noise for the combined batch.
-            #    The `t` tensor is also duplicated to match the batch size.
-            noise_pred = model.denoiser(latent_model_input, torch.cat([t.expand(B)] * 2), combined_cond_tokens)
+            noise_pred = model.denoiser(latent_model_input, t_batch, combined_cond_tokens)
             
-            # d. Perform guidance: split the predictions and combine them.
-            #    `guided_noise = uncond_pred + guidance_scale * (cond_pred - uncond_pred)`
+            # Perform guidance
             noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
             guided_noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
             
-            # e. Scheduler step to compute the previous noisy sample (denoise one step).
-            latents = self.scheduler.step(guided_noise_pred, t, latents).prev_sample
+            # Use our custom ddim_step method
+            latents = self.scheduler.ddim_step(latents, t, t_prev, guided_noise_pred)
             
             if return_intermediates:
                 intermediates.append(latents)

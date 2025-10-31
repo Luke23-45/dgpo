@@ -1,0 +1,54 @@
+[2025-10-31 13:39:52,772][__main__][INFO] - ----------- ViDHiS Planner Evaluation -----------
+[2025-10-31 13:39:52,773][__main__][INFO] - Output Directory: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\eval_planner\2025-10-31\13-39-52
+[2025-10-31 13:39:52,776][__main__][INFO] - seed: 42
+planner_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_5.ckpt
+dataset_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb
+data_preprocessing:
+  image_size:
+  - 224
+  - 224
+  img_mean:
+  - 0.48145466
+  - 0.4578275
+  - 0.40821073
+  img_std:
+  - 0.26862954
+  - 0.26130258
+  - 0.27577711
+dataset:
+  subgoal_horizon_k: 8
+inference:
+  device: cpu
+  planner_inference_steps: 20
+  use_torch_compile: true
+  torch_compile_mode: reduce-overhead
+  cpu_threads: null
+evaluation:
+  val_split: 1.0
+  batch_size: 4
+  num_workers: 4
+  run_quantitative: true
+  run_qualitative: true
+  num_video_rollouts: 5
+visualization:
+  video_fps: 20
+
+[2025-10-31 13:39:52,780][__main__][INFO] - -------------------------------------------------
+[2025-10-31 13:39:52,785][__main__][WARNING] - Running evaluation on CPU. LPIPS metric will be slow.
+[2025-10-31 13:39:52,786][__main__][WARNING] - Failed to set CPU thread counts: '<' not supported between instances of 'NoneType' and 'int'
+[2025-10-31 13:39:52,787][__main__][INFO] - Loading dataset from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb
+[2025-10-31 13:39:52,788][utils.planner_dataset][INFO] - Initializing underlying ExpertTrajectoryDataset reader...
+[2025-10-31 13:39:52,788][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validations\expert_validation_run_99914b93_index.json...
+[2025-10-31 13:39:52,790][utils.expert_dataset][INFO] - Loaded 12 episodes, 3041 total valid chunks (Virtually Indexed).
+[2025-10-31 13:39:52,791][utils.planner_dataset][INFO] - Loaded index for 12 episodes.
+[2025-10-31 13:39:52,792][utils.planner_dataset][INFO] - Precomputed 2945 valid planner samples (k=8).
+[2025-10-31 13:39:52,793][__main__][INFO] - Splitting dataset with seed 42: Train=0, Val=2945
+[2025-10-31 13:39:52,794][__main__][INFO] - Loading Planner checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_5.ckpt
+[2025-10-31 13:39:54,278][models.planner][INFO] - Initializing SOTA VisualPlannerDiffusion with Vision Encoder: openai/clip-vit-base-patch32
+[2025-10-31 13:39:57,348][models.planner][INFO] - Freezing Vision Encoder (CLIP) weights.
+[2025-10-31 13:39:57,349][models.planner][INFO] - Conditioning dim: 1600, U-Net Cross Attention dim: 1600
+[2025-10-31 13:39:57,350][models.planner][INFO] - Initializing Diffusion U-Net...
+[2025-10-31 13:39:58,406][models.planner][INFO] - SOTA Planner components initialized.
+[2025-10-31 13:39:58,790][__main__][INFO] - Successfully performed checkpoint surgery and loaded VisualPlannerDiffusion state dict.
+[2025-10-31 13:39:58,842][__main__][INFO] - Applying torch.compile (mode='reduce-overhead')...
+[2025-10-31 13:40:00,379][__main__][INFO] - Starting quantitative evaluation (LPIPS, SSIM, PSNR)...
