@@ -368,21 +368,12 @@ class ControllerBCTrainer:
             subgoal_uncond_key = "uncond_embeddings.subgoal"
             
             if vision_uncond_key in migrated_dict:
-                # Get the source tensor from the old checkpoint.
                 vision_uncond_tensor = migrated_dict[vision_uncond_key]
-                
-                # Perform intelligent slicing instead of a direct clone.
-                # The 'vision' uncond embedding has shape (1, H_o, D).
-                # The 'subgoal' uncond embedding needs shape (1, 1, D).
                 # Slicing with [:, 0:1, :] takes the first token while preserving the sequence dimension.
                 subgoal_uncond_tensor = vision_uncond_tensor[:, 0:1, :].clone()
-                
-                # Assign the correctly-shaped tensor to the dictionary.
                 migrated_dict[subgoal_uncond_key] = subgoal_uncond_tensor
-                
-                # Add robust logging to confirm the operation.
                 log.info(f"Warm-started `{subgoal_uncond_key}` (shape {subgoal_uncond_tensor.shape}) "
-                         f"using the first token of `{vision_uncond_key}` (shape {vision_uncond_tensor.shape}).")
+                        f"using the first token of `{vision_uncond_key}` (shape {vision_uncond_tensor.shape}).")
             else:
                 log.warning(f"Could not find `{vision_uncond_key}` for warm-starting. `{subgoal_uncond_key}` will be random.")
             
@@ -410,22 +401,18 @@ class ControllerBCTrainer:
 
         # --- Safely Load Optimizer, Scheduler, and Training State (Fixes Flaw 3) ---
         if migration_occured:
-            log.warning("Model architecture changed. Starting with a fresh optimizer and scheduler from Epoch 1.")
+            log.warning("Model architecture changed due to checkpoint migration. "
+                        "Starting with a fresh optimizer and scheduler from Epoch 1.")
             self.start_epoch = 1
             self.global_step = 0
-        else:
-            # If no migration happened, it's a normal resumption.
+        elif "optimizer_state_dict" in ckpt:
             log.info("No migration needed. Resuming optimizer, scheduler, and epoch count.")
             self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             self.lr_scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-            self.start_epoch = ckpt["epoch"] + 1
-            self.global_step = ckpt["global_step"]
+            self.start_epoch = ckpt.get("epoch", 0) + 1
+            self.global_step = ckpt.get("global_step", 0)
             self.best_val_loss = ckpt.get("best_val_loss", float("inf"))
-            if "rng_states" in ckpt:
-                torch.set_rng_state(ckpt["rng_states"]["torch"])
-                np.random.set_state(ckpt["rng_states"]["numpy"])
-                random.setstate(ckpt["rng_states"]["random"])
-            log.info(f"Successfully resumed training state. Starting from epoch {self.start_epoch}.")
+            log.info(f"Resumed training state. Starting from epoch {self.start_epoch}.")
             
 
 
@@ -622,7 +609,6 @@ class ControllerBCTrainer:
             wandb.log({
                 "val/denoising_rollout": wandb.Video(str(video_path), fps=20, format="mp4"),
             }, step=self.global_step)
-
 
     def _save_backup_checkpoint(self, epoch: int):
         """

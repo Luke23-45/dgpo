@@ -10,7 +10,7 @@ hydra:
 # ===================================================================
 seed: 42
 device: "cpu"
-resume_checkpoint: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/outputs/diffusion_pretrain/v1/2025-10-25/00-16-18/checkpoints/backup/backup_epoch_19.pth"
+resume_checkpoint: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/outputs/diffusion_pretrain_controller/v1/2025-10-31/02-17-03/checkpoints/backup/backup_epoch_3.pth"
 
 # ===================================================================
 # 2. LOGGING

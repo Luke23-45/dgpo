@@ -1,0 +1,154 @@
+# FILE: configs/finetune_vidhis_rl_config.yaml
+# Hydra configuration for the SOTA Hierarchical TD3+BC Fine-Tuning Script.
+# This file defines every hyperparameter needed by train/finetune_vidhis_rl.py.
+
+# --- Top-Level Configuration ---
+seed: 42
+device: 'cuda' # or 'cpu'
+resume_from_ckpt: null # Set to a path like 'outputs/YYYY-MM-DD/HH-MM-SS/checkpoints/latest_checkpoint.pth' to resume a run
+
+# --- Path Configuration ---
+# !!! CRITICAL: You must edit these paths to match your project structure !!!
+pretrained_planner_path: 'path/to/your/best_planner.ckpt'
+pretrained_policy_path: 'path/to/your/best_bc_controller.pth'
+dataset:
+  path: 'path/to/your/expert_dataset.zarr'
+  num_workers: 1 # Number of CPU cores for the expert data loader
+
+# --- Training Loop Configuration ---
+training:
+  total_timesteps: 1_00_000 # Total number of environment interactions
+
+urdf_path: "urdf/panda_mujoco_kinematics.urdf"
+
+# Configuration for the ScriptedExpert used by the oracle planner
+object_profile:
+  _target_: utils.scripted_expert.ObjectProfile
+  size: [0.04, 0.04, 0.04]
+  grasp_width_normalized: 0.6
+
+expert_config:
+  _target_: utils.scripted_expert.ExpertConfig
+  hover_height: 0.10
+
+# --- Environment Configuration ---
+environment:
+  n_envs: 2 # Number of parallel environments for training. Match to CPU cores for best performance.
+  control_mode: 'delta' # Or 'absolute', must match what the BC policy was trained on
+  max_episode_steps: 700 # Maximum steps per episode before truncation
+
+# --- Model Architectures ---
+# These parameters must match the pre-trained models you are loading.
+model:
+  controller:
+    _target_: models.diffusion_policy.DiffusionPolicy # For reference
+    observation_horizon: 2
+    action_horizon: 8
+    image_feat_dim: 128
+    d_model: 512
+    denoiser_layers: 4
+    denoiser_heads: 8
+
+scheduler:
+  _target_: models.diffusion_policy.NoiseSchedulerConfig # For reference
+  beta_start: 0.0001
+  beta_end: 0.02
+  schedule: "cosine"
+  timesteps: 100
+
+# --- Reinforcement Learning Algorithm (Hierarchical TD3+BC) ---
+rl_algorithm:
+  buffer_size: 500_000           # Size of the online replay buffer
+  learning_starts: 25_000        # Number of timesteps to collect random data before training starts
+  batch_size: 256                # Batch size for RL updates
+  
+  # TD3 Core Parameters
+  gamma: 0.99                    # Discount factor. MUST MATCH reward.gamma
+  tau: 0.005                     # Polyak averaging factor for target network updates
+  policy_delay: 2                # Update actor & target networks every N critic updates
+  
+  # TD3 Noise Parameters
+  exploration_noise: 0.1         # Stddev of Gaussian noise added to actions during data collection
+  policy_noise: 0.2              # Stddev of noise added to target policy actions for critic update
+  noise_clip: 0.5                # Max value for the target policy noise
+  
+  # Diffusion Policy Actor Parameters
+  guidance_scale: 1.0            # Classifier-Free Guidance scale. 1.0 is a safe start.
+  sampling_steps: 10             # Number of DDIM steps for the actor. Fewer is faster.
+  
+  # TD3+BC Actor Loss (Advantage-Weighted)
+  actor_loss_beta: 1.0           # Controls how sharply Q-values weight the BC loss. Higher = more emphasis on high-Q expert actions.
+  
+  # Critic Architecture
+  critic_net_arch: [512, 512]    # Hidden layer dimensions for the Q-network MLPs
+  use_critic_layernorm: True     # Whether to use LayerNorm in the critic MLPs (generally improves stability)
+
+# --- Optimizers Configuration ---
+optimizer:
+  actor_lr: 1e-5                 # VERY IMPORTANT: Use a low learning rate for fine-tuning the pre-trained actor
+  critic_lr: 3e-4                # A standard learning rate for the critic, which is trained from scratch
+  actor_weight_decay: 1e-4
+  critic_weight_decay: 1e-4
+
+# --- SOTA Reward Function (AdvancedRewardWrapperV2) ---
+# This section directly configures the dense reward signal.
+reward:
+  _target_: utils.rl_reward_wrapper_v2.AdvancedRewardConfig # For reference
+  # --- Master Scale & Discount ---
+  potential_scale: 5.0
+  gamma: ${rl_algorithm.gamma}  # Hydra magic: This MUST match the RL algorithm's gamma
+  
+  # --- Sparse Bonuses (Large, unambiguous signals for major milestones) ---
+  grasp_bonus: 10.0
+  lift_bonus: 15.0
+  place_bonus: 25.0
+  success_bonus: 100.0
+
+  # --- Penalties (To regularize behavior and encourage safety/efficiency) ---
+  action_penalty: 0.001          # Penalizes large actions
+  jerk_penalty: 0.005            # Penalizes jerky, non-smooth motions
+  contact_penalty: 2.0           # Penalizes robot arm collisions with the table
+  drop_penalty: 20.0             # Large penalty for dropping the object after lifting
+  instability_penalty: 0.2       # Penalizes shaking the object while holding it
+  
+  # --- Physical Thresholds (Define the task geometry) ---
+  hover_height: 0.05
+  lift_height_thresh: 0.04
+  goal_pos_thresh: 0.02
+  
+  # --- Potential Coefficients (k-values) ---
+  # These are fine-tuning knobs. The defaults from the wrapper are a good starting point.
+  k_reach_pos_xy: 3.0
+  k_lift: 5.0
+  k_move_pos_xy: 4.0
+  k_place_pos_z: 4.0
+  k_retract: 2.5
+  # ... (you can override any other k-value from rl_reward_wrapper_v2.py here)
+
+# --- Curriculum Learning Configuration ---
+# Anneals reward parameters over the course of training.
+curriculum:
+  _target_: utils.rl_reward_wrapper_v2.CurriculumConfig # For reference
+  # Total episodes should roughly match the number of episodes in the training run.
+  # If total_timesteps=1M and max_episode_steps=500, then total_episodes is ~2000.
+  total_episodes: 2000
+  potential_scale_anneal_end_factor: 0.5 # Anneal dense reward scale from 5.0 down to 2.5
+  goal_thresh_anneal_end_factor: 0.5     # Make success condition stricter over time
+
+# --- Logging and Evaluation Configuration ---
+logging:
+  # W&B Configuration
+  use_wandb: True
+  wandb_project: "vidhis_finetuning"
+  wandb_run_name: ${now:%Y-%m-%d_%H-%M-%S} # Auto-generate run name from timestamp
+  
+  # Frequencies
+  eval_freq: 50_000                # Run evaluation every N timesteps
+  log_interval_steps: 1000         # Log training metrics to W&B/TensorBoard every N steps
+  
+  # Evaluation Parameters
+  n_eval_episodes: 20              # Number of episodes to run for calculating statistics
+  
+  # Video Recording
+  record_video_on_eval: True       # Whether to record a video during evaluation
+  video_fps: 30                    # FPS for the saved video

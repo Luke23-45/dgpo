@@ -80,7 +80,18 @@ class PlannerLightningModule(pl.LightningModule):
             unet_up_block_types=tuple(cfg.model.unet_up_block_types),
             unet_attention_head_dim=cfg.model.unet_attention_head_dim,
             condition_drop_prob=cfg.model.condition_drop_prob, # For CFG
-            num_diffusion_timesteps=cfg.scheduler.timesteps
+            num_diffusion_timesteps=cfg.scheduler.timesteps,
+            
+            initialize_unet_from_sd=cfg.model.initialize_unet_from_sd,
+
+            # Critical: This tells the model to apply LoRA for fine-tuning.
+            use_lora=cfg.model.use_lora,
+
+            # New Hyperparameter: The rank of the LoRA adapters.
+            lora_rank=cfg.model.lora_rank,
+
+            # Critical: This tells the model what dimension the SD UNet expects for conditioning.
+            unet_cross_attention_dim=cfg.model.unet_cross_attention_dim
         )
 
         # --- SOTA: Loss Functions ---
@@ -88,8 +99,7 @@ class PlannerLightningModule(pl.LightningModule):
         # LPIPS is a great perceptual metric
         if cfg.training.use_lpips_loss:
             try:
-                # Initialize LPIPS model and freeze it
-                self.lpips_loss = lpips.LPIPS(net='alex').to(self.device)
+                self.lpips_loss = lpips.LPIPS(net='alex')
                 for param in self.lpips_loss.parameters():
                     param.requires_grad = False
             except Exception as e:
@@ -219,11 +229,7 @@ class PlannerLightningModule(pl.LightningModule):
                         generated_subgoal_guided,
                         generated_subgoal_unguided
                     )
-        else:
-            # For the "fast" validation epochs, we must still log a placeholder for LPIPS.
-            # This is critical for the ModelCheckpoint callback if it monitors 'val_lpips_loss'.
-            # We set prog_bar=False so it doesn't clutter the UI on fast epochs.
-            self.log('val_lpips_loss', 0.0, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
+
 
     # --- END: ROBUST PATCH 2 ---
 
@@ -253,14 +259,13 @@ class PlannerLightningModule(pl.LightningModule):
             caption = "Current | Goal | GT Subgoal | Generated (Guided) | Generated (Unguided)"
 
             # Log to TensorBoard
-            if isinstance(self.logger, TensorBoardLogger):
-                self.logger.experiment.add_image("val_samples", grid, self.global_step)
+            loggers = self.trainer.loggers if isinstance(self.trainer.loggers, list) else [self.trainer.logger]
+            for logger in loggers:
+                if isinstance(logger, TensorBoardLogger):
+                    logger.experiment.add_image("val_samples", grid, self.global_step)
+                elif isinstance(logger, WandbLogger) and WANDB_AVAILABLE:
+                    logger.experiment.log({"val_samples": [wandb.Image(grid, caption=caption)]}, step=self.global_step)
 
-            # Log to W&B
-            if isinstance(self.logger, WandbLogger):
-                self.logger.experiment.log({
-                    "val_samples": [wandb.Image(grid, caption=caption)]
-                }, step=self.global_step)
         except Exception as e:
             log.warning(f"Failed to log validation images: {e}")
 
@@ -343,7 +348,13 @@ class PlannerLightningModule(pl.LightningModule):
                 self.last_backup_path = current_backup_path
             except Exception as e:
                 log.exception(f"--- [Manual Backup] FAILED to save backup checkpoint: {e}")
-# --- PyTorch Lightning DataModule ---
+
+
+    def on_fit_start(self):
+        """Called at the beginning of fit."""
+        if self.lpips_loss is not None:
+            log.info(f"Moving LPIPS model to device: {self.device}")
+            self.lpips_loss.to(self.device)
 
 class PlannerDataModule(pl.LightningDataModule):
     def __init__(self, cfg: DictConfig):
@@ -404,13 +415,14 @@ class PlannerDataModule(pl.LightningDataModule):
             return None # PyTorch Lightning handles this gracefully
             
 
-
+        accelerator = str(self.cfg.trainer.accelerator).lower()
+        pin_memory = accelerator in ("gpu", "cuda")
         return DataLoader(
             self.val_dataset,
             batch_size=self.cfg.training.val_batch_size,
             shuffle=False, # No shuffling needed for validation
             num_workers=self.cfg.dataset.num_workers,
-            pin_memory=(self.cfg.trainer.accelerator == 'gpu'),
+            pin_memory=pin_memory,
             persistent_workers=(self.cfg.dataset.num_workers > 0),
             drop_last=False
         )
@@ -448,21 +460,32 @@ def main(cfg: DictConfig):
         # SOTA: Watch the model (log='all' is very verbose, 'gradients' is good)
         wandb_logger.watch(model, log='gradients', log_freq=cfg.logging.wandb_watch_log_freq)
 
-    # --- SOTA Callbacks ---
-    # SOTA: Checkpoint based on LPIPS (perceptual) and MSE (stable)
-    checkpoint_callback = ModelCheckpoint(
+
+
+    # Checkpoint for the stable, always-calculated MSE metric
+    checkpoint_mse = ModelCheckpoint(
         dirpath=str(Path.cwd() / "checkpoints"),
-        filename="planner-{epoch:02d}-lpips{val_lpips_loss:.4f}-mse{val_mse_loss:.4f}",
-        monitor="val_lpips_loss", # SOTA: Monitor perceptual loss
+        filename="planner-best-mse-{epoch:02d}-{val_mse_loss:.4f}",
+        monitor="val_mse_loss",
+        mode="min",
+        save_top_k=1,
+    )
+
+    # Checkpoint for the perceptual LPIPS metric, which runs periodically
+    checkpoint_lpips = ModelCheckpoint(
+        dirpath=str(Path.cwd() / "checkpoints"),
+        filename="planner-best-lpips-{epoch:02d}-{val_lpips_loss:.4f}",
+        monitor="val_lpips_loss",
         mode="min",
         save_top_k=cfg.training.save_top_k_checkpoints,
-        save_last=True,
-        auto_insert_metric_name=False, # Filename is already custom
     )
+    # Always save the last checkpoint for easy resuming
+    checkpoint_last = ModelCheckpoint(dirpath=str(Path.cwd() / "checkpoints"), filename="planner-last-{epoch:02d}")
+
     lr_monitor = LearningRateMonitor(logging_interval='step')
     progress_bar = TQDMProgressBar(refresh_rate=cfg.logging.progress_bar_refresh_rate)
 
-    callbacks = [checkpoint_callback, lr_monitor, progress_bar]
+    callbacks = [checkpoint_mse, checkpoint_lpips, checkpoint_last, lr_monitor, progress_bar]
 
     # SOTA: Add Stochastic Weight Averaging (SWA) if configured
     if cfg.training.get('use_swa', False):

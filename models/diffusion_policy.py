@@ -156,45 +156,42 @@ class NoiseScheduler:
         return sqrt_acp_t * x0 + sqrt_one_minus_acp_t * noise
 
 
-    def ddim_step(self, xt: torch.Tensor, t: int, t_prev: int, eps_pred: torch.Tensor, eta: float = 0.0) -> torch.Tensor:
+    def ddim_step(self, xt: torch.Tensor, t: Union[int, torch.Tensor], t_prev: Union[int, torch.Tensor], eps_pred: torch.Tensor, eta: float = 0.0) -> torch.Tensor:
         """
         Performs a single DDIM reverse step to go from x_t to x_{t-1}.
-        ...
+        This version is patched for numerical stability and to handle tensor inputs.
         """
-        # --- THIS BLOCK HAS THE BUG ---
-        # alpha_cumprod_t = self.alphas_cumprod[t]
-        # alpha_cumprod_t_prev = self.alphas_cumprod[t_prev] if t_prev >= 0 else 1.0
+        # --- START: DEFINITIVE PATCH (Fixes #A, #C, #D) ---
+        # Normalize t/t_prev to Python ints for safe indexing and comparison
+        t_val = int(t.item()) if isinstance(t, torch.Tensor) else int(t)
+        t_prev_val = int(t_prev.item()) if isinstance(t_prev, torch.Tensor) else int(t_prev)
 
-        # --- THIS IS THE FIX ---
-        # Ensure all values are tensors on the correct device.
+        # Get schedule values, ensuring they are tensors on the correct device/dtype
+        alpha_cumprod_t = self.alphas_cumprod[t_val].to(device=xt.device, dtype=xt.dtype)
+        alpha_cumprod_t_prev = self.alphas_cumprod[t_prev_val].to(device=xt.device, dtype=xt.dtype) if t_prev_val >= 0 else torch.tensor(1.0, device=xt.device, dtype=xt.dtype)
+        sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t_val].to(device=xt.device, dtype=xt.dtype)
+        sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t_val].to(device=xt.device, dtype=xt.dtype)
 
-        alpha_cumprod_t = self.alphas_cumprod[t]
+        # Predict x0
+        x0_pred = (xt - sqrt_one_minus_alpha_cumprod_t * eps_pred) / sqrt_alpha_cumprod_t.clamp_min(1e-8)
+        x0_pred = torch.clamp(x0_pred, -1., 1.)
+
+        # Calculate numerically stable sigma
+        eps = 1e-8
+        term1 = (1 - alpha_cumprod_t_prev) / (1 - alpha_cumprod_t).clamp_min(eps)
+        term2 = (1 - alpha_cumprod_t / (alpha_cumprod_t_prev + eps)).clamp_min(0.0)
+        sigma_t = eta * torch.sqrt(term1 * term2)
+
+        # Calculate direction pointing to xt
+        pred_dir_xt = torch.sqrt((1 - alpha_cumprod_t_prev - sigma_t**2).clamp_min(0.0)) * eps_pred
         
-        # This is the critical fix. When t_prev is -1, create a tensor, not a float.
-        alpha_cumprod_t_prev = self.alphas_cumprod[t_prev] if t_prev >= 0 else torch.tensor(1.0, device=xt.device, dtype=xt.dtype)
-        sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t]
-        
-        # --- A SECOND, RELATED FIX FOR ROBUSTNESS ---
-        # The line below also needs to handle the scalar `alpha_cumprod_t` correctly
-        # Let's make sure it's a tensor before doing math with other tensors.
-        sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t]
-
-        # The rest of the original code had a subtle issue here. We need to make sure
-        # our tensors can be broadcast correctly. Let's rewrite this part for clarity and safety.
-
-        x0_pred = (xt - sqrt_one_minus_alpha_cumprod_t * eps_pred) / sqrt_alpha_cumprod_t
-        x0_pred = torch.clamp(x0_pred, -1., 1.) # Optional: Clamp predicted x0 for stability
-
-        sigma_t = eta * torch.sqrt(
-            (1 - alpha_cumprod_t_prev) / (1 - alpha_cumprod_t) * (1 - alpha_cumprod_t / alpha_cumprod_t_prev)
-        )
-
-        pred_dir_xt = torch.sqrt(1 - alpha_cumprod_t_prev - sigma_t**2) * eps_pred
+        # Calculate x_{t-1}
         x_prev = torch.sqrt(alpha_cumprod_t_prev) * x0_pred + pred_dir_xt
         if eta > 0:
-            x_prev += sigma_t * torch.randn_like(xt)
+            x_prev = x_prev + sigma_t * torch.randn_like(xt)
 
         return x_prev
+        # --- END: DEFINITIVE PATCH ---
   
 
 class ResNetEncoder(nn.Module):
@@ -410,12 +407,13 @@ class EMA:
             p.requires_grad_(False)
         self.decay = decay
 
+
     def update(self, model: nn.Module):
         with torch.no_grad():
-            for name, param in model.named_parameters():
-                if param.requires_grad:
-                    ema_param = self.ema_model.state_dict()[name]
-                    ema_param.copy_(self.decay * ema_param + (1 - self.decay) * param.data)
+            # Use zip for a safer and more efficient parameter-wise update
+            for p_ema, p_model in zip(self.ema_model.parameters(), model.parameters()):
+                if p_model.requires_grad:
+                    p_ema.data.mul_(self.decay).add_(p_model.data, alpha=1 - self.decay)
 
     def state_dict(self): return self.ema_model.state_dict()
 
@@ -433,48 +431,43 @@ class DiffusionPolicy(nn.Module):
     SOTA ViDHiS Controller. Top-level diffusion policy wrapper, adapted for
     hierarchical control with visual subgoal conditioning.
     """
+
     def __init__(self, *,
-                 proprio_dim: int, H_o: int, H_a: int, action_dim: int,
-                 image_feat_dim: int, # This is now the ResNetEncoder output dim
-                 d_model: int,        # This is now the Transformer's internal dim
-                 denoiser_layers: int, denoiser_heads: int,
-                 scheduler_cfg: NoiseSchedulerConfig,
-                 cfg_p_uncond: float = 0.1,
-                 ema_decay: Optional[float] = 0.999,
-                 device: Optional[Union[torch.device, str]] = None):
+                proprio_dim: int, H_o: int, H_a: int, action_dim: int,
+                image_feat_dim: int, d_model: int,
+                denoiser_layers: int, denoiser_heads: int,
+                scheduler_cfg: NoiseSchedulerConfig,
+                cfg_p_uncond: float = 0.1,
+                ema_decay: Optional[float] = 0.999,
+                device: Optional[Union[torch.device, str]] = None):
         super().__init__()
         self.device = torch.device(default(device, "cuda" if torch.cuda.is_available() else "cpu"))
         self.H_o, self.H_a, self.action_dim = H_o, H_a, action_dim
         self.cfg_p_uncond = cfg_p_uncond
 
-        # --- SOTA PATCH 3: Refactored Encoders ---
+        # --- START: ARCHITECTURAL FIX PATCH ---
         # 1. Encoders for Observation History
         self.primary_encoder = ResNetEncoder(out_features=image_feat_dim)
         self.wrist_encoder = ResNetEncoder(out_features=image_feat_dim)
         self.proprio_proj = nn.Linear(proprio_dim, d_model)
 
-        # 2. Dedicated Encoder for the Visual Subgoal
-        self.subgoal_encoder = ResNetEncoder(out_features=d_model)
+        # 2. SOTA Cross-Attention Fusion Module
+        self.vision_fusion_attn = nn.MultiheadAttention(embed_dim=image_feat_dim, num_heads=4, batch_first=True)
+        self.vision_fusion_norm = nn.LayerNorm(image_feat_dim)
+        self.vision_proj = nn.Linear(image_feat_dim, d_model) # Project fused features to d_model
 
-        # 3. Optional Fusion/Projection layers
-        # Project ResNet features to the Transformer's dimension
-        self.vision_proj = nn.Linear(image_feat_dim * 2, d_model) # Fused primary + wrist
-        # --- End Refactored Encoders ---
+        # 3. Dedicated Encoder for the Visual Subgoal
+        self.subgoal_encoder = ResNetEncoder(out_features=d_model)
+        # --- END: ARCHITECTURAL FIX PATCH ---
 
         self.denoiser = DiffusionTransformer(action_dim, d_model, denoiser_layers, denoiser_heads, H_a)
         self.scheduler = NoiseScheduler(scheduler_cfg).to(self.device)
 
-        # --- SOTA PATCH 3: Refactored Unconditional Embeddings ---
-        # Create a dictionary for clean management of unconditional tokens
         self.uncond_embeddings = nn.ParameterDict({
-            # 'primary': nn.Parameter(torch.randn(1, H_o, d_model)),
-            # 'wrist': nn.Parameter(torch.randn(1, H_o, d_model)),
             'vision': nn.Parameter(torch.randn(1, H_o, d_model)), 
             'proprio': nn.Parameter(torch.randn(1, H_o, d_model)),
             'subgoal': nn.Parameter(torch.randn(1, 1, d_model)),
         })
-        # --- End Refactored Embeddings ---
-
         self.to(self.device)
         self.ema = EMA(self, decay=ema_decay) if ema_decay is not None else None
         log.info(f"ViDHiS Controller (DiffusionPolicy) initialized on device: {self.device}")
@@ -484,23 +477,24 @@ class DiffusionPolicy(nn.Module):
         obs_on_device = {k: v.to(self.device) for k, v in obs.items()}
         
         # 1. Process Observation History
-        primary_tokens = self.primary_encoder(obs_on_device["image_primary"])
-        wrist_tokens = self.wrist_encoder(obs_on_device["image_wrist"])
-        # Simple fusion by concatenation
-        vision_tokens = self.vision_proj(torch.cat([primary_tokens, wrist_tokens], dim=-1))
+        primary_feats = self.primary_encoder(obs_on_device["image_primary"]) # (B, H_o, D_feat)
+        wrist_feats = self.wrist_encoder(obs_on_device["image_wrist"])     # (B, H_o, D_feat)
+        
+        # --- START: ARCHITECTURAL FIX PATCH (Cross-Attention Fusion) ---
+        # Primary features attend to wrist features
+        fused_vision_feats, _ = self.vision_fusion_attn(query=primary_feats, key=wrist_feats, value=wrist_feats)
+        fused_vision_feats = self.vision_fusion_norm(fused_vision_feats + primary_feats) # Add & Norm
+        vision_tokens = self.vision_proj(fused_vision_feats) # (B, H_o, D_model)
+        # --- END: ARCHITECTURAL FIX PATCH ---
+
         proprio_tokens = self.proprio_proj(obs_on_device["proprio"])
         
         # 2. Process Optional Subgoal
         subgoal_tokens = None
         if subgoal_image is not None:
-            # Subgoal is (B, H, W, C). ResNetEncoder needs (B, H_o=1, H, W, C).
             subgoal_tokens = self.subgoal_encoder(subgoal_image.to(self.device).unsqueeze(1))
         
-        return {
-            'vision': vision_tokens,
-            'proprio': proprio_tokens,
-            'subgoal': subgoal_tokens
-        }
+        return {'vision': vision_tokens, 'proprio': proprio_tokens, 'subgoal': subgoal_tokens}
 
     def compute_loss(self,
                      actions: torch.Tensor,
@@ -535,16 +529,17 @@ class DiffusionPolicy(nn.Module):
         #    With a probability of `cfg_p_uncond`, we replace the real conditioning
         #    tokens with learned unconditional embeddings.
         if self.training and self.cfg_p_uncond > 0:
-            uncond_mask = (torch.rand(B, device=device) < self.cfg_p_uncond)
+            uncond_mask = (torch.rand(B, device=device) < self.cfg_p_uncond).view(B, 1, 1)
             
-            # Replace conditioning tokens with their unconditional counterparts where the mask is active.
-            # The `expand` call is necessary to match the batch dimension.
             if cond.get('vision') is not None:
-                cond['vision'][uncond_mask] = self.uncond_embeddings['vision'].expand(B, -1, -1)[uncond_mask]
+                vision_uncond = self.uncond_embeddings['vision'].expand(B, -1, -1)
+                cond['vision'] = torch.where(uncond_mask, vision_uncond, cond['vision'])
             if cond.get('proprio') is not None:
-                cond['proprio'][uncond_mask] = self.uncond_embeddings['proprio'].expand(B, -1, -1)[uncond_mask]
+                proprio_uncond = self.uncond_embeddings['proprio'].expand(B, -1, -1)
+                cond['proprio'] = torch.where(uncond_mask, proprio_uncond, cond['proprio'])
             if cond.get('subgoal') is not None:
-                cond['subgoal'][uncond_mask] = self.uncond_embeddings['subgoal'].expand(B, -1, -1)[uncond_mask]
+                subgoal_uncond = self.uncond_embeddings['subgoal'].expand(B, -1, -1)
+                cond['subgoal'] = torch.where(uncond_mask, subgoal_uncond, cond['subgoal'])
 
         # 6. Assemble the final unified conditioning sequence for the denoiser.
         #    This gathers all non-None token sets into a single long sequence.
@@ -558,7 +553,7 @@ class DiffusionPolicy(nn.Module):
         #    It computes a per-sample loss, averages it over the sequence/action dims,
         #    and then applies optional weights before the final mean reduction.
         per_sample_loss = F.mse_loss(predicted_noise, noise, reduction='none')
-        per_sample_loss = per_sample_loss.mean(dim=list(range(1, per_sample_loss.ndim)))
+        per_sample_loss = per_sample_loss.mean(dim=list(range(1, per_sample_loss.ndim))) # Shape: (B,)
         
         if weights is not None:
             if weights.ndim > 1:
@@ -606,7 +601,7 @@ class DiffusionPolicy(nn.Module):
 
         # 3. CORRECTED: Generate the sequence of timesteps manually.
         # This creates a linear ramp from T-1 down to 0.
-        timesteps = torch.linspace(self.scheduler.T - 1, 0, num_inference_steps, device=device, dtype=torch.long)
+        timesteps = torch.linspace(self.scheduler.T - 1, 0, num_inference_steps, device=device).round().long()
 
         # 4. Initialize latents from pure noise.
         latents = torch.randn((B, self.H_a, self.action_dim), device=device)

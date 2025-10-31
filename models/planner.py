@@ -72,342 +72,161 @@ class SinusoidalPositionEmbeddings(nn.Module):
         return embeddings
 
 
-class VisualPlannerDiffusion( ModelMixin, ConfigMixin):
-    """
-    SOTA Goal-Conditioned Visual Subgoal Generator.
-    [cite: 36]
-    Generates a future subgoal image based on current image, goal image, and progress.
-    [cite: 37]
-    Implements Classifier-Free Guidance (CFG) for high-quality, goal-adherent generation.
-    Uses a CLIP vision encoder for SOTA semantic understanding.
-    """
+
+class VisualPlannerDiffusion(ModelMixin, ConfigMixin):
+    """SOTA Visual Planner with optional UNet warm-starting and LoRA fine-tuning."""
     def __init__(self,
                  image_size: int = 224,
-                 # SOTA Default: Use CLIP-Large for its powerful semantic features
-                 vit_model_name: str = 'openai/clip-vit-large-patch14',
-                 vit_feature_dim: int = 768, # CLIP-Large feature dimension is 768
+                 vit_model_name: str = 'openai/clip-vit-base-patch32',
+                 vit_feature_dim: int = 768,
                  freeze_vit: bool = True,
-                 
                  progress_embed_dim: int = 64,
-                 
-                 unet_block_out_channels: Tuple[int, ...] = (128, 128, 256, 256, 512, 512),
-                 
-                 unet_down_block_types: Tuple[str, ...] = ("DownBlock2D",)*2 + ("CrossAttnDownBlock2D",)*4,
-                 
-                 unet_up_block_types: Tuple[str, ...] = ("CrossAttnUpBlock2D",)*4 + ("UpBlock2D",)*2,
-                 
+                 # Custom UNet params (used ONLY if not initializing from SD)
+                 unet_block_out_channels: Tuple[int, ...] = (128, 128, 256, 512, 512),
+                 unet_down_block_types: Tuple[str, ...] = ("DownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "DownBlock2D"),
+                 unet_up_block_types: Tuple[str, ...] = ("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "UpBlock2D"),
+                 unet_attention_head_dim: int = 8,
+                 # Critical param for matching pre-trained UNet's expectation
                  unet_cross_attention_dim: Optional[int] = None,
-                 
-                 unet_attention_head_dim: int = 8, # Explicitly set attention heads
-                 num_diffusion_timesteps: int = 100,
-                 
-                 condition_drop_prob: float = 0.1, # Dropout probability for SOTA Classifier-Free Guidance
-                 initialize_unet_from_sd: bool = True,
-                 
-                 # Controls whether to apply LoRA for efficient fine-tuning
-                 use_lora: bool = True
+                 num_diffusion_timesteps: int = 50,
+                 condition_drop_prob: float = 0.1,
+                 # SOTA flags to control the fine-tuning pipeline
+                 initialize_unet_from_sd: bool = False,
+                 use_lora: bool = False,
+                 lora_rank: int = 16
                  ):
-        
         super().__init__()
-        # Register config for saving/loading with diffusers .save_pretrained()
-        
-        self.register_to_config(
-             image_size=image_size, vit_model_name=vit_model_name, vit_feature_dim=vit_feature_dim,
-             freeze_vit=freeze_vit, progress_embed_dim=progress_embed_dim,
-             unet_block_out_channels=unet_block_out_channels, unet_down_block_types=unet_down_block_types,
-             unet_up_block_types=unet_up_block_types, unet_cross_attention_dim=unet_cross_attention_dim,
-             num_diffusion_timesteps=num_diffusion_timesteps,
-             condition_drop_prob=condition_drop_prob,
-             unet_attention_head_dim=unet_attention_head_dim,
-             initialize_unet_from_sd=initialize_unet_from_sd, # Add this
-             use_lora=use_lora                          # Add this
-        )
+        self.register_to_config(**{k: v for k, v in locals().items() if k != 'self' and k != '__class__'})
 
-        log.info(f"Initializing SOTA VisualPlannerDiffusion with Vision Encoder: {vit_model_name}")
-        
-        # --- 1. SOTA Vision Encoder (CLIP) ---
-        # We use CLIPVisionModel for its superior semantic feature extraction
+        # --- 1. Vision and Progress Encoders (Correct) ---
+        log.info(f"Initializing VisualPlannerDiffusion with Vision Encoder: {vit_model_name}")
         self.vision_encoder = CLIPVisionModel.from_pretrained(vit_model_name)
         if freeze_vit:
-            log.info("Freezing Vision Encoder (CLIP) weights.")
-            for param in self.vision_encoder.parameters():
-                param.requires_grad = False
-        else:
-             log.info("Fine-tuning Vision Encoder (CLIP) weights.")
-
-        # --- 2. SOTA Progress Encoder (Sinusoidal) ---
-        # Use sinusoidal embeddings for the continuous progress value [0, 1]
+            self.vision_encoder.requires_grad_(False)
         self.progress_embedding = SinusoidalPositionEmbeddings(progress_embed_dim)
-        # Followed by a robust MLP to project into the final embedding space
-        self.progress_encoder = nn.Sequential(
-            nn.Linear(progress_embed_dim, progress_embed_dim * 4),
-            nn.GELU(), # Use GELU activation (more modern than ReLU)
-            nn.Linear(progress_embed_dim * 4, progress_embed_dim)
-        )
+        self.progress_encoder = nn.Sequential(nn.Linear(progress_embed_dim, progress_embed_dim * 4), nn.GELU(), nn.Linear(progress_embed_dim * 4, progress_embed_dim))
+
+        # --- 2. Conditioning Fusion (Correct) ---
         actual_vit_feature_dim = self.vision_encoder.config.hidden_size
-        
-        # 2. Add a diagnostic print to expose the mismatch.
-        if actual_vit_feature_dim != vit_feature_dim:
-            log.warning("="*80)
-            log.warning(f"Configuration Mismatch Detected in VisualPlannerDiffusion:")
-            log.warning(f"  - Config `vit_feature_dim` was set to: {vit_feature_dim}")
-            log.warning(f"  - The loaded model '{vit_model_name}' actually has a feature dim of: {actual_vit_feature_dim}")
-            log.warning("  - Proceeding by using the actual model's dimension.")
-            log.warning("="*80)
-        # --- 3. Conditioning Fusion & CFG ---
-        # Total dimension of conditioning vector
-        self.config.vit_feature_dim = actual_vit_feature_dim
-        
         condition_dim = (actual_vit_feature_dim * 2) + progress_embed_dim
-        # Use config value if provided, otherwise use calculated dim
         cross_attn_dim = unet_cross_attention_dim if unet_cross_attention_dim is not None else condition_dim
-
-        # Optional projection layer if condition_dim doesn't match cross_attn_dim
         self.condition_proj = nn.Linear(condition_dim, cross_attn_dim) if condition_dim != cross_attn_dim else nn.Identity()
-        
-        log.info(f"Conditioning dim: {condition_dim}, U-Net Cross Attention dim: {cross_attn_dim}")
-
-        # SOTA: Learned embedding for Classifier-Free Guidance (unconditional state)
-        # This single embedding will be used when we drop conditioning during training
+        log.info(f"Calculated condition dim: {condition_dim}. Projecting to UNet cross-attention dim: {cross_attn_dim}")
         self.uncond_embedding = nn.Parameter(torch.randn(1, 1, cross_attn_dim))
 
-        # --- 4. Diffusion U-Net ---
+        # --- 3. Diffusion UNet (Robust Conditional Logic) ---
         log.info("Initializing Diffusion U-Net...")
-        self.unet = UNet2DConditionModel(
-            sample_size=image_size,
-            in_channels=3, # Input noisy image
-            out_channels=3, # Output predicted noise
-            block_out_channels=unet_block_out_channels,
-            
-            down_block_types=unet_down_block_types,
-            
-            up_block_types=unet_up_block_types,
-            
-            cross_attention_dim=cross_attn_dim, # Dimension of conditioning
-            attention_head_dim=unet_attention_head_dim,
-        )
-
         if initialize_unet_from_sd:
             try:
-                log.info("Attempting to load pre-trained UNet weights from Stable Diffusion Inpainting...")
-                pretrained_unet = UNet2DConditionModel.from_pretrained(
-                    "runwayml/stable-diffusion-inpainting",
-                    subfolder="unet",
-                    torch_dtype=torch.float32 # Use float32 for CPU/GPU compatibility during load
-                )
-                # Load all weights that match in name and shape, skip others (like the input conv layer)
-                self.unet.load_state_dict(pretrained_unet.state_dict(), strict=False)
-                log.info("Successfully transferred weights from pre-trained UNet.")
+                log.info("Attempting to load pre-trained UNet from Stable Diffusion v1.5...")
+                if unet_cross_attention_dim != 768:
+                    raise ValueError(f"To use Stable Diffusion pre-training, `unet_cross_attention_dim` must be 768, but got {unet_cross_attention_dim}.")
+                # --- START: SOTA MODEL SIZE PATCH ---
+                # Use the much smaller, distilled version of the SD 1.5 UNet
+                sd_unet = UNet2DConditionModel.from_pretrained("segmind/tiny-sd", subfolder="unet")
+                # --- END: SOTA MODEL SIZE PATCH ---
+                # --- SOTA SURGERY (Fix for Audit Finding #11) ---
+                old_conv_in = sd_unet.conv_in
+                new_conv_in = nn.Conv2d(3, old_conv_in.out_channels, kernel_size=old_conv_in.kernel_size, stride=old_conv_in.stride, padding=old_conv_in.padding)
+                with torch.no_grad():
+                    new_conv_in.weight[:] = old_conv_in.weight.mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
+                    if new_conv_in.bias is not None: new_conv_in.bias.data.copy_(old_conv_in.bias.data)
+                sd_unet.conv_in = new_conv_in
+                
+                # NOTE on `conv_out` (Audit Finding #2 in verdict): The audit correctly warns against replacing `conv_out` in a standard VAE pipeline.
+                # However, your specific code trains directly on RGB images, predicting RGB noise. Therefore, the UNet *must* output 3 channels.
+                # Replacing `conv_out` is the correct action *for this specific architecture*.
+                sd_unet.conv_out = nn.Conv2d(sd_unet.conv_out.in_channels, 3, kernel_size=3, padding=1)
+                
+                self.unet = sd_unet
+                log.info("Successfully loaded and adapted Stable Diffusion UNet.")
+
+                # --- LoRA Application (Fix for Audit Finding #4) ---
+                if use_lora:
+                    if not PEFT_AVAILABLE: raise ImportError("`use_lora` is true but `peft` is not installed. Please run `pip install peft`.")
+                    
+                    log.info(f"Applying LoRA via get_peft_model with rank={lora_rank}...")
+                    lora_config = LoraConfig(r=lora_rank, lora_alpha=lora_rank, target_modules=["to_q", "to_k", "to_v", "to_out.0"], lora_dropout=0.1, bias="none")
+                    self.unet = get_peft_model(self.unet, lora_config)
+                    
+                    trainable_params = sum(p.numel() for p in self.unet.parameters() if p.requires_grad)
+                    if trainable_params == 0:
+                        log.warning("LoRA applied but no trainable parameters found. Inspect `target_modules` and the UNet's `named_modules()` output.")
+                    else:
+                        all_params = sum(p.numel() for p in self.unet.parameters())
+                        log.info(f"LoRA applied. Trainable UNet params: {trainable_params:,} || All UNet params: {all_params:,} || Trainable %: {100 * trainable_params / all_params:.4f}%")
+
             except Exception as e:
-                log.error(f"Failed to load pre-trained UNet. The UNet will be trained from scratch. Error: {e}")
+                log.error(f"Failed to load/adapt pre-trained UNet. Falling back to custom architecture. Error: {e}")
+                self.unet = self._create_custom_unet()
+        else:
+            log.info("Initializing custom UNet architecture from config.")
+            self.unet = self._create_custom_unet()
 
-        # 3.2: Apply LoRA for Parameter-Efficient Fine-Tuning (PEFT)
-        if use_lora:
-            if PEFT_AVAILABLE:
-                log.info("Applying LoRA to the UNet for efficient fine-tuning...")
-                lora_config = LoraConfig(
-                    r=16,  # Rank of the adapter matrices. Higher rank = more parameters, more capacity.
-                    lora_alpha=32, # A scaling factor.
-                    target_modules=["to_q", "to_k", "to_v", "to_out.0"], # Target the attention projections
-                    lora_dropout=0.1,
-                )
-                # Wrap the UNet to create a PEFT model
-                self.unet = get_peft_model(self.unet, lora_config)
-                log.info("LoRA applied. Trainable parameters:")
-                self.unet.print_trainable_parameters()
-            else:
-                log.warning("`peft` library not found. Cannot apply LoRA. Training the full UNet.")
+        # --- UNet Optimizations (Fix for Audit Finding #5) ---
+        log.info("Enabling UNet optimizations (if available)...")
+        if hasattr(self.unet, 'set_attention_slice'): self.unet.set_attention_slice("auto")
+        if hasattr(self.unet, 'enable_freeu'): self.unet.enable_freeu(s1=0.9, s2=0.2, b1=1.1, b2=1.2)
 
-        # 3.3: Freeze early layers of the UNet to preserve general features
-        log.info("Freezing early UNet down_blocks to preserve pre-trained features.")
-        # Note: If using LoRA, most of the UNet is already frozen by default.
-        # This is an additional safety measure and is critical if NOT using LoRA.
-        for name, param in self.unet.named_parameters():
-            if "down_blocks.0" in name or "down_blocks.1" in name:
-                # If LoRA is active, we only want to freeze non-LoRA parameters
-                if 'lora' not in name:
-                    param.requires_grad = False
-
-        # 3.4: Apply memory and stability hacks
-        log.info("Enabling UNet optimizations: Sliced Attention and FreeU.")
-        self.unet.set_attention_slice("auto") # Use less memory during attention
-        self.unet.enable_freeu(s1=0.9, s2=0.2, b1=1.1, b2=1.2) # Improve sample quality
-
-        # --- 5. SOTA Noise Scheduler (DPM-Solver++) ---
-        # This scheduler provides SOTA results in few inference steps
-        self.noise_scheduler = DDIMScheduler(
-            num_train_timesteps=num_diffusion_timesteps,
-            beta_schedule='squaredcos_cap_v2', # A common SOTA schedule
-            
-            prediction_type='epsilon' # Predict noise
-            
-        )
+        # --- Noise Scheduler (Fix for Audit Finding #1 and #6) ---
+        log.info("Initializing SOTA DPM-Solver++ Scheduler.")
+        try:
+            self.noise_scheduler = DPMSolverMultistepScheduler.from_pretrained("segmind/tiny-sd", subfolder="scheduler", use_karras_sigmas=True)
+        except Exception:
+            log.warning("Could not load scheduler from pretrained. Initializing with default config.")
+            self.noise_scheduler = DPMSolverMultistepScheduler.from_config(self.config, use_karras_sigmas=True)
+        
         log.info("SOTA Planner components initialized.")
 
+    def _create_custom_unet(self):
+        """Helper to create a UNet from config parameters."""
+        return UNet2DConditionModel(sample_size=self.config.image_size, in_channels=3, out_channels=3, block_out_channels=self.config.unet_block_out_channels, down_block_types=self.config.unet_down_block_types, up_block_types=self.config.unet_up_block_types, cross_attention_dim=self.uncond_embedding.shape[-1], attention_head_dim=self.config.unet_attention_head_dim)
+
     def encode_condition(self, current_image: torch.Tensor, goal_image: torch.Tensor, progress: torch.Tensor) -> torch.Tensor:
-        """
-        Encodes inputs into the conditioning vector for the U-Net.
-        [cite: 48]
-        Args:
-            current_image (torch.Tensor): Batch of current images, shape (B, 3, H, W).
-            goal_image (torch.Tensor): Batch of goal images, shape (B, 3, H, W).
-            progress (torch.Tensor): Batch of progress scalars, shape (B,).
-        Returns:
-            torch.Tensor: Combined conditioning vector, shape (B, 1, cross_attn_dim).
-        """
-        batch_size = current_image.shape[0]
-
-        # --- Process images with SOTA (CLIP) Vision Encoder ---
         with torch.no_grad() if self.config.freeze_vit else torch.enable_grad():
-            outputs_current = self.vision_encoder(pixel_values=current_image)
-            outputs_goal = self.vision_encoder(pixel_values=goal_image)
-            
-
-        # Use the standard CLIP 'pooler_output' (from [CLS] token)
-        # This is semantically richer than mean pooling 
-        current_features = outputs_current.pooler_output # (B, vit_feature_dim)
-        goal_features = outputs_goal.pooler_output     # (B, vit_feature_dim)
-
-        # --- Process progress scalar with SOTA (Sinusoidal) Encoder ---
-        # (B,) -> (B, progress_embed_dim) -> (B, progress_embed_dim)
+            outputs_current, outputs_goal = self.vision_encoder(pixel_values=current_image), self.vision_encoder(pixel_values=goal_image)
+        current_features, goal_features = outputs_current.pooler_output, outputs_goal.pooler_output
         progress_emb = self.progress_encoder(self.progress_embedding(progress))
+        condition = torch.cat([current_features, goal_features, progress_emb], dim=-1)
+        condition = self.condition_proj(condition)
+        return condition.unsqueeze(1)
 
-        # --- Concatenate all features ---
-      
-        condition = torch.cat([current_features, goal_features, progress_emb], dim=-1) # (B, condition_dim)
-
-        # Project to final cross-attention dimension
-        condition = self.condition_proj(condition) # (B, cross_attn_dim)
-
-        # U-Net expects conditioning shape (B, sequence_length, cross_attn_dim)
-        return condition.unsqueeze(1) # (B, 1, cross_attn_dim)
-
-    def forward(self,
-                gt_subgoal_image: torch.Tensor,
-                
-                current_image: torch.Tensor,
-                
-                goal_image: torch.Tensor,
-                
-                progress: torch.Tensor
-               ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        SOTA Training forward pass with Classifier-Free Guidance (CFG) logic.
-        Predicts noise given noisy ground truth subgoal.
-        [cite: 52]
-        Returns:
-            predicted_epsilon (torch.Tensor): The noise predicted by the U-Net.
-            [cite: 52]
-            epsilon (torch.Tensor): The actual noise added to the image.
-            [cite: 53]
-        """
-        device = gt_subgoal_image.device
-        batch_size = gt_subgoal_image.shape[0]
-
-        # --- 1. Encode conditioning vectors ---
+    def forward(self, gt_subgoal_image: torch.Tensor, current_image: torch.Tensor, goal_image: torch.Tensor, progress: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        device, batch_size = gt_subgoal_image.device, gt_subgoal_image.shape[0]
         condition = self.encode_condition(current_image, goal_image, progress)
-
-        # --- 2. SOTA: Implement CFG (Training) ---
-        # Create a random mask for dropping conditions
-        drop_mask = (torch.rand(batch_size, 1, 1, device=device) < self.config.condition_drop_prob)
-
-        # Get the learned unconditional embedding, expanded to batch size
+        drop_mask = torch.rand(batch_size, 1, 1, device=device) < self.config.condition_drop_prob
         uncond_condition = self.uncond_embedding.expand(batch_size, -1, -1)
-
-        # Select between conditional and unconditional embeddings based on the mask
-        # This is the final conditioning tensor for the U-Net
         final_condition = torch.where(drop_mask, uncond_condition, condition)
-
-        # --- 3. Standard Diffusion Training Steps ---
-        # 3a. Sample noise
         epsilon = torch.randn_like(gt_subgoal_image)
-
-        # 3b. Sample timesteps
         timesteps = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (batch_size,), device=device).long()
-
-        # 3c. Create noisy image
-        
         noisy_subgoal = self.noise_scheduler.add_noise(gt_subgoal_image, epsilon, timesteps)
-
-        # 3d. Predict noise using U-Net
-        predicted_epsilon = self.unet(
-            sample=noisy_subgoal,            # Noisy image input
-            timestep=timesteps,              # Timestep conditioning
-            
-            encoder_hidden_states=final_condition  # CFG-ready conditioning
-            
-        ).sample # Get the predicted noise tensor
-
+        predicted_epsilon = self.unet(sample=noisy_subgoal, timestep=timesteps, encoder_hidden_states=final_condition).sample
         return predicted_epsilon, epsilon
 
-
     @torch.no_grad()
-    def sample(self,
-               current_image: torch.Tensor,
-               goal_image: torch.Tensor,
-               progress: torch.Tensor,
-               num_inference_steps: int = 20,
-               guidance_scale: float = 7.5,
-               generator: Optional[torch.Generator] = None
-              ) -> torch.Tensor:
-        """
-        SOTA Inference pass with Classifier-Free Guidance (CFG).
-        """
-        device = current_image.device
-        batch_size = current_image.shape[0]
-
-        # 1. Set inference timesteps
+    def sample(self, current_image: torch.Tensor, goal_image: torch.Tensor, progress: torch.Tensor, num_inference_steps: int = 20, guidance_scale: float = 7.5, generator: Optional[torch.Generator] = None) -> torch.Tensor:
+        device, batch_size = current_image.device, current_image.shape[0]
         self.noise_scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.noise_scheduler.timesteps
-
-        # 2. Encode condition (and unconditional)
         cond_condition = self.encode_condition(current_image, goal_image, progress)
         uncond_condition = self.uncond_embedding.expand(batch_size, -1, -1)
-        # SOTA: Combine for CFG. This part is correct.
         condition = torch.cat([uncond_condition, cond_condition], dim=0)
-
-        # 3. Initialize latents (noisy image)
-        # --- START OF SOTA PATCH: CORRECT LATENT HANDLING ---
-        # The `latents` variable should ALWAYS have the original batch size (e.g., 16).
-        latents = torch.randn((batch_size, 3, self.config.image_size, self.config.image_size),
-                              generator=generator, device=device, dtype=condition.dtype)
-        # --- END OF SOTA PATCH ---
+        
+        # --- Latent Dtype Safety (Fix for Audit Finding #8) ---
+        model_dtype = next(self.unet.parameters()).dtype
+        latents = torch.randn((batch_size, 3, self.config.image_size, self.config.image_size), generator=generator, device=device, dtype=torch.float32).to(model_dtype)
         
         latents = latents * self.noise_scheduler.init_noise_sigma
-
-        # 4. SOTA Denoising loop (with CFG)
-        for t in tqdm(timesteps, desc="Planner Sampling", leave=False, disable=True):
-            # --- START OF SOTA PATCH (continued) ---
-            # a. Create a temporary, duplicated input for the model.
-            #    `latents` (shape [16,...]) is duplicated to `latent_model_input` (shape [32,...])
+        for t in timesteps:
             latent_model_input = torch.cat([latents] * 2)
-            # --- END OF SOTA PATCH (continued) ---
-            
             latent_model_input = self.noise_scheduler.scale_model_input(latent_model_input, t)
-
-            # b. Predict noise for *both* cond and uncond in one pass. Output is shape [32, ...]
-            noise_pred = self.unet(
-                sample=latent_model_input,
-                timestep=t,
-                encoder_hidden_states=condition
-            ).sample
-
-            # c. Perform Classifier-Free Guidance.
+            noise_pred = self.unet(sample=latent_model_input, timestep=t, encoder_hidden_states=condition).sample
             noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-            # `guided_noise_pred` is the final noise, shape is back to [16, ...]
             guided_noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-            # --- START OF SOTA PATCH (continued) ---
-            # d. Scheduler step.
-            #    Crucially, it uses the guided noise (shape [16,...]) and the
-            #    original, non-duplicated latents (shape [16,...]).
-            #    The shapes now match.
             latents = self.noise_scheduler.step(guided_noise_pred, t, latents).prev_sample
-            # --- END OF SOTA PATCH (continued) ---
+        return latents
 
-        # 5. We no longer need to chunk the final latents, as they are already the correct shape.
-        image = latents
-        return image
+
 
 
 # Example Usage / Unit Test

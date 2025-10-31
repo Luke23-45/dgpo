@@ -36,6 +36,12 @@ model:
   # Embedding for the progress scalar
   progress_embed_dim: 64
 
+  initialize_unet_from_sd: true
+  use_lora: true
+  lora_rank: 16 # A good starting rank for LoRA, can be tuned
+
+  # CRITICAL: This MUST be set to 768 to match the Stable Diffusion v1.5 UNet.
+  unet_cross_attention_dim: 768
   # U-Net structure (this can be tuned, but these are solid defaults)
   unet_block_out_channels: [128, 128, 256, 512, 512]
   # unet_block_out_channels: [64, 64, 128, 256, 256]
@@ -57,8 +63,7 @@ model:
 
   # Probability of dropping conditioning for Classifier-Free Guidance training
   condition_drop_prob: 0.1
-  initialize_unet_from_sd: true # Set to true to load SD weights
-  use_lora: true                # Set to true to enable efficient LoRA fine-tuning
+
 # --- Diffusion Scheduler Config ---
 scheduler:
   timesteps: 50 # Fewer timesteps for faster training/sampling
@@ -88,7 +93,9 @@ training:
   run_full_validation_every_n_epoch: 5 
   limit_lpips_batches: 50
   save_top_k_checkpoints: 3
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/Models/backup_epoch_7.ckpt"
+  # resume_from_checkpoint: "/content/drive/MyDrive/pda/Models/backup_epoch_7.ckpt"
+  resume_from_checkpoint: null
+
   max_steps: -1 # Optionally set a max number of steps instead of epochs
 
 # --- Optimizer Configuration ---

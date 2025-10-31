@@ -1,0 +1,71 @@
+[2025-10-31 16:56:49,691][__main__][INFO] - ----------- ViDHiS Evaluation Configuration -----------
+[2025-10-31 16:56:49,696][__main__][INFO] - planner_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_7.ckpt
+controller_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/outputs/diffusion_pretrain_controller/v1/2025-10-31/02-17-03/checkpoints/backup/backup_epoch_3.pth
+evaluation:
+  goal_image_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/goal_images/goal_ep8_seed42.png
+  num_episodes: 20
+  seed: 100
+environment:
+  xml_path: envs/panda_pick_place.xml
+  max_episode_steps: 500
+data_preprocessing:
+  image_size:
+  - 128
+  - 128
+  img_mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  img_std:
+  - 0.229
+  - 0.224
+  - 0.225
+model:
+  controller:
+    observation_horizon: 2
+    action_horizon: 8
+    action_dim: 8
+    proprio_dim: 22
+    image_feat_dim: 128
+    d_model: 128
+    denoiser_layers: 4
+    denoiser_heads: 4
+scheduler:
+  schedule: cosine
+  timesteps: 50
+  beta_start: 0.0001
+  beta_end: 0.02
+inference:
+  device: cpu
+  planner_inference_steps: 10
+  controller_inference_steps: 1
+  mpc_horizon_k: 4
+  use_torch_compile: false
+  torch_compile_mode: reduce-overhead
+  cpu_threads: null
+visualization:
+  save_video: true
+  video_fps: 20
+  save_subgoals: true
+
+[2025-10-31 16:56:49,697][__main__][INFO] - -----------------------------------------------------
+[2025-10-31 16:56:49,697][__main__][INFO] - Oracle evaluation output directory: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\vidhis_eval\2025-10-31\16-56-49
+[2025-10-31 16:56:49,702][scripts.train_rl][INFO] - Global seed set to 100
+[2025-10-31 16:56:49,703][__main__][INFO] - --- Loading SOTA Controller Model ---
+[2025-10-31 16:56:49,704][__main__][INFO] - Loading Controller from: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\diffusion_pretrain_controller\v1\2025-10-31\02-17-03\checkpoints\backup\backup_epoch_3.pth
+[2025-10-31 16:56:50,584][__main__][ERROR] - An error occurred during the ViDHiS evaluation run.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 506, in main
+    run_vidhis_evaluation(cfg)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 402, in run_vidhis_evaluation
+    controller = load_controller(cfg, device)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 153, in load_controller
+    controller_ckpt = torch.load(controller_path, map_location=device)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\serialization.py", line 1529, in load
+    raise pickle.UnpicklingError(_get_wo_message(str(e))) from None
+_pickle.UnpicklingError: Weights only load failed. This file can still be loaded, to do so you have two options, [1mdo those steps only if you trust the source of the checkpoint[0m. 
+	(1) In PyTorch 2.6, we changed the default value of the `weights_only` argument in `torch.load` from `False` to `True`. Re-running `torch.load` with `weights_only` set to `False` will likely succeed, but it can result in arbitrary code execution. Do it only if you got the file from a trusted source.
+	(2) Alternatively, to load with `weights_only=True` please check the recommended steps in the following error message.
+	WeightsUnpickler error: Unsupported global: GLOBAL numpy.core.multiarray._reconstruct was not an allowed global by default. Please use `torch.serialization.add_safe_globals([numpy.core.multiarray._reconstruct])` or the `torch.serialization.safe_globals([numpy.core.multiarray._reconstruct])` context manager to allowlist this global if you trust this class/function.
+
+Check the documentation of torch.load to learn more about types accepted by default with weights_only https://pytorch.org/docs/stable/generated/torch.load.html.

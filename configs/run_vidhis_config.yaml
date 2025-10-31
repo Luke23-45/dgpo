@@ -14,6 +14,12 @@ planner_ckpt_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/n
 controller_ckpt_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/outputs/diffusion_pretrain_controller/v1/2025-10-31/02-17-03/checkpoints/backup/backup_epoch_3.pth"
 
 
+dataset:
+  # The script needs this path to load the validation set for the Oracle.
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb
+  # The HierarchicalControllerDataset needs this parameter.
+  subgoal_horizon_k: 8
+
 # REQUIRED: Update path to the final goal image
 evaluation:
   goal_image_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/goal_images/goal_ep8_seed42.png"
@@ -21,9 +27,13 @@ evaluation:
   seed: 100
 # --- Environment ---
 environment:
-  xml_path: "envs/panda_pick_place.xml"
+  # xml_path: "envs/panda_pick_place.xml"
   max_episode_steps: 500 # Timeout for evaluation episodes
-
+  env_kwargs:
+    # Move the xml_path inside here, as it's an argument for PandaEnv.
+    xml_path: ${hydra:runtime.cwd}/envs/panda_pick_place.xml
+    # If your PandaEnv constructor takes other arguments (e.g., render_mode),
+    # they would also go here.
 # --- Data Preprocessing (Must match training!) ---
 data_preprocessing:
   image_size: [128, 128] # Should match Planner/Controller training image size
@@ -43,6 +53,7 @@ model:
     d_model: 128           # Match training
     denoiser_layers: 4     # Match training
     denoiser_heads: 4      # Match training
+
     # Add other params if needed (e.g., subgoal encoder details if separate)
 
 # Diffusion Scheduler (Used by Controller, maybe Planner if not in checkpoint)

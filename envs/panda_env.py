@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from scipy.spatial.transform import Rotation, Slerp
 
-
+import copy
 
 @dataclass
 class RenderPostConfig:
@@ -1476,3 +1476,17 @@ class PandaEnv(gym.Env):
     
 
 
+# Add this method
+    def get_mj_state(self) -> mujoco.MjData:
+        """Returns a deep copy of the full simulation state (qpos, qvel, etc.)."""
+        return copy.deepcopy(self.data)
+
+    # Add this method
+    def set_mj_state(self, state: mujoco.MjData):
+        """Sets the full simulation state from a saved MjData object."""
+        self.data.qpos[:] = state.qpos
+        self.data.qvel[:] = state.qvel
+        self.data.act[:] = state.act
+        self.data.time = state.time
+        # You may need to copy other fields depending on your env, but these are the core ones.
+        mujoco.mj_forward(self.model, self.data)

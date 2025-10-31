@@ -1,0 +1,65 @@
+[2025-10-31 17:03:29,272][__main__][INFO] - ----------- ViDHiS Evaluation Configuration -----------
+[2025-10-31 17:03:29,278][__main__][INFO] - planner_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_7.ckpt
+controller_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/outputs/diffusion_pretrain_controller/v1/2025-10-31/02-17-03/checkpoints/backup/backup_epoch_3.pth
+evaluation:
+  goal_image_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/goal_images/goal_ep8_seed42.png
+  num_episodes: 20
+  seed: 100
+environment:
+  xml_path: envs/panda_pick_place.xml
+  max_episode_steps: 500
+data_preprocessing:
+  image_size:
+  - 128
+  - 128
+  img_mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  img_std:
+  - 0.229
+  - 0.224
+  - 0.225
+model:
+  controller:
+    observation_horizon: 2
+    action_horizon: 8
+    action_dim: 8
+    proprio_dim: 22
+    image_feat_dim: 128
+    d_model: 128
+    denoiser_layers: 4
+    denoiser_heads: 4
+scheduler:
+  schedule: cosine
+  timesteps: 50
+  beta_start: 0.0001
+  beta_end: 0.02
+inference:
+  device: cpu
+  planner_inference_steps: 10
+  controller_inference_steps: 1
+  mpc_horizon_k: 4
+  use_torch_compile: false
+  torch_compile_mode: reduce-overhead
+  cpu_threads: null
+visualization:
+  save_video: true
+  video_fps: 20
+  save_subgoals: true
+
+[2025-10-31 17:03:29,278][__main__][INFO] - -----------------------------------------------------
+[2025-10-31 17:03:29,278][__main__][INFO] - Oracle evaluation output directory: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\vidhis_eval\2025-10-31\17-03-29
+[2025-10-31 17:03:29,284][scripts.train_rl][INFO] - Global seed set to 100
+[2025-10-31 17:03:29,284][__main__][INFO] - --- Loading SOTA Controller Model ---
+[2025-10-31 17:03:29,285][__main__][INFO] - Loading Controller from: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\diffusion_pretrain_controller\v1\2025-10-31\02-17-03\checkpoints\backup\backup_epoch_3.pth
+[2025-10-31 17:03:29,889][__main__][WARNING] - `proprio_dim` not found in checkpoint config. Falling back to the value from the current evaluation config.
+[2025-10-31 17:03:29,889][__main__][ERROR] - An error occurred during the ViDHiS evaluation run.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 519, in main
+    run_vidhis_evaluation(cfg)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 415, in run_vidhis_evaluation
+    controller = load_controller(cfg, device)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 182, in load_controller
+    scheduler_cfg=NoiseSchedulerConfig(**scheduler_cfg_dict),
+TypeError: NoiseSchedulerConfig.__init__() got an unexpected keyword argument 'schedule_type'

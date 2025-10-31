@@ -1,0 +1,179 @@
+[2025-10-31 17:17:07,185][__main__][INFO] - ----------- ViDHiS Evaluation Configuration -----------
+[2025-10-31 17:17:07,190][__main__][INFO] - planner_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_7.ckpt
+controller_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/outputs/diffusion_pretrain_controller/v1/2025-10-31/02-17-03/checkpoints/backup/backup_epoch_3.pth
+dataset:
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb
+  subgoal_horizon_k: 8
+evaluation:
+  goal_image_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/goal_images/goal_ep8_seed42.png
+  num_episodes: 20
+  seed: 100
+environment:
+  max_episode_steps: 500
+  env_kwargs:
+    xml_path: ${hydra:runtime.cwd}/envs/panda_pick_place.xml
+data_preprocessing:
+  image_size:
+  - 128
+  - 128
+  img_mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  img_std:
+  - 0.229
+  - 0.224
+  - 0.225
+model:
+  controller:
+    observation_horizon: 2
+    action_horizon: 8
+    action_dim: 8
+    proprio_dim: 22
+    image_feat_dim: 128
+    d_model: 128
+    denoiser_layers: 4
+    denoiser_heads: 4
+scheduler:
+  schedule: cosine
+  timesteps: 50
+  beta_start: 0.0001
+  beta_end: 0.02
+inference:
+  device: cpu
+  planner_inference_steps: 10
+  controller_inference_steps: 1
+  mpc_horizon_k: 4
+  use_torch_compile: false
+  torch_compile_mode: reduce-overhead
+  cpu_threads: null
+visualization:
+  save_video: true
+  video_fps: 20
+  save_subgoals: true
+
+[2025-10-31 17:17:07,190][__main__][INFO] - -----------------------------------------------------
+[2025-10-31 17:17:07,190][__main__][INFO] - Oracle evaluation output directory: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\vidhis_eval\2025-10-31\17-17-07
+[2025-10-31 17:17:07,195][scripts.train_rl][INFO] - Global seed set to 100
+[2025-10-31 17:17:07,196][__main__][INFO] - --- Loading SOTA Controller Model ---
+[2025-10-31 17:17:07,196][__main__][INFO] - Loading Controller from: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\diffusion_pretrain_controller\v1\2025-10-31\02-17-03\checkpoints\backup\backup_epoch_3.pth
+[2025-10-31 17:17:07,642][__main__][WARNING] - `proprio_dim` not found in checkpoint config. Falling back to the value from the current evaluation config.
+[2025-10-31 17:17:07,643][__main__][WARNING] - Found legacy 'schedule_type' key in checkpoint config. Migrating to 'schedule'.
+[2025-10-31 17:17:08,559][models.diffusion_policy][INFO] - ViDHiS Controller (DiffusionPolicy) initialized on device: cpu
+[2025-10-31 17:17:08,601][__main__][INFO] - Controller EMA weights loaded successfully.
+[2025-10-31 17:17:08,603][__main__][INFO] - Controller loaded successfully.
+[2025-10-31 17:17:08,608][__main__][INFO] - Loading VALIDATION dataset for Oracle from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb
+[2025-10-31 17:17:08,608][utils.controller_dataset][INFO] - Initializing HierarchicalControllerDataset with H_o=2, H_a=8, k=8
+[2025-10-31 17:17:08,609][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validations\expert_validation_run_99914b93_index.json...
+[2025-10-31 17:17:08,610][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-31 17:17:08,610][utils.controller_dataset][INFO] - Successfully initialized. Found 2933 valid controller samples across 12 episodes.
+[2025-10-31 17:17:08,610][__main__][INFO] - Initializing environment...
+[2025-10-31 17:17:10,867][__main__][INFO] - --- Starting Trajectory Replay for Episode 0 ---
+[2025-10-31 17:17:10,868][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validations\expert_validation_run_99914b93.lmdb | mode=RO | file-mode
+[2025-10-31 17:17:11,013][__main__][INFO] - [OraclePlanner] Initialized for Episode 0 (Length: 248)
+[2025-10-31 17:17:11,014][__main__][ERROR] - Error resetting env for episode 0. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.
+[2025-10-31 17:17:11,015][__main__][INFO] - --- Starting Trajectory Replay for Episode 1 ---
+[2025-10-31 17:17:11,147][__main__][INFO] - [OraclePlanner] Initialized for Episode 1 (Length: 220)
+[2025-10-31 17:17:11,151][__main__][ERROR] - Error resetting env for episode 1. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.
+[2025-10-31 17:17:11,151][__main__][INFO] - --- Starting Trajectory Replay for Episode 2 ---
+[2025-10-31 17:17:11,288][__main__][INFO] - [OraclePlanner] Initialized for Episode 2 (Length: 232)
+[2025-10-31 17:17:11,291][__main__][ERROR] - Error resetting env for episode 2. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.
+[2025-10-31 17:17:11,292][__main__][INFO] - --- Starting Trajectory Replay for Episode 3 ---
+[2025-10-31 17:17:11,490][__main__][INFO] - [OraclePlanner] Initialized for Episode 3 (Length: 268)
+[2025-10-31 17:17:11,494][__main__][ERROR] - Error resetting env for episode 3. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.
+[2025-10-31 17:17:11,494][__main__][INFO] - --- Starting Trajectory Replay for Episode 4 ---
+[2025-10-31 17:17:11,667][__main__][INFO] - [OraclePlanner] Initialized for Episode 4 (Length: 264)
+[2025-10-31 17:17:11,670][__main__][ERROR] - Error resetting env for episode 4. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.
+[2025-10-31 17:17:11,671][__main__][INFO] - --- Starting Trajectory Replay for Episode 5 ---
+[2025-10-31 17:17:11,821][__main__][INFO] - [OraclePlanner] Initialized for Episode 5 (Length: 254)
+[2025-10-31 17:17:11,822][__main__][ERROR] - Error resetting env for episode 5. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.
+[2025-10-31 17:17:11,822][__main__][INFO] - --- Starting Trajectory Replay for Episode 6 ---
+[2025-10-31 17:17:11,969][__main__][INFO] - [OraclePlanner] Initialized for Episode 6 (Length: 250)
+[2025-10-31 17:17:11,973][__main__][ERROR] - Error resetting env for episode 6. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.
+[2025-10-31 17:17:11,973][__main__][INFO] - --- Starting Trajectory Replay for Episode 7 ---
+[2025-10-31 17:17:12,124][__main__][INFO] - [OraclePlanner] Initialized for Episode 7 (Length: 247)
+[2025-10-31 17:17:12,128][__main__][ERROR] - Error resetting env for episode 7. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.
+[2025-10-31 17:17:12,128][__main__][INFO] - --- Starting Trajectory Replay for Episode 8 ---
+[2025-10-31 17:17:12,262][__main__][INFO] - [OraclePlanner] Initialized for Episode 8 (Length: 246)
+[2025-10-31 17:17:12,266][__main__][ERROR] - Error resetting env for episode 8. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.
+[2025-10-31 17:17:12,267][__main__][INFO] - --- Starting Trajectory Replay for Episode 9 ---
+[2025-10-31 17:17:12,448][__main__][INFO] - [OraclePlanner] Initialized for Episode 9 (Length: 302)
+[2025-10-31 17:17:12,452][__main__][ERROR] - Error resetting env for episode 9. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.
+[2025-10-31 17:17:12,452][__main__][INFO] - --- Starting Trajectory Replay for Episode 10 ---
+[2025-10-31 17:17:12,610][__main__][INFO] - [OraclePlanner] Initialized for Episode 10 (Length: 253)
+[2025-10-31 17:17:12,614][__main__][ERROR] - Error resetting env for episode 10. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.
+[2025-10-31 17:17:12,614][__main__][INFO] - --- Starting Trajectory Replay for Episode 11 ---
+[2025-10-31 17:17:12,770][__main__][INFO] - [OraclePlanner] Initialized for Episode 11 (Length: 257)
+[2025-10-31 17:17:12,774][__main__][ERROR] - Error resetting env for episode 11. Skipping.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 467, in run_vidhis_evaluation
+    obs_dict = reset_env_to_expert_state(env, val_dataset, ep_idx, start_timestep)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 135, in reset_env_to_expert_state
+    raise NotImplementedError("The PandaEnv must have a `set_state(state)` method to support trajectory replay.")
+NotImplementedError: The PandaEnv must have a `set_state(state)` method to support trajectory replay.

@@ -1,0 +1,90 @@
+[2025-10-31 17:22:53,299][__main__][INFO] - ----------- ViDHiS Evaluation Configuration -----------
+[2025-10-31 17:22:53,307][__main__][INFO] - planner_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_7.ckpt
+controller_ckpt_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/outputs/diffusion_pretrain_controller/v1/2025-10-31/02-17-03/checkpoints/backup/backup_epoch_3.pth
+dataset:
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb
+  subgoal_horizon_k: 8
+evaluation:
+  goal_image_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/goal_images/goal_ep8_seed42.png
+  num_episodes: 20
+  seed: 100
+environment:
+  max_episode_steps: 500
+  env_kwargs:
+    xml_path: ${hydra:runtime.cwd}/envs/panda_pick_place.xml
+data_preprocessing:
+  image_size:
+  - 128
+  - 128
+  img_mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  img_std:
+  - 0.229
+  - 0.224
+  - 0.225
+model:
+  controller:
+    observation_horizon: 2
+    action_horizon: 8
+    action_dim: 8
+    proprio_dim: 22
+    image_feat_dim: 128
+    d_model: 128
+    denoiser_layers: 4
+    denoiser_heads: 4
+scheduler:
+  schedule: cosine
+  timesteps: 50
+  beta_start: 0.0001
+  beta_end: 0.02
+inference:
+  device: cpu
+  planner_inference_steps: 10
+  controller_inference_steps: 1
+  mpc_horizon_k: 4
+  use_torch_compile: false
+  torch_compile_mode: reduce-overhead
+  cpu_threads: null
+visualization:
+  save_video: true
+  video_fps: 20
+  save_subgoals: true
+
+[2025-10-31 17:22:53,308][__main__][INFO] - -----------------------------------------------------
+[2025-10-31 17:22:53,309][__main__][INFO] - Oracle evaluation output directory: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\vidhis_eval\2025-10-31\17-22-53
+[2025-10-31 17:22:53,315][scripts.train_rl][INFO] - Global seed set to 100
+[2025-10-31 17:22:53,316][__main__][INFO] - --- Loading SOTA Controller Model ---
+[2025-10-31 17:22:53,316][__main__][INFO] - Loading Controller from: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\diffusion_pretrain_controller\v1\2025-10-31\02-17-03\checkpoints\backup\backup_epoch_3.pth
+[2025-10-31 17:22:53,948][__main__][WARNING] - `proprio_dim` not found in checkpoint config. Falling back to the value from the current evaluation config.
+[2025-10-31 17:22:53,949][__main__][WARNING] - Found legacy 'schedule_type' key in checkpoint config. Migrating to 'schedule'.
+[2025-10-31 17:22:55,101][models.diffusion_policy][INFO] - ViDHiS Controller (DiffusionPolicy) initialized on device: cpu
+[2025-10-31 17:22:55,154][__main__][INFO] - Controller EMA weights loaded successfully.
+[2025-10-31 17:22:55,161][__main__][INFO] - Controller loaded successfully.
+[2025-10-31 17:22:55,165][__main__][INFO] - Loading VALIDATION dataset for Oracle from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb
+[2025-10-31 17:22:55,166][utils.controller_dataset][INFO] - Initializing HierarchicalControllerDataset with H_o=2, H_a=8, k=8
+[2025-10-31 17:22:55,166][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validations\expert_validation_run_99914b93_index.json...
+[2025-10-31 17:22:55,167][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-10-31 17:22:55,167][utils.controller_dataset][INFO] - Successfully initialized. Found 2933 valid controller samples across 12 episodes.
+[2025-10-31 17:22:55,168][__main__][INFO] - Initializing environment...
+[2025-10-31 17:22:59,234][__main__][INFO] - --- Starting Guided Replay guided by expert Episode 0 ---
+[2025-10-31 17:22:59,236][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validations\expert_validation_run_99914b93.lmdb | mode=RO | file-mode
+[2025-10-31 17:22:59,650][__main__][INFO] - [OraclePlanner] Initialized with expert trajectory from Episode 0 (Length: 248)
+[2025-10-31 17:23:01,348][__main__][ERROR] - An error occurred during the ViDHiS evaluation run.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 567, in main
+    run_vidhis_evaluation(cfg)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 511, in run_vidhis_evaluation
+    subgoal_img_tensor = planner.sample(current_episode_step=step_count)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 450, in sample
+    subgoal_tensor = preprocess_obs_image(gt_subgoal_np, self.cfg, self.device)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\vidhis.py", line 366, in preprocess_obs_image
+    return transform(img_np).to(device)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torchvision\transforms\transforms.py", line 95, in __call__
+    img = t(img)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torchvision\transforms\transforms.py", line 137, in __call__
+    return F.to_tensor(pic)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torchvision\transforms\functional.py", line 154, in to_tensor
+    img = torch.from_numpy(pic.transpose((2, 0, 1))).contiguous()
+ValueError: At least one stride in the given numpy array is negative, and tensors with negative strides are not currently supported. (You can probably work around this by making a copy of your array  with array.copy().) 
