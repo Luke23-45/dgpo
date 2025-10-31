@@ -8,7 +8,7 @@ import random
 from pathlib import Path
 import sys
 from typing import Dict, Any, Tuple, Optional, List
-
+# from utils.data_utils import ObsHistoryBuffer
 # Add project root for imports if necessary (adjust relative path as needed)
 try:
     project_root = Path(__file__).resolve().parents[1]
@@ -441,7 +441,7 @@ def run_vidhis_evaluation(cfg: DictConfig):
 
 # --- Hydra Main Entry Point ---
 
-@hydra.main(version_base=None, config_path="../../configs", config_name="run_vidhis_config")
+@hydra.main(version_base=None, config_path="../configs", config_name="run_vidhis_config")
 def main(cfg: DictConfig):
     # Basic logging setup (Hydra might configure handlers too)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")

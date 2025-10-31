@@ -9,12 +9,16 @@ hydra:
 
 # --- Paths ---
 # REQUIRED: Update these paths to your trained models
-planner_ckpt_path: ??? # e.g., outputs/planner_train/YYYY-MM-DD/HH-MM-SS/checkpoints/planner-epoch=XX-....ckpt
-controller_ckpt_path: ??? # e.g., outputs/controller_bc_train/YYYY-MM-DD/HH-MM-SS/checkpoints/last.pth OR RL finetuned checkpoint
+planner_ckpt_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_7.ckpt"
+
+controller_ckpt_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/outputs/diffusion_pretrain_controller/v1/2025-10-31/02-17-03/checkpoints/backup/backup_epoch_3.pth"
+
+
 # REQUIRED: Update path to the final goal image
 evaluation:
-  goal_image_path: ??? # e.g., data/goal_images/red_block_on_green_square.png
-
+  goal_image_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/goal_images/goal_ep8_seed42.png"
+  num_episodes: 20 # Number of episodes to run
+  seed: 100
 # --- Environment ---
 environment:
   xml_path: "envs/panda_pick_place.xml"
@@ -29,18 +33,6 @@ data_preprocessing:
 # --- Model Architectures (Need enough info to load models) ---
 # These should ideally mirror the training configs or be loadable from checkpoints
 model:
-  planner:
-    # Need parameters matching VisualPlannerDiffusion init to load correctly
-    image_size: ${data_preprocessing.image_size[0]}
-    vit_model_name: 'google/vit-base-patch16-224-in21k'
-    vit_feature_dim: 768
-    freeze_vit: true # Should match training
-    progress_embed_dim: 64
-    unet_block_out_channels: [64, 64, 128, 128, 256]
-    unet_down_block_types: ["DownBlock2D","DownBlock2D","CrossAttnDownBlock2D","CrossAttnDownBlock2D","DownBlock2D"]
-    unet_up_block_types: ["UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "UpBlock2D","UpBlock2D"]
-    num_diffusion_timesteps: 50 # Match scheduler training
-
   controller:
     # Need parameters matching DiffusionPolicy init used for Controller training
     observation_horizon: 2 # Match training
@@ -72,10 +64,6 @@ inference:
   torch_compile_mode: "reduce-overhead"
   cpu_threads: null # Set to integer (e.g., 4) to manually limit, null uses default/auto
 
-# --- Evaluation Parameters ---
-evaluation:
-  num_episodes: 20 # Number of episodes to run
-  seed: 100
 
 # --- Visualization Parameters ---
 visualization:

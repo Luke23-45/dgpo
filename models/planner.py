@@ -6,6 +6,12 @@ import torch.nn as nn
 import math
 from typing import Tuple, Optional, Dict, Any
 
+try:
+    from peft import LoraConfig, get_peft_model
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
+
 # SOTA Libraries for components
 try:
     # Use CLIP for rich semantic vision encoding
@@ -96,7 +102,12 @@ class VisualPlannerDiffusion( ModelMixin, ConfigMixin):
                  num_diffusion_timesteps: int = 100,
                  
                  condition_drop_prob: float = 0.1, # Dropout probability for SOTA Classifier-Free Guidance
+                 initialize_unet_from_sd: bool = True,
+                 
+                 # Controls whether to apply LoRA for efficient fine-tuning
+                 use_lora: bool = True
                  ):
+        
         super().__init__()
         # Register config for saving/loading with diffusers .save_pretrained()
         
@@ -108,6 +119,8 @@ class VisualPlannerDiffusion( ModelMixin, ConfigMixin):
              num_diffusion_timesteps=num_diffusion_timesteps,
              condition_drop_prob=condition_drop_prob,
              unet_attention_head_dim=unet_attention_head_dim,
+             initialize_unet_from_sd=initialize_unet_from_sd, # Add this
+             use_lora=use_lora                          # Add this
         )
 
         log.info(f"Initializing SOTA VisualPlannerDiffusion with Vision Encoder: {vit_model_name}")
@@ -173,6 +186,52 @@ class VisualPlannerDiffusion( ModelMixin, ConfigMixin):
             cross_attention_dim=cross_attn_dim, # Dimension of conditioning
             attention_head_dim=unet_attention_head_dim,
         )
+
+        if initialize_unet_from_sd:
+            try:
+                log.info("Attempting to load pre-trained UNet weights from Stable Diffusion Inpainting...")
+                pretrained_unet = UNet2DConditionModel.from_pretrained(
+                    "runwayml/stable-diffusion-inpainting",
+                    subfolder="unet",
+                    torch_dtype=torch.float32 # Use float32 for CPU/GPU compatibility during load
+                )
+                # Load all weights that match in name and shape, skip others (like the input conv layer)
+                self.unet.load_state_dict(pretrained_unet.state_dict(), strict=False)
+                log.info("Successfully transferred weights from pre-trained UNet.")
+            except Exception as e:
+                log.error(f"Failed to load pre-trained UNet. The UNet will be trained from scratch. Error: {e}")
+
+        # 3.2: Apply LoRA for Parameter-Efficient Fine-Tuning (PEFT)
+        if use_lora:
+            if PEFT_AVAILABLE:
+                log.info("Applying LoRA to the UNet for efficient fine-tuning...")
+                lora_config = LoraConfig(
+                    r=16,  # Rank of the adapter matrices. Higher rank = more parameters, more capacity.
+                    lora_alpha=32, # A scaling factor.
+                    target_modules=["to_q", "to_k", "to_v", "to_out.0"], # Target the attention projections
+                    lora_dropout=0.1,
+                )
+                # Wrap the UNet to create a PEFT model
+                self.unet = get_peft_model(self.unet, lora_config)
+                log.info("LoRA applied. Trainable parameters:")
+                self.unet.print_trainable_parameters()
+            else:
+                log.warning("`peft` library not found. Cannot apply LoRA. Training the full UNet.")
+
+        # 3.3: Freeze early layers of the UNet to preserve general features
+        log.info("Freezing early UNet down_blocks to preserve pre-trained features.")
+        # Note: If using LoRA, most of the UNet is already frozen by default.
+        # This is an additional safety measure and is critical if NOT using LoRA.
+        for name, param in self.unet.named_parameters():
+            if "down_blocks.0" in name or "down_blocks.1" in name:
+                # If LoRA is active, we only want to freeze non-LoRA parameters
+                if 'lora' not in name:
+                    param.requires_grad = False
+
+        # 3.4: Apply memory and stability hacks
+        log.info("Enabling UNet optimizations: Sliced Attention and FreeU.")
+        self.unet.set_attention_slice("auto") # Use less memory during attention
+        self.unet.enable_freeu(s1=0.9, s2=0.2, b1=1.1, b2=1.2) # Improve sample quality
 
         # --- 5. SOTA Noise Scheduler (DPM-Solver++) ---
         # This scheduler provides SOTA results in few inference steps

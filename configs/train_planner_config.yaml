@@ -57,7 +57,8 @@ model:
 
   # Probability of dropping conditioning for Classifier-Free Guidance training
   condition_drop_prob: 0.1
-
+  initialize_unet_from_sd: true # Set to true to load SD weights
+  use_lora: true                # Set to true to enable efficient LoRA fine-tuning
 # --- Diffusion Scheduler Config ---
 scheduler:
   timesteps: 50 # Fewer timesteps for faster training/sampling
