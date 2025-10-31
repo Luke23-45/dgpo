@@ -21,7 +21,7 @@ dataset:
   img_std: [0.26862954, 0.26130258, 0.27577711]
   use_random_aug: false # Enable basic augmentations
   # val_split: 0.05 # 5% validation split
-  num_workers: 0 # Set > 0 for multi-process loading (careful on Windows)
+  num_workers: 2 # Set > 0 for multi-process loading (careful on Windows)
 
 # --- Model Configuration ---
 model:
