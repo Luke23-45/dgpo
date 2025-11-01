@@ -15,7 +15,7 @@ except ImportError:
 # SOTA Libraries for components
 try:
     # Use CLIP for rich semantic vision encoding
-    from transformers import CLIPVisionModel, ViTConfig
+    from transformers import CLIPVisionModel, SiglipVisionModel, ViTConfig
     from diffusers import (
         UNet2DConditionModel,
         DPMSolverMultistepScheduler, # Use SOTA scheduler
@@ -77,7 +77,7 @@ class VisualPlannerDiffusion(ModelMixin, ConfigMixin):
     """SOTA Visual Planner with optional UNet warm-starting and LoRA fine-tuning."""
     def __init__(self,
                  image_size: int = 224,
-                 vit_model_name: str = 'openai/clip-vit-base-patch32',
+                 vit_model_name: str = "google/siglip-base-patch16-224",
                  vit_feature_dim: int = 768,
                  freeze_vit: bool = True,
                  progress_embed_dim: int = 64,
@@ -100,7 +100,14 @@ class VisualPlannerDiffusion(ModelMixin, ConfigMixin):
 
         # --- 1. Vision and Progress Encoders (Correct) ---
         log.info(f"Initializing VisualPlannerDiffusion with Vision Encoder: {vit_model_name}")
-        self.vision_encoder = CLIPVisionModel.from_pretrained(vit_model_name)
+        
+        if 'siglip' in vit_model_name.lower():
+            log.info(f"Detected SigLIP model. Loading with SiglipVisionModel.")
+            self.vision_encoder = SiglipVisionModel.from_pretrained(vit_model_name)
+        else:
+            log.info(f"Detected CLIP model. Loading with CLIPVisionModel.")
+            self.vision_encoder = CLIPVisionModel.from_pretrained(vit_model_name)
+            
         if freeze_vit:
             self.vision_encoder.requires_grad_(False)
         self.progress_embedding = SinusoidalPositionEmbeddings(progress_embed_dim)
@@ -123,7 +130,7 @@ class VisualPlannerDiffusion(ModelMixin, ConfigMixin):
                     raise ValueError(f"To use Stable Diffusion pre-training, `unet_cross_attention_dim` must be 768, but got {unet_cross_attention_dim}.")
                 # --- START: SOTA MODEL SIZE PATCH ---
                 # Use the much smaller, distilled version of the SD 1.5 UNet
-                sd_unet = UNet2DConditionModel.from_pretrained("segmind/tiny-sd", subfolder="unet")
+                sd_unet = UNet2DConditionModel.from_pretrained("nota-ai/bk-sdm-tiny", subfolder="unet")
                 # --- END: SOTA MODEL SIZE PATCH ---
                 # --- SOTA SURGERY (Fix for Audit Finding #11) ---
                 old_conv_in = sd_unet.conv_in
@@ -171,7 +178,7 @@ class VisualPlannerDiffusion(ModelMixin, ConfigMixin):
         # --- Noise Scheduler (Fix for Audit Finding #1 and #6) ---
         log.info("Initializing SOTA DPM-Solver++ Scheduler.")
         try:
-            self.noise_scheduler = DPMSolverMultistepScheduler.from_pretrained("segmind/tiny-sd", subfolder="scheduler", use_karras_sigmas=True)
+            self.noise_scheduler = DPMSolverMultistepScheduler.from_pretrained("nota-ai/bk-sdm-tiny", subfolder="scheduler", use_karras_sigmas=True)
         except Exception:
             log.warning("Could not load scheduler from pretrained. Initializing with default config.")
             self.noise_scheduler = DPMSolverMultistepScheduler.from_config(self.config, use_karras_sigmas=True)
@@ -239,7 +246,7 @@ if __name__ == '__main__':
     # Example config
     planner = VisualPlannerDiffusion(
         image_size=128, # Smaller for testing
-        vit_model_name='openai/clip-vit-base-patch32', # Use smaller CLIP for testing
+        vit_model_name= "google/siglip-base-patch16-224",
         vit_feature_dim=512, # CLIP-Base-32 dim
         freeze_vit=True,
         num_diffusion_timesteps=50, # Fewer steps for faster testing

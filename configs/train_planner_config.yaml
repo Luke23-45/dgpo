@@ -17,8 +17,8 @@ dataset:
   # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validations/expert_validation_run_99914b93.lmdb"
   subgoal_horizon_k: 8 # How many steps ahead is the subgoal image?
   image_size: [224, 224] # Smaller for faster training, match model.image_size
-  img_mean: [0.48145466, 0.4578275, 0.40821073]
-  img_std: [0.26862954, 0.26130258, 0.27577711]
+  img_mean: [0.5, 0.5, 0.5]
+  img_std: [0.5, 0.5, 0.5]
   use_random_aug: false # Enable basic augmentations
   # val_split: 0.05 # 5% validation split
   num_workers: 2 # Set > 0 for multi-process loading (careful on Windows)
@@ -29,19 +29,19 @@ model:
   
   # --- START OF PATCH 2: SOTA MODEL PARAMETERS ---
   # Use the powerful CLIP-Large model as the vision backbone
-  vit_model_name: 'openai/clip-vit-base-patch32'
+  vit_model_name: "google/siglip-base-patch16-224"
   vit_feature_dim: 768  # Feature dimension for CLIP-Large
   freeze_vit: true
 
   # Embedding for the progress scalar
   progress_embed_dim: 64
 
-  initialize_unet_from_sd: true
-  use_lora: true
+  initialize_unet_from_sd: false
+  use_lora: false
   lora_rank: 16 # A good starting rank for LoRA, can be tuned
 
   # CRITICAL: This MUST be set to 768 to match the Stable Diffusion v1.5 UNet.
-  unet_cross_attention_dim: 768
+  unet_cross_attention_dim: null
   # U-Net structure (this can be tuned, but these are solid defaults)
   unet_block_out_channels: [128, 128, 256, 512, 512]
   # unet_block_out_channels: [64, 64, 128, 256, 256]

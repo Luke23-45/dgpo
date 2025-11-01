@@ -1,0 +1,91 @@
+[2025-11-01 14:02:39,072][__main__][INFO] - seed: 42
+model:
+  action_dim: 7
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+  p_plan_drop: 0.1
+  p_obs_drop: 0.1
+scheduler:
+  timesteps: 100
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+dataset:
+  train_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  num_workers: 2
+training:
+  batch_size: 64
+  val_batch_size: ${training.batch_size}
+  ema_decay: 0.999
+  use_activation_checkpointing: true
+  use_swa: false
+  swa_lrs: 1.0e-05
+  resume_from_checkpoint: null
+validation:
+  run_full_validation_every_n_epoch: 5
+  sampling_steps: 30
+  guidance_scale_plan: 7.5
+  guidance_scale_obs: 1.5
+optimizer:
+  lr: 0.0001
+  weight_decay: 1.0e-06
+  warmup_steps: 0.05
+  gradient_clip_val: 1.0
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 1000
+  check_val_every_n_epoch: 1
+  accumulate_grad_batches: 1
+logging:
+  use_wandb: true
+  wandb_project: ego_planner_v4
+  wandb_run_name: null
+  log_every_n_steps: 50
+
+[2025-11-01 14:02:39,235][models.ego_planner][INFO] - [Strategist] Initializing ViT backbone: google/siglip-base-patch16-224
+[2025-11-01 14:02:40,377][models.ego_planner][INFO] - [Strategist] Derived configuration: image_size=224, patch_size=16, num_patches=197.
+[2025-11-01 14:02:40,506][models.ego_planner][INFO] - [Pilot] Activation Checkpointing: Enabled
+[2025-11-01 14:02:46,437][models.ego_planner][INFO] - EgoPlanner v5 (Definitive & Audited) model initialized.
+[2025-11-01 14:02:46,978][__main__][INFO] - EMA enabled with decay rate: 0.999
+[2025-11-01 14:02:46,981][__main__][INFO] - Definitive SOTA EgoPlannerLightningModule (v2) initialized.
+[2025-11-01 14:05:12,115][__main__][INFO] - Loading TRAINING dataset from: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+[2025-11-01 14:05:12,116][utils.ego_planner_dataset][INFO] - Initializing EgoPlannerDataset v3 (use_aug=True) with H_o=2, H_a=8
+[2025-11-01 14:05:12,118][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93_index.json...
+[2025-11-01 14:05:12,123][utils.expert_dataset][INFO] - Loaded 260 episodes, 65576 total valid chunks (Virtually Indexed).
+[2025-11-01 14:05:12,127][utils.ego_planner_dataset][INFO] - Successfully initialized with definitive transform pipelines. Found 65576 valid samples.
+[2025-11-01 14:05:12,133][__main__][INFO] - Loading VALIDATION dataset from: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+[2025-11-01 14:05:12,134][utils.ego_planner_dataset][INFO] - Initializing EgoPlannerDataset v3 (use_aug=False) with H_o=2, H_a=8
+[2025-11-01 14:05:12,135][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-11-01 14:05:12,137][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-11-01 14:05:12,137][utils.ego_planner_dataset][INFO] - Successfully initialized with definitive transform pipelines. Found 2945 valid samples.
+[2025-11-01 14:05:12,152][utils.samplers][INFO] - Building episode-to-index map for sampler...
+[2025-11-01 14:05:12,298][utils.samplers][INFO] - Map building complete.
+[2025-11-01 14:05:12,299][__main__][INFO] - Using EpisodeAwareSampler for training to optimize I/O.
+[2025-11-01 14:06:29,539][__main__][WARNING] - Training interrupted or failed: Caught AttributeError in DataLoader worker process 0.
+Original Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\_utils\worker.py", line 349, in _worker_loop
+    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\_utils\fetch.py", line 52, in fetch
+    data = [self.dataset[idx] for idx in possibly_batched_index]
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\_utils\fetch.py", line 52, in <listcomp>
+    data = [self.dataset[idx] for idx in possibly_batched_index]
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\utils\ego_planner_dataset.py", line 117, in __getitem__
+    if not (0 <= idx < len(self)):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\utils\ego_planner_dataset.py", line 114, in __len__
+    return len(self.samples)
+AttributeError: 'EgoPlannerDataset' object has no attribute 'samples'
+
+[2025-11-01 14:06:29,542][__main__][INFO] - Attempting to save a final 'interrupted.ckpt'...
+[2025-11-01 14:06:29,544][__main__][ERROR] - Could not save final interrupted checkpoint: 'Trainer' object has no attribute 'lr_schedulers'

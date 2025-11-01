@@ -3,7 +3,6 @@
 
 """
 State-of-the-art pretraining script for the Transformer-based DiffusionPolicy.
-
 This script is designed for robustness, reproducibility, and deep experimental analysis,
 incorporating modern best practices for training large-scale robotics models.
 
@@ -303,30 +302,38 @@ class ControllerBCTrainer:
 
 
 
-
-
     def _load_checkpoint(self, path: Path):
-        """
-        Loads a full training state, performing SOTA "checkpoint surgery" to:
-        1. Migrate all compatible weights from previous architectures.
-        2. Warm-start new components (subgoal encoder) using pre-trained weights.
-        3. Safely reset the optimizer state after migration.
-        """
         if not path.exists():
             log.warning(f"Checkpoint not found at {path}, starting from scratch.")
             return
 
         log.info(f"Loading checkpoint for migration/resumption: {path}")
-        # Load checkpoint to CPU first to perform surgery safely.
         ckpt = torch.load(path, map_location=torch.device('cpu'), weights_only=False)
         
-        # Helper function to perform the migration for any state dict.
+        # This is the helper function we will modify
         def _migrate_and_warm_start(state_dict_to_migrate, new_model_template):
             migrated_dict = {}
             is_migrated = False
 
-            # --- Stage 1: Direct Migration ---
+            # --- START: CHECKPOINT SURGERY PATCH ---
+            # Define the layers that are known to be incompatible due to the architecture upgrade.
+            # We will skip loading these, allowing the new model to use its random initialization.
+            incompatible_keys_to_skip = [
+                "vision_proj.weight",
+                "vision_proj.bias"
+            ]
+            # --- END: CHECKPOINT SURGERY PATCH ---
+
+            # --- Stage 1: Direct Migration & Surgery ---
             for key, value in state_dict_to_migrate.items():
+                
+                # --- START: CHECKPOINT SURGERY PATCH ---
+                if key in incompatible_keys_to_skip:
+                    log.warning(f"Performing surgery: Skipping incompatible key '{key}' from checkpoint.")
+                    is_migrated = True # Mark as migrated to reset optimizer
+                    continue # Skip this key entirely
+                # --- END: CHECKPOINT SURGERY PATCH ---
+
                 new_key = key
                 if key.startswith("vision_fusion_encoder.primary_encoder."):
                     new_key = key.replace("vision_fusion_encoder.primary_encoder.", "primary_encoder.", 1)
@@ -334,15 +341,15 @@ class ControllerBCTrainer:
                     new_key = key.replace("vision_fusion_encoder.wrist_encoder.", "wrist_encoder.", 1)
                 elif key.startswith("vision_fusion_encoder.proprio_proj."):
                     new_key = key.replace("vision_fusion_encoder.proprio_proj.", "proprio_proj.", 1)
-                elif key.startswith("vision_fusion_encoder.fusion_proj."): # Fixes Flaw 1
-                    new_key = key.replace("vision_fusion_encoder.fusion_proj.", "vision_proj.", 1)
+                # This old migration rule is now obsolete because we are skipping the key.
+                # We can safely comment it out or remove it.
+                # elif key.startswith("vision_fusion_encoder.fusion_proj."):
+                #     new_key = key.replace("vision_fusion_encoder.fusion_proj.", "vision_proj.", 1)
                 elif key == "uncond_proprio_embedding":
                     new_key = "uncond_embeddings.proprio"
-                elif key == "uncond_vis_embedding": # Fixes Flaw 1
+                elif key == "uncond_vis_embedding":
                     new_key = "uncond_embeddings.vision"
-                elif "vision_fusion_encoder.fusion_attention" in key:
-                    continue # Skip obsolete keys
-
+                
                 if new_key != key:
                     is_migrated = True
                 migrated_dict[new_key] = value
@@ -542,6 +549,8 @@ class ControllerBCTrainer:
             checkpoint_dir=self.output_dir / "checkpoints",
         )
 
+    
+    
     def _generate_diagnostic_rollout(self, epoch: int):
         log.info("Generating diagnostic denoising rollout...")
         # Get a single sample from the validation set
@@ -567,20 +576,26 @@ class ControllerBCTrainer:
         trajectory = torch.stack(intermediates).cpu().numpy().squeeze(axis=1) # (T, H_a, D_a)
         action_gt_np = action_gt.cpu().numpy().squeeze(axis=0) # (H_a, D_a)
 
+        # --- START: FIX FOR BROADCASTING ERROR ---
         # Create an animation
-        subgoal_img_np = subgoal_sample.cpu().numpy().squeeze(axis=0) # Shape: (C, H, W)
-        # Convert from CHW to HWC for matplotlib
-        subgoal_img_np = np.transpose(subgoal_img_np, (1, 2, 0))
-        # Denormalize for viewing (assuming ImageNet stats)
+        # Step 1: Get the image tensor from PyTorch, which is in (C, H, W) format.
+        subgoal_img_chw = subgoal_sample.cpu().numpy().squeeze(axis=0) # Shape: (3, 256, 256)
+        
+        # Step 2: Explicitly transpose from (C, H, W) to (H, W, C) for NumPy/Matplotlib.
+        subgoal_img_hwc = np.transpose(subgoal_img_chw, (1, 2, 0)) # Shape: (256, 256, 3)
+        
+        # Step 3: Denormalize for viewing. This operation now works because the
+        # shape (256, 256, 3) is compatible with (3,) for broadcasting.
         mean = np.array([0.485, 0.456, 0.406])
         std = np.array([0.229, 0.224, 0.225])
-        subgoal_img_np = np.clip(std * subgoal_img_np + mean, 0, 1)
+        subgoal_img_display = np.clip(std * subgoal_img_hwc + mean, 0, 1)
+        # --- END: FIX FOR BROADCASTING ERROR ---
 
         # Create a figure with two subplots: one for the action, one for the subgoal image
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), gridspec_kw={'width_ratios': [3, 1]})
         
-        # Display the static subgoal image on the right subplot
-        ax2.imshow(subgoal_img_np)
+        # Display the static, correctly formatted subgoal image on the right subplot
+        ax2.imshow(subgoal_img_display)
         ax2.set_title("Visual Subgoal")
         ax2.axis('off')
 
@@ -609,6 +624,7 @@ class ControllerBCTrainer:
             wandb.log({
                 "val/denoising_rollout": wandb.Video(str(video_path), fps=20, format="mp4"),
             }, step=self.global_step)
+            
 
     def _save_backup_checkpoint(self, epoch: int):
         """
