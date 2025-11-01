@@ -1,14 +1,47 @@
-import numpy as np
-import cv2
-from utils.expert_dataset import ExpertDatasetWriter
+import logging
+from pathlib import Path
+from utils.expert_dataset import ExpertTrajectoryDataset
 
-# create a fake RGB image sequence
-imgs = [np.random.randint(0,255,(64,64,3),dtype=np.uint8) for _ in range(3)]
-writer = ExpertDatasetWriter(out_dir="/tmp/test_out", run_name="test_run", image_compression="jpeg", jpeg_quality=90)
-# Use the writer's encode function path (copy of internal behavior)
-encoded = [cv2.imencode(".jpg", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))[1].tobytes() for img in imgs]
-# decode similarly to reader
-decoded = [cv2.imdecode(np.frombuffer(b, dtype=np.uint8), cv2.IMREAD_COLOR) for b in encoded]
-decoded_stack = np.stack(decoded)[..., ::-1]  # BGR->RGB
-assert decoded_stack.shape == (3,64,64,3)
-print("Compression roundtrip ok, dtype:", decoded_stack.dtype)
+# IMPORTANT: Update this path to point to the LMDB file you are using for training.
+# This should be the same path as `train_path` in your YAML config.
+DATASET_PATH =   "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"   # Replace with actual path
+
+def verify_dimensions(dataset_path: str):
+    """
+    Loads an ExpertTrajectoryDataset and prints its key dimensions.
+    """
+    log = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] - %(message)s')
+
+    if not Path(dataset_path).exists():
+        log.error(f"Dataset not found at: {dataset_path}")
+        log.error("Please update the DATASET_PATH variable in this script.")
+        return
+
+    log.info(f"Loading dataset from: {dataset_path}")
+    try:
+        reader = ExpertTrajectoryDataset(demo_path=dataset_path, observation_horizon=2, action_horizon=8)
+        
+        # Get metadata from the first episode
+        first_episode_meta = reader.episode_metadata[0]
+        
+        # --- Find the action dimension ---
+        action_shape = first_episode_meta['modalities']['actions']['shape']
+        action_dim = action_shape[-1]
+        
+        # --- Find the proprioception dimension ---
+        proprio_dim = reader.get_proprioception_dim()
+
+        print("\n" + "="*50)
+        print("    DATASET DIMENSION VERIFICATION REPORT")
+        print("="*50)
+        print(f"  Action Dimension      (action_dim): {action_dim}")
+        print(f"  Proprioception Dim (proprio_dim): {proprio_dim}")
+        print("="*50)
+        print("\nACTION: Please ensure these values match the ones in your config YAML file.")
+
+    except Exception as e:
+        log.error("An error occurred while reading the dataset.", exc_info=True)
+
+if __name__ == "__main__":
+    verify_dimensions(DATASET_PATH)

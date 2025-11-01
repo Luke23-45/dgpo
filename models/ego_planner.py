@@ -46,7 +46,8 @@ import torch
 import torch.nn as nn
 from torchvision.models.resnet import resnet18, ResNet18_Weights
 from transformers import PretrainedConfig, SiglipVisionModel
-
+from diffusers import DDIMScheduler
+from typing import Union
 log = logging.getLogger(__name__)
 
 # Re-usable, documented configuration dataclass
@@ -73,16 +74,76 @@ class EgoPlannerConfig:
     beta_end: float = 0.02
 
 
-# -----------------------------------------------------------------------------
-# UTILITY & FOUNDATIONAL MODULES
-# -----------------------------------------------------------------------------
+@dataclass
+class NoiseSchedulerConfig:
+    """Configuration for the noise scheduler."""
+    beta_start: float = 1e-4
+    beta_end: float = 0.02
+    schedule: str = "cosine"
+    timesteps: int = 100
 
-# FILE: models/ego_planner.py
+class NoiseScheduler(nn.Module):
+    """
+    A unified scheduler that implements the forward diffusion process (noising)
+    for training and a DDIM sampling algorithm for the reverse process (denoising).
+    """
+    def __init__(self, cfg: NoiseSchedulerConfig):
+        super().__init__()
+        self.T = int(cfg.timesteps)
 
-# --- START OF DEFINITIVE PATCH ---
-# REPLACE the existing _init_weights function with this one.
+        if cfg.schedule == "linear":
+            betas = torch.linspace(cfg.beta_start, cfg.beta_end, self.T)
+        elif cfg.schedule == "cosine":
+            timesteps = torch.arange(self.T + 1, dtype=torch.float64)
+            s = 0.008
+            alphas_cumprod = torch.cos(((timesteps / self.T) + s) / (1 + s) * math.pi * 0.5) ** 2
+            alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+            betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+            betas = torch.clamp(betas, min=0, max=0.999).float()
+        else:
+            raise ValueError(f"Unknown schedule: {cfg.schedule}")
 
-# FILE: models/ego_planner.py
+        # Register all schedule tensors as buffers
+        self.register_buffer('betas', betas)
+        alphas = 1.0 - self.betas
+        self.register_buffer('alphas', alphas)
+        alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.register_buffer('alphas_cumprod', alphas_cumprod)
+        self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(self.alphas_cumprod))
+        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1.0 - self.alphas_cumprod))
+
+    def add_noise(self, x0: torch.Tensor, t: torch.LongTensor, noise: torch.Tensor) -> torch.Tensor:
+        """Forward process: q(x_t | x_0)."""
+        B = t.shape[0]
+        sqrt_acp_t = self.sqrt_alphas_cumprod[t].reshape(B, *([1] * (x0.dim() - 1)))
+        sqrt_one_minus_acp_t = self.sqrt_one_minus_alphas_cumprod[t].reshape(B, *([1] * (x0.dim() - 1)))
+        return sqrt_acp_t * x0 + sqrt_one_minus_acp_t * noise
+
+    def ddim_step(self, xt: torch.Tensor, t: Union[int, torch.Tensor], t_prev: Union[int, torch.Tensor], eps_pred: torch.Tensor, eta: float = 0.0) -> torch.Tensor:
+        """Performs a single DDIM reverse step."""
+        t_val = int(t.item()) if isinstance(t, torch.Tensor) else int(t)
+        t_prev_val = int(t_prev.item()) if isinstance(t_prev, torch.Tensor) else int(t_prev)
+
+        alpha_cumprod_t = self.alphas_cumprod[t_val]
+        alpha_cumprod_t_prev = self.alphas_cumprod[t_prev_val] if t_prev_val >= 0 else torch.tensor(1.0, device=xt.device, dtype=xt.dtype)
+        
+        # Predict x0
+        x0_pred = (xt - self.sqrt_one_minus_alphas_cumprod[t_val] * eps_pred) / self.sqrt_alphas_cumprod[t_val].clamp_min(1e-8)
+        x0_pred = torch.clamp(x0_pred, -1., 1.)
+
+        # Calculate sigma
+        term1 = (1 - alpha_cumprod_t_prev) / (1 - alpha_cumprod_t).clamp_min(1e-8)
+        term2 = (1 - alpha_cumprod_t / (alpha_cumprod_t_prev + 1e-8)).clamp_min(0.0)
+        sigma_t = eta * torch.sqrt(term1 * term2)
+
+        # Calculate direction pointing to xt
+        pred_dir_xt = torch.sqrt((1 - alpha_cumprod_t_prev - sigma_t**2).clamp_min(0.0)) * eps_pred
+        
+        # Calculate x_{t-1}
+        x_prev = torch.sqrt(alpha_cumprod_t_prev) * x0_pred + pred_dir_xt
+        if eta > 0:
+            x_prev = x_prev + sigma_t * torch.randn_like(xt)
+        return x_prev
 
 # --- START OF DEFINITIVE PATCH 1: REPLACE the _init_weights function ---
 def _init_weights(module: nn.Module):
@@ -222,21 +283,13 @@ class EgoPlannerBlock(nn.Module):
         Returns:
             torch.Tensor: The processed output sequence. Shape (B, H_a, D_pilot).
         """
-        # --- START OF DEBUGGING BLOCK ---
-        print(f"\n--- Entering EgoPlannerBlock ---")
-        print(f"[DEBUG] Input x shape: {x.shape}")
-        print(f"[DEBUG] Unified context shape: {unified_context.shape}")
-        # --- END OF DEBUGGING BLOCK ---
 
-        # Predict all 6 modulation parameters (scale & shift for 3 norms)
         shift1, scale1, shift2, scale2, shift3, scale3 = self.adaLN_modulation(combined_emb).chunk(6, dim=1)
         
         # 1. Self-Attention Block with AdaLN
         x_sa = self.norm1(x) * (1 + scale1.unsqueeze(1)) + shift1.unsqueeze(1)
         
-        # --- START OF DEBUGGING BLOCK ---
-        print(f"[DEBUG] Shape going into self-attention (Query, Key, Value): {x_sa.shape}")
-        # --- END OF DEBUGGING BLOCK ---
+
         
         sa_out, _ = self.self_attn(x_sa, x_sa, x_sa, need_weights=False)
         x = x + sa_out
@@ -244,10 +297,7 @@ class EgoPlannerBlock(nn.Module):
         # 2. Cross-Attention Block with AdaLN
         x_ca = self.norm2(x) * (1 + scale2.unsqueeze(1)) + shift2.unsqueeze(1)
         
-        # --- START OF DEBUGGING BLOCK ---
-        print(f"[DEBUG] Shape going into cross-attention (Query): {x_ca.shape}")
-        print(f"[DEBUG] Shape going into cross-attention (Key, Value): {unified_context.shape}")
-        # --- END OF DEBUGGING BLOCK ---
+
 
         ca_out, _ = self.cross_attn(x_ca, unified_context, unified_context, need_weights=False)
         x = x + ca_out
@@ -255,9 +305,7 @@ class EgoPlannerBlock(nn.Module):
         # 3. Feed-Forward Block with AdaLN
         x_ffn = self.norm3(x) * (1 + scale3.unsqueeze(1)) + shift3.unsqueeze(1)
         
-        # --- START OF DEBUGGING BLOCK ---
-        print(f"[DEBUG] Shape going into FFN (self.ffn): {x_ffn.shape}")
-        # --- END OF DEBUGGING BLOCK ---
+
 
         ffn_out = self.ffn(x_ffn)
         x = x + ffn_out
@@ -276,13 +324,7 @@ class SinusoidalPosEmb(nn.Module):
         emb = x[:, None] * emb[None, :]
         return torch.cat((emb.sin(), emb.cos()), dim=-1)
 
-# -----------------------------------------------------------------------------
-# ARCHITECTURAL COMPONENT 1: THE STRATEGIST
-# -----------------------------------------------------------------------------
-# FILE: models/ego_planner.py
 
-# --- START OF DEFINITIVE PATCH ---
-# REPLACE the existing ContextualPlanEncoder class with this one.
 
 class ContextualPlanEncoder(nn.Module):
     """
@@ -343,17 +385,14 @@ class ContextualPlanEncoder(nn.Module):
         # This is a failsafe against initialization issues.
         self.to(target_device)
         # --- END OF FIX ---
-        print("before the contexutal   with torch.no_grad(), torch.cuda.amp.autocast(enabled=False): ")
-        # 1. Extract embeddings from the frozen vision backbone within a no-AMP sanctuary.
-        # --- DEFINITIVE DEVICE GUARD FIX ---
-        # --- END OF FIX ---
+
         with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
             initial_image_fp32 = initial_image.float()
             goal_image_fp32 = goal_image.float()
             outputs_start = self.vision_backbone(initial_image_fp32, output_hidden_states=False)
             outputs_goal = self.vision_backbone(goal_image_fp32, output_hidden_states=False)
 
-        print("after the contexutal   with torch.no_grad(), torch.cuda.amp.autocast(enabled=False): ")
+
         # The rest of the function remains the same...
         start_patch_tokens = outputs_start.last_hidden_state.clone()
         start_cls_token = outputs_start.pooler_output.clone().unsqueeze(1) # -> (B, 1, D)
@@ -437,17 +476,12 @@ class GroundedActionDecoder(nn.Module):
         vision_tokens = self.vision_obs_proj(fused_vision)
         proprio_tokens = self.proprio_proj(obs_history['proprio'])
 
-        print("wrist_tokens:", wrist_tokens.shape)
-        print("primary_tokens:", primary_tokens.shape)
-        
-        print("vision_tokens:", vision_tokens.shape)
-        print("proprio_tokens:", proprio_tokens.shape)
         return vision_tokens, proprio_tokens
 
 
     def forward(self, noisy_actions: torch.Tensor, timesteps: torch.Tensor,
                 plan_vector: torch.Tensor, vision_tokens: torch.Tensor, proprio_tokens: torch.Tensor) -> torch.Tensor:
-        print("this is state of the forward GroundedActionDecoder ")
+
         action_horizon = noisy_actions.shape[1]
         pos_indices = torch.arange(action_horizon, device=noisy_actions.device)
         action_tokens = self.action_proj(noisy_actions) + self.action_pos_emb(pos_indices)
@@ -458,7 +492,7 @@ class GroundedActionDecoder(nn.Module):
         # Use the pre-computed embedding for both the context and AdaLN modulation
         plan_token = global_cond_emb.unsqueeze(1)
 
-        print(f"plan_token, vision_tokens, proprio_tokens shapes: {plan_token.shape} {vision_tokens.shape} {proprio_tokens.shape}" )
+
 
 
         unified_context = torch.cat([plan_token, vision_tokens, proprio_tokens], dim=1)
@@ -519,9 +553,14 @@ class EgoPlanner(nn.Module):
         return predicted_noise
 
     @torch.no_grad()
-    def sample(self, batch: Dict[str, torch.Tensor], scheduler, guidance_plan: float, guidance_obs: float) -> torch.Tensor:
+    def sample(self, batch: Dict[str, torch.Tensor], scheduler, guidance_plan: float, guidance_obs: float, num_inference_steps: int) -> torch.Tensor:
         """Generates an action sequence using DDIM sampling and principled CFG."""
         B = batch['initial_image'].shape[0]
+        # --- START OF DEFINITIVE PATCH 2 ---
+        # A plain nn.Module does not have a `.device` property.
+        # Always infer the device from a tensor that is known to be on the correct device.
+        device = batch['initial_image'].device
+        # --- END OF DEFINITIVE PATCH 2 ---
         
         # --- PATCH 2 (ROBUSTNESS): Explicit no_grad context for strategist ---
         with torch.no_grad():
@@ -541,9 +580,19 @@ class EgoPlanner(nn.Module):
         visions = torch.cat([vis_cond, vis_cond, vis_uncond, vis_uncond], dim=0)
         proprios = torch.cat([prop_cond, prop_cond, prop_uncond, prop_uncond], dim=0)
         
-        latents = torch.randn((B, self.cfg.action_horizon, self.cfg.action_dim), device=self.device)
+        latents = torch.randn((B, self.cfg.action_horizon, self.cfg.action_dim), device=device)
         
-        for t in scheduler.timesteps:
+        ### START OF FINAL PATCH 1 (Continued) ###
+        # This is the exact line that is causing the crash.
+        # We are REPLACING it with the line below.
+        # OLD LINE: num_inference_steps = self.cfg.validation.sampling_steps
+        timesteps = torch.linspace(scheduler.T - 1, 0, num_inference_steps, device=device).round().long()
+        ### END OF FINAL PATCH 1 (Continued) ###
+
+        for i in range(num_inference_steps):
+            t = timesteps[i]
+            t_prev = timesteps[i+1] if i < num_inference_steps - 1 else torch.tensor(-1, device=device, dtype=torch.long)
+            
             t_batch = t.expand(B * 4)
             latent_model_input = latents.repeat(4, 1, 1)
             
@@ -555,7 +604,7 @@ class EgoPlanner(nn.Module):
             delta_obs = p_uncond_plan - p_uncond_all
             guided_noise = p_uncond_all + guidance_plan * delta_plan + guidance_obs * delta_obs
             
-            latents = scheduler.step(guided_noise, t, latents).prev_sample
+            latents = scheduler.ddim_step(latents, t, t_prev, guided_noise)
             
         return latents
     

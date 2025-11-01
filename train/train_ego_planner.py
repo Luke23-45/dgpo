@@ -44,6 +44,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, List
+from diffusers import DDIMScheduler
 
 import hydra
 import matplotlib.pyplot as plt
@@ -62,8 +63,8 @@ from transformers import get_scheduler
 from utils.samplers import EpisodeAwareSampler
 
 # --- Project-Specific Imports ---
-from models.ego_planner import EgoPlanner, EgoPlannerConfig
-from models.diffusion_policy import NoiseScheduler, NoiseSchedulerConfig, EMA
+from models.ego_planner import EgoPlanner, EgoPlannerConfig, NoiseScheduler, NoiseSchedulerConfig
+from models.diffusion_policy import  EMA
 from utils.ego_planner_dataset import EgoPlannerDataset, ego_planner_collate_fn
 import os
 # Optional, for enhanced logging
@@ -194,6 +195,12 @@ class EgoPlannerLightningModule(pl.LightningModule):
         if stage == 'fit':
             log.info(f"Moving noise scheduler to device: {self.device}")
             self.scheduler.to(self.device)
+            
+            # --- START OF DEFINITIVE PATCH 1 ---
+            # The EMA model is a deepcopy created on the CPU. It must be explicitly moved
+            # to the correct device before it's used in the validation loop.
+            log.info(f"Moving EMA model to device: {self.device}")
+            self.ema.ema_model.to(self.device)
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
         # DEFINITIVE FIX: Remove the config-based guard to make resumption robust.
@@ -249,7 +256,6 @@ class EgoPlannerLightningModule(pl.LightningModule):
         norms = pl.utilities.grad_norm(self.model, norm_type=2)
         self.log_dict(norms)
 
-
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         """Definitive, streamlined validation step relying on automatic device placement."""
         # --- DEFINITIVE FIX: Remove manual batch.to(device) loop ---
@@ -264,22 +270,27 @@ class EgoPlannerLightningModule(pl.LightningModule):
         batch['timesteps'] = timesteps
         
         with torch.no_grad():
+            # The EMA model must be on the correct device. The setup hook now handles this.
             predicted_noise = self.ema.ema_model(batch)
         val_loss = F.mse_loss(predicted_noise, noise)
         self.log('val/loss', val_loss, on_epoch=True, prog_bar=True, sync_dist=True)
 
         # --- Slow Path: Periodically run expensive diagnostics ---
-        full_val_freq = self.cfg.training.get('run_full_validation_every_n_epoch', 1)
-        # Note: self.scheduler.to(self.device) is now redundant here but harmless.
-        # It was already moved in the setup hook. We can leave it for clarity if desired.
+        full_val_freq = self.cfg.validation.get('run_full_validation_every_n_epoch', 5)
+        
         if (self.trainer.current_epoch + 1) % full_val_freq == 0:
-            self.scheduler.to(self.device) # This call is now redundant but safe.
+            
+
             with torch.no_grad():
+                ### START OF FINAL PATCH 2 ###
+                # We are modifying this function call to match the new signature from Patch 1.
                 predicted_actions = self.ema.ema_model.sample(
                     batch=batch,
                     scheduler=self.scheduler,
                     guidance_plan=self.cfg.validation.guidance_scale_plan,
-                    guidance_obs=self.cfg.validation.guidance_scale_obs
+                    guidance_obs=self.cfg.validation.guidance_scale_obs,
+                    # This is the new argument we are adding to the call.
+                    num_inference_steps=self.cfg.validation.sampling_steps 
                 )
             action_mse = F.mse_loss(predicted_actions, gt_actions)
             self.log('val/action_mse', action_mse, on_epoch=True, sync_dist=True)
