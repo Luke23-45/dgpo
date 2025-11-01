@@ -65,7 +65,7 @@ from utils.samplers import EpisodeAwareSampler
 from models.ego_planner import EgoPlanner, EgoPlannerConfig
 from models.diffusion_policy import NoiseScheduler, NoiseSchedulerConfig, EMA
 from utils.ego_planner_dataset import EgoPlannerDataset, ego_planner_collate_fn
-
+import os
 # Optional, for enhanced logging
 try:
     import wandb
@@ -76,7 +76,18 @@ except ImportError:
 # Setup a logger for the script
 log = logging.getLogger(__name__)
 
+try:
+    num_cores = len(os.sched_getaffinity(0))
+except AttributeError:
+    # os.sched_getaffinity is not available on Windows, use os.cpu_count()
+    num_cores = os.cpu_count()
 
+# 2. Set the number of threads for PyTorch.
+if num_cores:
+    torch.set_num_threads(num_cores)
+    print(f" PyTorch has been instructed to use all {num_cores} available CPU cores.")
+else:
+    print(" Could not determine the number of CPU cores. Using PyTorch defaults.")
 # -----------------------------------------------------------------------------
 # 1. The LightningDataModule (Upgraded with EpisodeAwareSampler)
 # -----------------------------------------------------------------------------

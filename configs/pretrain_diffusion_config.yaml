@@ -72,6 +72,7 @@ training:
   use_amp: false                # Must be false for CPU.
   ema_decay: 0.999              # Standard EMA decay for stable model weights.
   cfg_p_uncond: 0.15              # Increased dropout of conditioning for better CFG performance.
+  use_activation_checkpointing: false
 
 # ===================================================================
 # 7. VALIDATION

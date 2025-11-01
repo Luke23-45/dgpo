@@ -135,38 +135,43 @@ class ResNetEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Processes a history of images into a flat sequence of visual tokens.
-        This definitive version is AMP-aware, ensuring inputs are cast to float32
-        before being passed to the non-AMP-compatible ResNet backbone.
-        
+        Robust to device placement, AMP, and gradient flow.
         Args:
-            x (torch.Tensor): Input images of shape (B, H_o, C, H_img, W_img).
-                              Can be float16 or float32.
+            x (torch.Tensor): (B, H_o, C, H_img, W_img)
         Returns:
-            torch.Tensor: Encoded spatial features of shape (B, L_vis, D_feat).
+            torch.Tensor: (B, L_vis, D_feat)
         """
-        # --- DEFINITIVE FIX FOR AMP TYPE MISMATCH ---
-        # Create a no-AMP, float32 sanctuary for the pre-trained ResNet backbone.
-        with torch.cuda.amp.autocast(enabled=False):
-            # 1. Manually cast potentially float16 input to float32.
-            x_fp32 = x.float()
 
-            # 2. Perform normalization and feature extraction in full precision.
+        # --- 1. Defensive Device Sync ---
+        if next(self.parameters()).device != x.device:
+            self.to(x.device)
+
+        # --- 2. Normalize using same device ---
+        mean = self.mean.to(x.device)
+        std = self.std.to(x.device)
+
+        # --- 3. AMP-safe + frozen backbone ---
+        with torch.amp.autocast('cuda', enabled=False):
+            x_fp32 = x.float()
             if x_fp32.max() > 1.0:
                 x_fp32 = x_fp32 / 255.0
-            x_fp32 = (x_fp32 - self.mean) / self.std
-            
+            x_fp32 = (x_fp32 - mean) / std
+
             B, H_o, C, H_img, W_img = x_fp32.shape
             x_fp32 = x_fp32.view(B * H_o, C, H_img, W_img)
-            
-            features = self.projection(self.backbone(x_fp32))
-        # --- END OF FIX ---
 
-        # Subsequent learnable layers can operate within the global AMP context.
+            # Run frozen backbone
+            with torch.no_grad():
+                features = self.backbone(x_fp32)
+
+        # --- 4. Trainable projection & layer norm ---
+        features = self.projection(features)
         tokens = features.flatten(2).permute(0, 2, 1)
         tokens = self.layer_norm(tokens)
-        
+
         _, N_patches, D_feat = tokens.shape
         return tokens.view(B, H_o * N_patches, D_feat)
+
 
 
 # FILE: models/ego_planner.py
@@ -205,6 +210,8 @@ class EgoPlannerBlock(nn.Module):
         nn.init.zeros_(self.adaLN_modulation[-1].weight)
         nn.init.zeros_(self.adaLN_modulation[-1].bias)
 
+# In CLASS EgoPlannerBlock
+
     def forward(self, x: torch.Tensor, unified_context: torch.Tensor, combined_emb: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -215,21 +222,45 @@ class EgoPlannerBlock(nn.Module):
         Returns:
             torch.Tensor: The processed output sequence. Shape (B, H_a, D_pilot).
         """
+        # --- START OF DEBUGGING BLOCK ---
+        print(f"\n--- Entering EgoPlannerBlock ---")
+        print(f"[DEBUG] Input x shape: {x.shape}")
+        print(f"[DEBUG] Unified context shape: {unified_context.shape}")
+        # --- END OF DEBUGGING BLOCK ---
+
         # Predict all 6 modulation parameters (scale & shift for 3 norms)
-        # Shape: (B, 6 * D_pilot) -> 6 x (B, D_pilot)
         shift1, scale1, shift2, scale2, shift3, scale3 = self.adaLN_modulation(combined_emb).chunk(6, dim=1)
         
         # 1. Self-Attention Block with AdaLN
         x_sa = self.norm1(x) * (1 + scale1.unsqueeze(1)) + shift1.unsqueeze(1)
-        x = x + self.self_attn(x_sa, x_sa, x_sa, need_weights=False)[0]
+        
+        # --- START OF DEBUGGING BLOCK ---
+        print(f"[DEBUG] Shape going into self-attention (Query, Key, Value): {x_sa.shape}")
+        # --- END OF DEBUGGING BLOCK ---
+        
+        sa_out, _ = self.self_attn(x_sa, x_sa, x_sa, need_weights=False)
+        x = x + sa_out
         
         # 2. Cross-Attention Block with AdaLN
         x_ca = self.norm2(x) * (1 + scale2.unsqueeze(1)) + shift2.unsqueeze(1)
-        x = x + self.cross_attn(x_ca, unified_context, unified_context, need_weights=False)[0]
+        
+        # --- START OF DEBUGGING BLOCK ---
+        print(f"[DEBUG] Shape going into cross-attention (Query): {x_ca.shape}")
+        print(f"[DEBUG] Shape going into cross-attention (Key, Value): {unified_context.shape}")
+        # --- END OF DEBUGGING BLOCK ---
+
+        ca_out, _ = self.cross_attn(x_ca, unified_context, unified_context, need_weights=False)
+        x = x + ca_out
         
         # 3. Feed-Forward Block with AdaLN
         x_ffn = self.norm3(x) * (1 + scale3.unsqueeze(1)) + shift3.unsqueeze(1)
-        x = x + self.ffn(x_ffn)
+        
+        # --- START OF DEBUGGING BLOCK ---
+        print(f"[DEBUG] Shape going into FFN (self.ffn): {x_ffn.shape}")
+        # --- END OF DEBUGGING BLOCK ---
+
+        ffn_out = self.ffn(x_ffn)
+        x = x + ffn_out
         
         return x
 
@@ -294,6 +325,8 @@ class ContextualPlanEncoder(nn.Module):
         self.start_token_type = nn.Parameter(torch.randn(1, 1, cfg.vision_feature_dim))
         self.goal_token_type = nn.Parameter(torch.randn(1, 1, cfg.vision_feature_dim))
         
+# In CLASS ContextualPlanEncoder
+
     def forward(self, initial_image: torch.Tensor, goal_image: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -303,35 +336,43 @@ class ContextualPlanEncoder(nn.Module):
         Returns:
             torch.Tensor: The final `plan_vector`. Shape (B, D_vis).
         """
-        # 1. Extract embeddings from the frozen vision backbone.
-        with torch.no_grad():
-            outputs_start = self.vision_backbone(initial_image, output_hidden_states=False)
-            outputs_goal = self.vision_backbone(goal_image, output_hidden_states=False)
+        # --- DEFINITIVE DEVICE GUARD FIX ---
+        # Get the target device from the input tensor, which we know is on the correct device.
+        target_device = initial_image.device
+        # Ensure the vision backbone is on the same device as the input.
+        # This is a failsafe against initialization issues.
+        self.to(target_device)
+        # --- END OF FIX ---
+        print("before the contexutal   with torch.no_grad(), torch.cuda.amp.autocast(enabled=False): ")
+        # 1. Extract embeddings from the frozen vision backbone within a no-AMP sanctuary.
+        # --- DEFINITIVE DEVICE GUARD FIX ---
+        # --- END OF FIX ---
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
+            initial_image_fp32 = initial_image.float()
+            goal_image_fp32 = goal_image.float()
+            outputs_start = self.vision_backbone(initial_image_fp32, output_hidden_states=False)
+            outputs_goal = self.vision_backbone(goal_image_fp32, output_hidden_states=False)
 
-        # --- CRITICAL FIX: Correctly assemble the token sequences ---
-        # `last_hidden_state` is (B, 196, D), `pooler_output` is (B, D)
-        start_patch_tokens = outputs_start.last_hidden_state
-        start_cls_token = outputs_start.pooler_output.unsqueeze(1) # -> (B, 1, D)
+        print("after the contexutal   with torch.no_grad(), torch.cuda.amp.autocast(enabled=False): ")
+        # The rest of the function remains the same...
+        start_patch_tokens = outputs_start.last_hidden_state.clone()
+        start_cls_token = outputs_start.pooler_output.clone().unsqueeze(1) # -> (B, 1, D)
         
-        goal_patch_tokens = outputs_goal.last_hidden_state
-        goal_cls_token = outputs_goal.pooler_output.unsqueeze(1) # -> (B, 1, D)
+        goal_patch_tokens = outputs_goal.last_hidden_state.clone()
+        goal_cls_token = outputs_goal.pooler_output.clone().unsqueeze(1) # -> (B, 1, D)
 
-        # 2. Add learnable positional and type embeddings.
         start_patch_tokens += self.patch_pos_emb
         goal_patch_tokens += self.patch_pos_emb
         
         start_cls_token += self.cls_pos_emb + self.start_token_type
         goal_cls_token += self.cls_pos_emb + self.goal_token_type
 
-        # 3. Manually construct the full sequences with CLS token at the start
-        start_sequence = torch.cat([start_cls_token, start_patch_tokens], dim=1) # (B, 197, D)
-        goal_sequence = torch.cat([goal_cls_token, goal_patch_tokens], dim=1)   # (B, 197, D)
+        start_sequence = torch.cat([start_cls_token, start_patch_tokens], dim=1)
+        goal_sequence = torch.cat([goal_cls_token, goal_patch_tokens], dim=1)
         
-        # 4. Concatenate and fuse using the bidirectional Transformer.
-        fused_input = torch.cat([start_sequence, goal_sequence], dim=1) # (B, 394, D)
+        fused_input = torch.cat([start_sequence, goal_sequence], dim=1)
         fused_output = self.fusion_transformer(fused_input)
         
-        # 5. The plan_vector is the final state of the initial image's [CLS] token.
         plan_vector = fused_output[:, 0]
         
         return plan_vector
@@ -366,16 +407,47 @@ class GroundedActionDecoder(nn.Module):
         self.out_proj = nn.Linear(cfg.pilot_d_model, cfg.action_dim)
 
     def encode_tactics(self, obs_history: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Encodes vision + proprioceptive history into tokens.
+        Defensive: ensures entire module (all params & buffers) live on the same device
+        as the input tensors before performing MultiheadAttention / linear ops.
+        """
+        # --- Device guard (idempotent & cheap check) ---
+        target_device = obs_history['image_primary'].device
+        # Only move the module if at least one parameter is not on the target device.
+        try:
+            first_param = next(self.parameters())
+        except StopIteration:
+            first_param = None
+
+        if first_param is not None and first_param.device != target_device:
+            # Move all params & buffers of this submodule to the target device.
+            # This is safe and fixes cases where a submodule was instantiated on CPU.
+            self.to(target_device)
+
+        # --- Encode vision with ResNets (they themselves contain internal device guards) ---
         primary_tokens = self.primary_obs_encoder(obs_history['image_primary'])
         wrist_tokens = self.wrist_obs_encoder(obs_history['image_wrist'])
+
+        # --- MultiheadAttention: Q= wrist, K/V = primary ---
         fused_vision, _ = self.vision_obs_fusion(wrist_tokens, primary_tokens, primary_tokens)
+
+        # Residual / norm / projections (all now guaranteed to be on the same device)
         fused_vision = self.vision_obs_norm(fused_vision + wrist_tokens)
         vision_tokens = self.vision_obs_proj(fused_vision)
         proprio_tokens = self.proprio_proj(obs_history['proprio'])
+
+        print("wrist_tokens:", wrist_tokens.shape)
+        print("primary_tokens:", primary_tokens.shape)
+        
+        print("vision_tokens:", vision_tokens.shape)
+        print("proprio_tokens:", proprio_tokens.shape)
         return vision_tokens, proprio_tokens
+
 
     def forward(self, noisy_actions: torch.Tensor, timesteps: torch.Tensor,
                 plan_vector: torch.Tensor, vision_tokens: torch.Tensor, proprio_tokens: torch.Tensor) -> torch.Tensor:
+        print("this is state of the forward GroundedActionDecoder ")
         action_horizon = noisy_actions.shape[1]
         pos_indices = torch.arange(action_horizon, device=noisy_actions.device)
         action_tokens = self.action_proj(noisy_actions) + self.action_pos_emb(pos_indices)
@@ -385,6 +457,10 @@ class GroundedActionDecoder(nn.Module):
         
         # Use the pre-computed embedding for both the context and AdaLN modulation
         plan_token = global_cond_emb.unsqueeze(1)
+
+        print(f"plan_token, vision_tokens, proprio_tokens shapes: {plan_token.shape} {vision_tokens.shape} {proprio_tokens.shape}" )
+
+
         unified_context = torch.cat([plan_token, vision_tokens, proprio_tokens], dim=1)
         
         time_emb = self.time_mlp(timesteps)
@@ -482,3 +558,110 @@ class EgoPlanner(nn.Module):
             latents = scheduler.step(guided_noise, t, latents).prev_sample
             
         return latents
+    
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] - %(message)s')
+    
+    # Use CUDA if available, otherwise CPU.
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    log.info(f"--- [Unit Test] Running on device: {device} ---")
+
+    # --- 1. Configuration ---
+    # Create a default configuration for the model.
+    cfg = EgoPlannerConfig(
+        action_dim=7,
+        proprio_dim=22,
+        action_horizon=8,
+        obs_horizon=2,
+        vision_feature_dim=768, # SigLIP-base
+        pilot_d_model=512,
+        resnet_feature_dim=256
+    )
+    B = 4 # Batch size for testing
+
+    # --- 2. Create Dummy Input Batch ---
+    # This simulates the exact structure of a real data batch.
+    dummy_batch = {
+        # Strategist inputs
+        'initial_image': torch.randn(B, 3, 224, 224, device=device),
+        'goal_image': torch.randn(B, 3, 224, 224, device=device),
+        # Pilot inputs (tactical observations)
+        'observation_history': {
+            'image_primary': torch.randn(B, cfg.obs_horizon, 3, 224, 224, device=device),
+            'image_wrist': torch.randn(B, cfg.obs_horizon, 3, 128, 128, device=device),
+            'proprio': torch.randn(B, cfg.obs_horizon, cfg.proprio_dim, device=device),
+        },
+        # Diffusion inputs
+        'noisy_actions': torch.randn(B, cfg.action_horizon, cfg.action_dim, device=device),
+        'timesteps': torch.randint(0, 100, (B,), device=device),
+    }
+    log.info(f"Created dummy batch with batch size {B}.")
+
+    # --- 3. Model Instantiation ---
+    try:
+        model = EgoPlanner(cfg).to(device)
+        model.train() # Set to training mode for the forward pass test
+        log.info("EgoPlanner model instantiated and moved to device successfully.")
+    except Exception as e:
+        log.error("Failed to instantiate the EgoPlanner model.", exc_info=True)
+        exit(1)
+
+    # --- 4. Test: Full Forward Pass (float32) ---
+    log.info("\n--- Testing Full Forward Pass (float32) ---")
+    try:
+        predicted_noise = model(dummy_batch)
+        assert predicted_noise.shape == (B, cfg.action_horizon, cfg.action_dim)
+        assert predicted_noise.device == device
+        assert predicted_noise.dtype == torch.float32
+        log.info(f"  [SUCCESS] Output shape: {predicted_noise.shape}, dtype: {predicted_noise.dtype}")
+    except Exception as e:
+        log.error("  [FAILURE] Full forward pass (float32) failed.", exc_info=True)
+
+    # --- 5. Test: Full Forward Pass with AMP (float16) ---
+    if device.type == 'cuda':
+        log.info("\n--- Testing Full Forward Pass with AMP (float16) ---")
+        # Simulate PyTorch Lightning's behavior
+        dummy_batch_amp = {
+            k: v.half() if torch.is_floating_point(v) else v 
+            for k, v in dummy_batch.items()
+        }
+        # Nested dict handling
+        dummy_batch_amp['observation_history'] = {
+            k: v.half() if torch.is_floating_point(v) else v 
+            for k, v in dummy_batch['observation_history'].items()
+        }
+        
+        try:
+            with torch.amp.autocast(device_type=device.type, dtype=torch.float16):
+                # The model itself should not be .half(), only the inputs and autocast context
+                predicted_noise_amp = model(dummy_batch_amp)
+            
+            assert predicted_noise_amp.shape == (B, cfg.action_horizon, cfg.action_dim)
+            assert predicted_noise_amp.device == device
+            # The output of an AMP-context block can be float16 or float32 depending on the last op
+            log.info(f"  [SUCCESS] Output shape: {predicted_noise_amp.shape}, dtype: {predicted_noise_amp.dtype}")
+        except Exception as e:
+            log.error("  [FAILURE] Full forward pass (AMP float16) failed.", exc_info=True)
+    else:
+        log.info("\nSkipping AMP test (CUDA not available).")
+        
+    # --- 6. Test: Component Isolation ---
+    log.info("\n--- Testing Component Isolation ---")
+    try:
+        log.info("Testing Strategist (ContextualPlanEncoder)...")
+        plan_vector = model.strategist(dummy_batch['initial_image'], dummy_batch['goal_image'])
+        assert plan_vector.shape == (B, cfg.vision_feature_dim)
+        log.info(f"  [SUCCESS] Plan vector shape: {plan_vector.shape}")
+        
+        log.info("Testing Pilot (GroundedActionDecoder)...")
+        vision_tokens, proprio_tokens = model.pilot.encode_tactics(dummy_batch['observation_history'])
+        # Shape check (example: vision tokens)
+        # The exact sequence length depends on the ResNet output, so we check feature dim
+        assert vision_tokens.shape[0] == B and vision_tokens.shape[2] == cfg.pilot_d_model
+        assert proprio_tokens.shape == (B, cfg.obs_horizon, cfg.pilot_d_model)
+        log.info(f"  [SUCCESS] Vision tokens shape: {vision_tokens.shape}, Proprio tokens shape: {proprio_tokens.shape}")
+    except Exception as e:
+        log.error("  [FAILURE] Component isolation test failed.", exc_info=True)
+
+    log.info("\n--- [Unit Test] All checks complete. ---")

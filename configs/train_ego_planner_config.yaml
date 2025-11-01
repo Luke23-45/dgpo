@@ -61,7 +61,7 @@ dataset:
 # --- Core Training Loop Configuration ---
 training:
   batch_size: 64             # Per-GPU batch size. Adjust based on your VRAM.
-  val_batch_size: ${training.batch_size} # Use the same batch size for validation by default.
+  val_batch_size: 64 # Use the same batch size for validation by default.
 
   ema_decay: 0.999           # Decay rate for the Exponential Moving Average of model weights. Critical for diffusion model stability.
 
