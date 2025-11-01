@@ -58,3 +58,26 @@ logging:
 
 [2025-11-01 14:47:13,611][__main__][INFO] - W&B mode explicitly set to: 'offline'
 [2025-11-01 14:47:13,620][models.ego_planner][INFO] - [Strategist] Initializing ViT backbone: google/siglip-base-patch16-224
+[2025-11-01 14:47:15,606][models.ego_planner][INFO] - [Strategist] Derived configuration: image_size=224, patch_size=16, num_patches=196.
+[2025-11-01 14:47:15,680][models.ego_planner][INFO] - [Pilot] Activation Checkpointing: Enabled
+[2025-11-01 14:47:18,060][models.ego_planner][INFO] - EgoPlanner v5 (Definitive & Audited) model initialized.
+[2025-11-01 14:47:18,297][__main__][INFO] - EMA enabled with decay rate: 0.999
+[2025-11-01 14:47:18,299][__main__][INFO] - Definitive SOTA EgoPlannerLightningModule (v2) initialized.
+[2025-11-01 14:47:19,936][__main__][INFO] - Loading TRAINING dataset from: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
+[2025-11-01 14:47:19,937][utils.ego_planner_dataset][INFO] - Initializing EgoPlannerDataset v4 (use_aug=True) with H_o=2, H_a=8
+[2025-11-01 14:47:19,938][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\training\sota_dataset\expert_training_run_99914b93_index.json...
+[2025-11-01 14:47:19,943][utils.expert_dataset][INFO] - Loaded 260 episodes, 65576 total valid chunks (Virtually Indexed).
+[2025-11-01 14:47:19,945][utils.ego_planner_dataset][INFO] - Building explicit sample index map for robustness...
+[2025-11-01 14:47:19,953][utils.ego_planner_dataset][INFO] - Successfully initialized. Found 65316 valid samples.
+[2025-11-01 14:47:19,954][__main__][INFO] - Loading VALIDATION dataset from: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+[2025-11-01 14:47:19,955][utils.ego_planner_dataset][INFO] - Initializing EgoPlannerDataset v4 (use_aug=False) with H_o=2, H_a=8
+[2025-11-01 14:47:19,955][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-11-01 14:47:19,956][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-11-01 14:47:19,957][utils.ego_planner_dataset][INFO] - Building explicit sample index map for robustness...
+[2025-11-01 14:47:19,958][utils.ego_planner_dataset][INFO] - Successfully initialized. Found 2933 valid samples.
+[2025-11-01 14:47:19,969][utils.samplers][INFO] - Building episode-to-index map for sampler...
+[2025-11-01 14:47:20,092][utils.samplers][INFO] - Map building complete.
+[2025-11-01 14:47:20,093][__main__][INFO] - Using EpisodeAwareSampler for training to optimize I/O.
+[2025-11-01 15:13:56,967][__main__][WARNING] - Training interrupted or failed: mat1 and mat2 shapes cannot be multiplied (512x8 and 7x512)
+[2025-11-01 15:13:56,969][__main__][INFO] - Attempting to save a final 'interrupted.ckpt'...
+[2025-11-01 15:13:56,970][__main__][ERROR] - Could not save final interrupted checkpoint: 'Trainer' object has no attribute 'lr_schedulers'

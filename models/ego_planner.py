@@ -131,34 +131,40 @@ class ResNetEncoder(nn.Module):
         self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3, 1, 1))
         self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 1, 3, 1, 1))
 
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Processes a history of images into a flat sequence of visual tokens.
+        This definitive version is AMP-aware, ensuring inputs are cast to float32
+        before being passed to the non-AMP-compatible ResNet backbone.
         
         Args:
             x (torch.Tensor): Input images of shape (B, H_o, C, H_img, W_img).
-                              Can be in range [0, 255] or [0, 1].
+                              Can be float16 or float32.
         Returns:
             torch.Tensor: Encoded spatial features of shape (B, L_vis, D_feat).
-                          (where L_vis = H_o * num_patches)
         """
-        # --- Robust Input Handling & Normalization ---
-        # Ensure tensor is float and in [0, 1] range before normalization
-        if x.max() > 1.0:
-            x = x.float() / 255.0
-        # Apply standard ImageNet normalization
-        x = (x - self.mean) / self.std
-        
-        B, H_o, C, H_img, W_img = x.shape
-        # Merge Batch and Horizon dimensions for efficient processing by the CNN
-        x = x.view(B * H_o, C, H_img, W_img)  # -> (B*H_o, C, H_img, W_img)
-        
-        # --- Feature Extraction and Tokenization ---
-        features = self.projection(self.backbone(x))    # -> (B*H_o, D_feat, H/32, W/32)
-        tokens = features.flatten(2).permute(0, 2, 1)  # -> (B*H_o, num_patches, D_feat)
+        # --- DEFINITIVE FIX FOR AMP TYPE MISMATCH ---
+        # Create a no-AMP, float32 sanctuary for the pre-trained ResNet backbone.
+        with torch.cuda.amp.autocast(enabled=False):
+            # 1. Manually cast potentially float16 input to float32.
+            x_fp32 = x.float()
+
+            # 2. Perform normalization and feature extraction in full precision.
+            if x_fp32.max() > 1.0:
+                x_fp32 = x_fp32 / 255.0
+            x_fp32 = (x_fp32 - self.mean) / self.std
+            
+            B, H_o, C, H_img, W_img = x_fp32.shape
+            x_fp32 = x_fp32.view(B * H_o, C, H_img, W_img)
+            
+            features = self.projection(self.backbone(x_fp32))
+        # --- END OF FIX ---
+
+        # Subsequent learnable layers can operate within the global AMP context.
+        tokens = features.flatten(2).permute(0, 2, 1)
         tokens = self.layer_norm(tokens)
         
-        # Reshape to batch-first sequence: (B, H_o * num_patches, D_feat)
         _, N_patches, D_feat = tokens.shape
         return tokens.view(B, H_o * N_patches, D_feat)
 
@@ -443,7 +449,11 @@ class EgoPlanner(nn.Module):
         
         # --- PATCH 2 (ROBUSTNESS): Explicit no_grad context for strategist ---
         with torch.no_grad():
-            plan_cond = self.strategist(batch['initial_image'], batch['goal_image'])
+            with torch.cuda.amp.autocast(enabled=False):
+                # Manually cast the input tensors to float32 for the backbone
+                initial_image_fp32 = batch['initial_image'].float()
+                goal_image_fp32 = batch['goal_image'].float()
+                plan_cond = self.strategist(initial_image_fp32, goal_image_fp32)
         
         plan_uncond = self.uncond_embeddings.plan.expand(B, -1)
         

@@ -177,6 +177,12 @@ class EgoPlannerLightningModule(pl.LightningModule):
         log.info("Definitive SOTA EgoPlannerLightningModule (v2) initialized.")
 
 
+    def setup(self, stage: str) -> None:
+        """Called at the beginning of fit, validate, test, or predict."""
+        # --- DEFINITIVE FIX: Move non-nn.Module objects with tensors to the correct device ---
+        if stage == 'fit':
+            log.info(f"Moving noise scheduler to device: {self.device}")
+            self.scheduler.to(self.device)
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
         # DEFINITIVE FIX: Remove the config-based guard to make resumption robust.
@@ -205,10 +211,12 @@ class EgoPlannerLightningModule(pl.LightningModule):
         """Saves the EMA state dict to the checkpoint."""
         checkpoint["ema_state_dict"] = self.ema.state_dict()
 
-# In train/train_ego_planner.py, class EgoPlannerLightningModule:
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        """Definitive, streamlined training step that delegates AMP to Lightning."""
+        """Definitive, streamlined training step relying on automatic device placement."""
+        # --- DEFINITIVE FIX: Remove manual batch.to(device) loop ---
+        # PyTorch Lightning handles this automatically before this method is called.
+        
         gt_actions = batch['action_chunk']
         B = gt_actions.shape[0]
 
@@ -217,8 +225,6 @@ class EgoPlannerLightningModule(pl.LightningModule):
         batch['noisy_actions'] = self.scheduler.add_noise(gt_actions, timesteps, noise)
         batch['timesteps'] = timesteps
         
-        # DEFINITIVE FIX: Remove the manual autocast context manager.
-        # Lightning handles this automatically based on trainer precision settings.
         predicted_noise = self.model(batch)
         loss = F.mse_loss(predicted_noise, noise)
 
@@ -232,8 +238,11 @@ class EgoPlannerLightningModule(pl.LightningModule):
         norms = pl.utilities.grad_norm(self.model, norm_type=2)
         self.log_dict(norms)
 
+
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
-        """Definitive, streamlined validation step using the EMA model."""
+        """Definitive, streamlined validation step relying on automatic device placement."""
+        # --- DEFINITIVE FIX: Remove manual batch.to(device) loop ---
+        
         gt_actions = batch['action_chunk']
         B = gt_actions.shape[0]
 
@@ -250,8 +259,10 @@ class EgoPlannerLightningModule(pl.LightningModule):
 
         # --- Slow Path: Periodically run expensive diagnostics ---
         full_val_freq = self.cfg.training.get('run_full_validation_every_n_epoch', 1)
+        # Note: self.scheduler.to(self.device) is now redundant here but harmless.
+        # It was already moved in the setup hook. We can leave it for clarity if desired.
         if (self.trainer.current_epoch + 1) % full_val_freq == 0:
-            self.scheduler.to(self.device)
+            self.scheduler.to(self.device) # This call is now redundant but safe.
             with torch.no_grad():
                 predicted_actions = self.ema.ema_model.sample(
                     batch=batch,
@@ -273,9 +284,11 @@ class EgoPlannerLightningModule(pl.LightningModule):
             return
 
         epoch = self.trainer.current_epoch
-        backup_path = self.backup_dir / f"backup_epoch_{epoch}.ckpt"
-        log.info(f"Saving per-epoch backup checkpoint to {backup_path}...")
+        # backup_path = self.backup_dir / f"backup_epoch_{epoch}.ckpt"
         
+        base_path = Path("/content/drive/MyDrive/pda/models/v1")
+        backup_path = base_path / f"backup_epoch_{epoch}.ckpt"
+        log.info(f"Saving per-epoch backup checkpoint to {backup_path}...")
         try:
             self.trainer.save_checkpoint(backup_path)
             # Delete previous backup to save space
@@ -288,18 +301,25 @@ class EgoPlannerLightningModule(pl.LightningModule):
 
     # Helper to construct checkpoint data
     def _create_full_checkpoint(self) -> Dict[str, Any]:
-        optimizer = self.trainer.optimizers[0]
-        lr_scheduler = self.trainer.lr_schedulers[0]['scheduler']
+        """
+        Creates a full training state checkpoint. This version is robustly
+        patched to be lifecycle-aware, handling cases where the trainer has
+        not yet initialized optimizers or schedulers.
+        """
+        # --- CRITICAL FIX: Safely access trainer attributes ---
+        # These attributes only exist after configure_optimizers has been called.
+        # If an error happens before that (e.g., during data validation), they will be missing.
+        optimizer_states = [opt.state_dict() for opt in self.trainer.optimizers] if hasattr(self.trainer, "optimizers") else []
+        lr_scheduler_states = [s['scheduler'].state_dict() for s in self.trainer.lr_schedulers] if hasattr(self.trainer, "lr_schedulers") else []
         
         return {
             "epoch": self.trainer.current_epoch,
             "global_step": self.trainer.global_step,
             "state_dict": self.model.state_dict(),
             "ema_state_dict": self.ema.state_dict(),
-            "optimizer_states": [optimizer.state_dict()],
-            "lr_schedulers": [lr_scheduler.state_dict()],
+            "optimizer_states": optimizer_states,
+            "lr_schedulers": lr_scheduler_states,
         }
-
 
 
     # ( configure_optimizers and _log_action_trajectory_plot remain the same as the previous good version )
@@ -387,9 +407,15 @@ def main(cfg: DictConfig):
         log.warning(f"Training interrupted or failed: {e}")
         log.info("Attempting to save a final 'interrupted.ckpt'...")
         final_ckpt_path = output_dir / "checkpoints" / "interrupted.ckpt"
+        
         try:
+            # --- CRITICAL FIX: Ensure the parent directory exists before saving ---
+            # This makes the save operation self-sufficient and robust to early crashes.
+            final_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Use the robust, lifecycle-aware checkpointing method
             torch.save(model._create_full_checkpoint(), final_ckpt_path)
-            log.info(f"Final checkpoint saved to {final_ckpt_path}")
+            log.info(f"Final checkpoint saved successfully to {final_ckpt_path}")
         except Exception as e2:
             log.error(f"Could not save final interrupted checkpoint: {e2}")
     finally:

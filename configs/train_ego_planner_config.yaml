@@ -49,11 +49,14 @@ scheduler:
 
 # --- Dataset & DataLoader Configuration ---
 dataset:
-  train_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"      # Replace with actual path
-  val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"   # Replace with actual path
-  num_workers: 2             # Number of CPU workers for data loading. Tune this based on your CPU cores (e.g., num_cores - 2).
-  # The use_aug flag is handled by the DataModule, which should instantiate the training dataset
-  use_aug: True
+  # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"      
+  # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"   
+  train_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+
+  val_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+
+  num_workers: 2            
+  use_aug: false
 
 # --- Core Training Loop Configuration ---
 training:
@@ -103,7 +106,7 @@ optimizer:
 
 # --- PyTorch Lightning Trainer Configuration ---
 trainer:
-  accelerator: "cpu"         # Hardware accelerator to use ('gpu', 'cpu').
+  accelerator: "cuda"         # Hardware accelerator to use ('gpu', 'cpu').
   devices: 1                 # Number of devices to use (e.g., 1 for a single GPU, [0, 1] for two GPUs).
   
   # SOTA ENHANCEMENT: Automatic Mixed Precision (AMP).
