@@ -1,0 +1,138 @@
+[2025-11-02 19:27:29,996][__main__][INFO] - ----------- Configuration -----------
+[2025-11-02 19:27:30,000][__main__][INFO] - seed: 42
+device: cpu
+resume_checkpoint: C:/Users/Hellx/Documents/Programming/python/Project/redhot/outputs/diffusion_pretrain_controller/v1/2025-10-31/19-27-34/checkpoints/backup/backup_epoch_4.pth
+logging:
+  use_wandb: false
+  wandb_project: dgpo_diffusion_pretrain
+  log_interval_steps: 100
+  val_interval_epochs: 3
+dataset:
+  train_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training/training_data.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  batch_size: 128
+  num_workers: 2
+  subgoal_horizon_k: 8
+model:
+  observation_horizon: 2
+  action_horizon: 8
+  action_dim: 8
+  image_feat_dim: 128
+  d_model: 128
+  denoiser_layers: 4
+  denoiser_heads: 4
+scheduler:
+  schedule_type: cosine
+  timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+optimizer:
+  lr: 0.0002
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+training:
+  epochs: 1000
+  use_amp: false
+  ema_decay: 0.999
+  cfg_p_uncond: 0.15
+  use_activation_checkpointing: false
+validation:
+  guidance_scale: 1.5
+  sampling_steps: 50
+
+[2025-11-02 19:27:30,001][__main__][INFO] - ------------------------------------
+[2025-11-02 19:27:30,011][__main__][INFO] - Global seed set to 42
+[2025-11-02 19:27:30,012][__main__][INFO] - Output directory: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\diffusion_pretrain_controller\v1\2025-11-02\19-27-29
+[2025-11-02 19:27:30,016][__main__][INFO] - Building datasets...
+[2025-11-02 19:27:30,016][__main__][INFO] - Loading TRAINING dataset from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training/training_data.lmdb
+[2025-11-02 19:27:30,017][utils.controller_dataset][INFO] - Initializing HierarchicalControllerDataset with H_o=2, H_a=8, k=8
+[2025-11-02 19:27:30,017][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\training\training_data_index.json...
+[2025-11-02 19:27:30,020][utils.expert_dataset][INFO] - Loaded 55 episodes, 13956 total valid chunks (Virtually Indexed).
+[2025-11-02 19:27:30,020][utils.controller_dataset][INFO] - Successfully initialized. Found 13901 valid controller samples across 55 episodes.
+[2025-11-02 19:27:30,021][utils.samplers][INFO] - Building episode-to-index map for sampler...
+[2025-11-02 19:27:30,049][utils.samplers][INFO] - Map building complete.
+[2025-11-02 19:27:30,049][__main__][INFO] - Using EpisodeAwareSampler for training to optimize I/O.
+[2025-11-02 19:27:30,050][__main__][INFO] - Loading VALIDATION dataset from: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+[2025-11-02 19:27:30,050][utils.controller_dataset][INFO] - Initializing HierarchicalControllerDataset with H_o=2, H_a=8, k=8
+[2025-11-02 19:27:30,052][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-11-02 19:27:30,053][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-11-02 19:27:30,053][utils.controller_dataset][INFO] - Successfully initialized. Found 2933 valid controller samples across 12 episodes.
+[2025-11-02 19:27:30,054][__main__][INFO] - Building diffusion policy model...
+[2025-11-02 19:27:30,054][__main__][INFO] - Inferred proprioception dimension from dataset: 22
+[2025-11-02 19:27:31,418][models.diffusion_policy][INFO] - ViDHiS Controller (DiffusionPolicy) initialized on device: cpu
+[2025-11-02 19:27:31,427][__main__][INFO] - Configuring LR scheduler: Total steps=108000, Warmup steps=0
+[2025-11-02 19:27:31,428][__main__][INFO] - Loading checkpoint for migration/resumption: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\diffusion_pretrain_controller\v1\2025-10-31\19-27-34\checkpoints\backup\backup_epoch_4.pth
+[2025-11-02 19:27:32,100][__main__][WARNING] - Performing surgery: Skipping incompatible key 'vision_proj.weight' from checkpoint.
+[2025-11-02 19:27:32,101][__main__][WARNING] - Performing surgery: Skipping incompatible key 'vision_proj.bias' from checkpoint.
+[2025-11-02 19:27:32,101][__main__][INFO] - Migration rules applied to checkpoint.
+[2025-11-02 19:27:32,119][__main__][INFO] - Warm-started `subgoal_encoder` with `primary_encoder` weights.
+[2025-11-02 19:27:32,119][__main__][INFO] - Warm-started `uncond_embeddings.subgoal` (shape torch.Size([1, 1, 128])) using the first token of `uncond_embeddings.vision` (shape torch.Size([1, 2, 128])).
+[2025-11-02 19:27:32,156][__main__][WARNING] - Policy weights not found in checkpoint (likely new layers): ['vision_fusion_attn.in_proj_weight', 'vision_fusion_attn.in_proj_bias', 'vision_fusion_attn.out_proj.weight', 'vision_fusion_attn.out_proj.bias', 'vision_fusion_norm.weight', 'vision_fusion_norm.bias', 'vision_proj.weight', 'vision_proj.bias']
+[2025-11-02 19:27:32,157][__main__][INFO] - Policy state dict loaded successfully.
+[2025-11-02 19:27:32,157][__main__][WARNING] - Performing surgery: Skipping incompatible key 'vision_proj.weight' from checkpoint.
+[2025-11-02 19:27:32,158][__main__][WARNING] - Performing surgery: Skipping incompatible key 'vision_proj.bias' from checkpoint.
+[2025-11-02 19:27:32,158][__main__][INFO] - Migration rules applied to checkpoint.
+[2025-11-02 19:27:32,175][__main__][INFO] - Warm-started `subgoal_encoder` with `primary_encoder` weights.
+[2025-11-02 19:27:32,176][__main__][INFO] - Warm-started `uncond_embeddings.subgoal` (shape torch.Size([1, 1, 128])) using the first token of `uncond_embeddings.vision` (shape torch.Size([1, 2, 128])).
+[2025-11-02 19:27:32,213][__main__][INFO] - EMA state dict loaded successfully.
+[2025-11-02 19:27:32,213][__main__][WARNING] - Model architecture changed due to checkpoint migration. Starting with a fresh optimizer and scheduler from Epoch 1.
+[2025-11-02 19:27:32,217][__main__][INFO] - Starting training from epoch 1...
+[2025-11-02 19:29:05,215][__main__][ERROR] - An unexpected error occurred during training at epoch 1.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\dataloader.py", line 1275, in _try_get_data
+    data = self._data_queue.get(timeout=timeout)
+  File "C:\Users\Hellx\AppData\Local\Programs\Python\Python310\lib\multiprocessing\queues.py", line 122, in get
+    return _ForkingPickler.loads(res)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\multiprocessing\reductions.py", line 560, in rebuild_storage_filename
+    storage = torch.UntypedStorage._new_shared_filename_cpu(manager, handle, size)
+RuntimeError: Couldn't open shared event: <torch_6728_65539038_5_event>, error code: <2>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 678, in run
+    self._train_one_epoch(epoch)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 438, in _train_one_epoch
+    for (obs_chunk, subgoal_img_chunk), action_chunk in progress_bar:
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\tqdm\std.py", line 1181, in __iter__
+    for obj in iterable:
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\dataloader.py", line 732, in __next__
+    data = self._next_data()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\dataloader.py", line 1482, in _next_data
+    idx, data = self._get_data()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\dataloader.py", line 1444, in _get_data
+    success, data = self._try_get_data()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\dataloader.py", line 1288, in _try_get_data
+    raise RuntimeError(
+RuntimeError: DataLoader worker (pid(s) 1500, 6728) exited unexpectedly
+[2025-11-02 19:29:05,221][__main__][INFO] - Training process finished. Total runtime: 0.03 hours.
+[2025-11-02 19:29:05,222][__main__][ERROR] - An error occurred during training.
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\dataloader.py", line 1275, in _try_get_data
+    data = self._data_queue.get(timeout=timeout)
+  File "C:\Users\Hellx\AppData\Local\Programs\Python\Python310\lib\multiprocessing\queues.py", line 122, in get
+    return _ForkingPickler.loads(res)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\multiprocessing\reductions.py", line 560, in rebuild_storage_filename
+    storage = torch.UntypedStorage._new_shared_filename_cpu(manager, handle, size)
+RuntimeError: Couldn't open shared event: <torch_6728_65539038_5_event>, error code: <2>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 744, in main
+    trainer.run()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 678, in run
+    self._train_one_epoch(epoch)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\pretrain_diffusion.py", line 438, in _train_one_epoch
+    for (obs_chunk, subgoal_img_chunk), action_chunk in progress_bar:
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\tqdm\std.py", line 1181, in __iter__
+    for obj in iterable:
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\dataloader.py", line 732, in __next__
+    data = self._next_data()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\dataloader.py", line 1482, in _next_data
+    idx, data = self._get_data()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\dataloader.py", line 1444, in _get_data
+    success, data = self._try_get_data()
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\torch\utils\data\dataloader.py", line 1288, in _try_get_data
+    raise RuntimeError(
+RuntimeError: DataLoader worker (pid(s) 1500, 6728) exited unexpectedly

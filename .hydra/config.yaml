@@ -1,0 +1,37 @@
+seed: 43
+checkpoint_path: ./notes/checkpoints/backup_epoch_80.ckpt
+device: cpu
+output_video: ego_planner_eval1.mp4
+num_episodes: 1
+evaluation_mode: closed_loop
+video_fps: 15
+dataset:
+  path: PATH/TO/YOUR/validation_dataset.lmdb
+model:
+  action_dim: 7
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+scheduler:
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+  timesteps: 100
+env:
+  xml_path: envs/panda_pick_place.xml
+inference:
+  sampling_steps: 20
+  guidance_scale_plan: 2.5
+  guidance_scale_obs: 2.5
+rollout:
+  episode_indices: []
+  max_episodes_to_eval: 5
+  max_steps: 400

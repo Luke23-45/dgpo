@@ -1,0 +1,110 @@
+[2025-11-03 20:26:45,588][train_vip_c][INFO] - ================================================================================
+[2025-11-03 20:26:45,594][train_vip_c][INFO] - Initializing ViP-C Training Pipeline
+[2025-11-03 20:26:45,594][train_vip_c][INFO] - ================================================================================
+[2025-11-03 20:26:45,614][train_vip_c][INFO] - Full configuration:
+seed: 42
+project_name: vip_c_training
+model:
+  planner_cfg:
+    vision_backbone_model: google/siglip-base-patch16-224
+    num_task_phases: 5
+    fusion_transformer_layers: 4
+    fusion_transformer_heads: 12
+  controller_cfg:
+    action_dim: 8
+    proprio_dim: 22
+    action_horizon: 8
+    obs_horizon: 2
+    controller_hidden_dim: 512
+    resnet_feature_dim: 256
+    denoiser_layers: 6
+    denoiser_heads: 8
+scheduler:
+  timesteps: 100
+  beta_schedule: squaredcos_cap_v2
+  beta_start: 0.0001
+  beta_end: 0.02
+dataset:
+  train_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_enhanced/vip_c_validate_10_episodes.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_enhanced/vip_c_validate_10_episodes.lmdb
+  num_workers: 1
+training:
+  batch_size: 32
+  val_batch_size: 32
+  ema_decay: 0.999
+  loss_weights:
+    planner: 1.0
+    controller: 0.5
+  checkpoint_monitor: val/loss_planner_raw
+  save_top_k: 3
+  resume_from_checkpoint: null
+  use_swa: false
+  swa_lrs: 1.0e-05
+validation:
+  run_qualitative_every_n_epoch: 10
+optimizer:
+  lr: 0.0001
+  weight_decay: 1.0e-06
+  warmup_percentage: 0.05
+trainer:
+  accelerator: cpu
+  devices: 1
+  max_epochs: 1000
+  precision: 16-mixed
+  check_val_every_n_epoch: 5
+  accumulate_grad_batches: 2
+  gradient_clip_val: 1.0
+logging:
+  use_wandb: true
+  wandb_project: ${project_name}
+  wandb_run_name: null
+  wandb_mode: online
+  log_grad_freq: 500
+  progress_bar_refresh_rate: 10
+
+[2025-11-03 20:26:45,653][train_vip_c][INFO] - W&B mode set to: 'online'
+[2025-11-03 20:26:45,672][models.vip_c][INFO] - Initializing the ViPC Orchestrator...
+[2025-11-03 20:26:45,687][models.vip_c][INFO] - Initializing Planner with backbone: google/siglip-base-patch16-224
+[2025-11-03 20:26:46,811][models.vip_c][INFO] - Initializing Controller with hidden_dim: 512
+[2025-11-03 20:26:47,512][models.vip_c][INFO] - ViPC Orchestrator initialized successfully.
+[2025-11-03 20:26:48,049][train_vip_c][INFO] - ViPCLightningModule initialized successfully.
+[2025-11-03 20:26:48,053][train_vip_c][INFO] - TensorBoard logs will be saved to: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\2025-11-03\20-26-45/tb_logs
+[2025-11-03 20:26:53,306][train_vip_c][INFO] - W&B logging enabled for project 'vip_c_training'.
+[2025-11-03 20:26:53,308][train_vip_c][INFO] - ModelCheckpoint enabled. Monitoring 'val/loss_planner_raw'.
+[2025-11-03 20:26:53,344][train_vip_c][INFO] - Starting trainer.fit()...
+[2025-11-03 20:26:53,356][train_vip_c][INFO] - Setting up ViPCDataModule for stage: fit
+[2025-11-03 20:26:53,357][train_vip_c][INFO] - Loading TRAINING dataset from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_enhanced/vip_c_validate_10_episodes.lmdb
+[2025-11-03 20:26:53,357][utils.vip_c_dataset][INFO] - Initializing ViPCDataset (SOTA Orchestrator) with H_o=2, H_a=8
+[2025-11-03 20:26:53,358][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\training_enhanced\vip_c_validate_10_episodes_index.json...
+[2025-11-03 20:26:53,358][utils.expert_dataset][INFO] - Loaded 2 episodes, 553 total valid chunks (Virtually Indexed).
+[2025-11-03 20:26:53,359][train_vip_c][INFO] - Training dataset loaded with 553 samples.
+[2025-11-03 20:26:53,360][train_vip_c][INFO] - Loading VALIDATION dataset from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_enhanced/vip_c_validate_10_episodes.lmdb
+[2025-11-03 20:26:53,361][utils.vip_c_dataset][INFO] - Initializing ViPCDataset (SOTA Orchestrator) with H_o=2, H_a=8
+[2025-11-03 20:26:53,361][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\training_enhanced\vip_c_validate_10_episodes_index.json...
+[2025-11-03 20:26:53,362][utils.expert_dataset][INFO] - Loaded 2 episodes, 553 total valid chunks (Virtually Indexed).
+[2025-11-03 20:26:53,363][train_vip_c][INFO] - Validation dataset loaded with 553 samples.
+[2025-11-03 20:27:17,535][train_vip_c][WARNING] - Skipping training step for batch 0 due to data loading failure.
+[2025-11-03 20:27:17,543][train_vip_c][WARNING] - Skipping training step for batch 1 due to data loading failure.
+[2025-11-03 20:27:17,658][train_vip_c][WARNING] - Skipping training step for batch 2 due to data loading failure.
+[2025-11-03 20:27:17,664][train_vip_c][WARNING] - Skipping training step for batch 3 due to data loading failure.
+[2025-11-03 20:27:17,781][train_vip_c][WARNING] - Skipping training step for batch 4 due to data loading failure.
+[2025-11-03 20:27:17,788][train_vip_c][WARNING] - Skipping training step for batch 5 due to data loading failure.
+[2025-11-03 20:27:17,893][train_vip_c][WARNING] - Skipping training step for batch 6 due to data loading failure.
+[2025-11-03 20:27:17,897][train_vip_c][WARNING] - Skipping training step for batch 7 due to data loading failure.
+[2025-11-03 20:27:17,998][train_vip_c][WARNING] - Skipping training step for batch 8 due to data loading failure.
+[2025-11-03 20:27:18,004][train_vip_c][WARNING] - Skipping training step for batch 9 due to data loading failure.
+[2025-11-03 20:27:18,109][train_vip_c][WARNING] - Skipping training step for batch 10 due to data loading failure.
+[2025-11-03 20:27:18,113][train_vip_c][WARNING] - Skipping training step for batch 11 due to data loading failure.
+[2025-11-03 20:27:18,218][train_vip_c][WARNING] - Skipping training step for batch 12 due to data loading failure.
+[2025-11-03 20:27:18,221][train_vip_c][WARNING] - Skipping training step for batch 13 due to data loading failure.
+[2025-11-03 20:27:18,322][train_vip_c][WARNING] - Skipping training step for batch 14 due to data loading failure.
+[2025-11-03 20:27:18,326][train_vip_c][WARNING] - Skipping training step for batch 15 due to data loading failure.
+[2025-11-03 20:27:18,423][train_vip_c][WARNING] - Skipping training step for batch 16 due to data loading failure.
+[2025-11-03 20:27:18,426][train_vip_c][WARNING] - Skipping training step for batch 17 due to data loading failure.
+[2025-11-03 20:27:18,516][train_vip_c][WARNING] - Skipping training step for batch 0 due to data loading failure.
+[2025-11-03 20:27:18,524][train_vip_c][WARNING] - Skipping training step for batch 1 due to data loading failure.
+[2025-11-03 20:27:18,622][train_vip_c][WARNING] - Skipping training step for batch 2 due to data loading failure.
+[2025-11-03 20:27:18,625][train_vip_c][WARNING] - Skipping training step for batch 3 due to data loading failure.
+[2025-11-03 20:27:18,725][train_vip_c][WARNING] - Skipping training step for batch 4 due to data loading failure.
+[2025-11-03 20:27:18,728][train_vip_c][WARNING] - Skipping training step for batch 5 due to data loading failure.
+[2025-11-03 20:27:20,404][train_vip_c][INFO] - W&B run finalized.

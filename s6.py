@@ -49,7 +49,7 @@ def main(args: argparse.Namespace):
     )
     # --- 1. Initialize Core Components ---
     log.info("Initializing components...")
-    env = PandaEnv(xml_path=args.xml_path,control_mode='absolute')
+    env = PandaEnv(xml_path=args.xml_path,control_mode='delta')
     model = env.model
 
 

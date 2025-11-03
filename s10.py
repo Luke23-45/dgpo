@@ -1,339 +1,277 @@
-# FILE: train/train_ego_planner.py
-# (State-of-the-Art, Resilient, EMA-Integrated, SOTA Version)
+# FILE: scripts/verify_dataset.py
+#
+# Definitive, SOTA, End-to-End Data Verification Script.
+#
+# This script provides an apples-to-apples comparison of a saved trajectory
+# from an LMDB dataset against a freshly generated "live" trajectory using the
+# exact same seed. It produces both a quantitative (CSV) and qualitative
+# (side-by-side video) report of any discrepancies, serving as the final
+# certification of data integrity.
+#
 
-"""
-The definitive, state-of-the-art training script for the unified Ego-Planner policy,
-engineered for maximum robustness, performance, and deep experimental analysis.
-
-This script synthesizes the best practices from reference implementations and integrates
-them seamlessly into the PyTorch Lightning framework for a stable and transparent
-training experience.
-"""
-
-from __future__ import annotations
-
+import argparse
+import csv
 import logging
+import sys
 from pathlib import Path
-from typing import Dict, Any, Optional
-
-import hydra
-import matplotlib.pyplot as plt
+from typing import Any, Dict, Generator, Tuple
+import yaml
+import cv2
 import numpy as np
-import pytorch_lightning as pl
-import torch
-import torch.nn.functional as F
-from omegaconf import DictConfig, OmegaConf
-from pytorch_lightning.callbacks import (LearningRateMonitor, ModelCheckpoint,
-                                         StochasticWeightAveraging, TQDMProgressBar)
-from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
-from torch.utils.data import DataLoader
-from transformers import get_scheduler
+from tqdm import tqdm
 
-# --- SOTA FEATURE: Import the specialized sampler for I/O optimization ---
-from utils.samplers import EpisodeAwareSampler
+# --- Project Imports ---
+# Ensure the project root is in the Python path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
 
-# --- Project-Specific Imports ---
-from models.ego_planner import EgoPlanner, EgoPlannerConfig
-from models.diffusion_policy import NoiseScheduler, NoiseSchedulerConfig, EMA
-from utils.ego_planner_dataset import EgoPlannerDataset, ego_planner_collate_fn
+from envs.panda_env import PandaEnv
+from utils.ik_solver import IKSolver
+from utils.scripted_expert import ExpertConfig, ObjectProfile, ScriptedExpert
+# We reuse the SoAEpisodeLoader from our visualization script
+from scripts.visualize_dataset import SoAEpisodeLoader
 
-# Optional, for enhanced logging
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
-
-# Setup a logger for the script
-log = logging.getLogger(__name__)
+# --- Configuration ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | [%(name)s] | %(message)s",
+)
+logger = logging.getLogger("verify_dataset")
 
 
-# -----------------------------------------------------------------------------
-# 1. The LightningDataModule (Upgraded with EpisodeAwareSampler)
-# -----------------------------------------------------------------------------
-
-class EgoPlannerDataModule(pl.LightningDataModule):
-    def __init__(self, cfg: DictConfig):
-        super().__init__()
-        self.cfg = cfg
-        self.train_dataset: Optional[EgoPlannerDataset] = None
-        self.val_dataset: Optional[EgoPlannerDataset] = None
-
-    def setup(self, stage: Optional[str] = None):
-        if stage == 'fit' or stage is None:
-            log.info(f"Loading TRAINING dataset from: {self.cfg.dataset.train_path}")
-            self.train_dataset = EgoPlannerDataset(
-                dataset_path=self.cfg.dataset.train_path,
-                obs_horizon=self.cfg.model.obs_horizon,
-                action_horizon=self.cfg.model.action_horizon,
-                use_aug=self.cfg.dataset.use_aug  
-            )
-            
-            if self.cfg.dataset.get("val_path"):
-                log.info(f"Loading VALIDATION dataset from: {self.cfg.dataset.val_path}")
-                self.val_dataset = EgoPlannerDataset(
-                    dataset_path=self.cfg.dataset.val_path,
-                    obs_horizon=self.cfg.model.obs_horizon,
-                    action_horizon=self.cfg.model.action_horizon,
-                    use_aug=False # DEFINITIVE FIX: Explicitly disable augmentation for validation
-                )
-
-    def train_dataloader(self) -> DataLoader:
-        sampler = EpisodeAwareSampler(
-            dataset=self.train_dataset,
-            shuffle=True,
-            seed=self.cfg.seed + self.trainer.global_rank
-        )
-        log.info("Using EpisodeAwareSampler for training to optimize I/O.")
-        
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.cfg.training.batch_size,
-            sampler=sampler,
-            shuffle=False, # The sampler handles all shuffling logic
-            num_workers=self.cfg.dataset.num_workers,
-            pin_memory=torch.cuda.is_available(),
-            persistent_workers=(self.cfg.dataset.num_workers > 0),
-            collate_fn=ego_planner_collate_fn,
-        )
-
-    def val_dataloader(self) -> Optional[DataLoader]:
-        if not self.val_dataset:
-            return None
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.cfg.training.val_batch_size,
-            shuffle=False,
-            num_workers=self.cfg.dataset.num_workers,
-            pin_memory=torch.cuda.is_available(),
-            persistent_workers=(self.cfg.dataset.num_workers > 0),
-            collate_fn=ego_planner_collate_fn,
-        )
-
-
-# -----------------------------------------------------------------------------
-# 2. The Main LightningModule (Rewritten for Robustness)
-# -----------------------------------------------------------------------------
-
-class EgoPlannerLightningModule(pl.LightningModule):
-    def __init__(self, cfg: DictConfig):
-        super().__init__()
-        self.save_hyperparameters(OmegaConf.to_container(cfg, resolve=True))
-        self.cfg = cfg
-
-        use_checkpointing = self.cfg.training.get("use_activation_checkpointing", False)
-        model_cfg = EgoPlannerConfig(**OmegaConf.to_container(cfg.model, resolve=True))
-        self.model = EgoPlanner(model_cfg, use_checkpointing=use_checkpointing)
-        
-        self.ema = EMA(self.model, decay=self.cfg.training.ema_decay)
-        
-        scheduler_cfg = NoiseSchedulerConfig()
-        self.scheduler = NoiseScheduler(scheduler_cfg)
-
-        self.last_backup_path: Optional[Path] = None
-        log.info("Definitive SOTA EgoPlannerLightningModule initialized.")
-
-    def setup(self, stage: str) -> None:
-        """
-        Called at the beginning of fit/validate/test. This is the CORRECT place
-        to move non-parameter tensors like the noise schedule to the device.
-        """
-        if stage == 'fit':
-            log.info(f"Moving noise scheduler to device: {self.device}")
-            self.scheduler.to(self.device)
-
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
-        """Robustly loads model and EMA state, ignoring mismatches."""
-        if not checkpoint: return
-        
-        log.info("Applying robust checkpoint loading logic...")
-        policy_state_dict = checkpoint['state_dict']
-        
-        incompatible_keys = self.model.load_state_dict(policy_state_dict, strict=False)
-        if incompatible_keys.missing_keys:
-            log.warning(f"Policy weights not in ckpt (new layers): {incompatible_keys.missing_keys}")
-        if incompatible_keys.unexpected_keys:
-            log.warning(f"Ckpt weights ignored (obsolete layers): {incompatible_keys.unexpected_keys}")
-        
-        ema_state_dict = checkpoint.get('ema_state_dict')
-        if ema_state_dict:
-            self.ema.load_state_dict(ema_state_dict, strict=False)
-        else:
-            log.warning("No EMA state found in checkpoint. Re-initializing EMA from loaded model weights.")
-            self.ema = EMA(self.model, decay=self.cfg.training.ema_decay)
-
-    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Injects the EMA state into the checkpoint file."""
-        checkpoint["ema_state_dict"] = self.ema.state_dict()
-
-    def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        """
-        Streamlined training step. PyTorch Lightning automatically handles
-        device placement and AMP context before this method is called.
-        """
-        gt_actions = batch['action_chunk']
-        B = gt_actions.shape[0]
-
-        noise = torch.randn_like(gt_actions)
-        timesteps = torch.randint(0, self.scheduler.T, (B,), device=self.device).long()
-        
-        # Add noisy actions and timesteps to the batch for the model
-        batch['noisy_actions'] = self.scheduler.add_noise(gt_actions, timesteps, noise)
-        batch['timesteps'] = timesteps
-        
-        predicted_noise = self.model(batch)
-        loss = F.mse_loss(predicted_noise, noise)
-
-        self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.ema.update(self.model) # Update EMA weights after the train step
-        return loss
-
-    def validation_step(self, batch: Dict[str, Any], batch_idx: int):
-        gt_actions = batch['action_chunk']
-        B = gt_actions.shape[0]
-
-        # Fast Path: Validation Loss (always runs)
-        noise = torch.randn_like(gt_actions)
-        timesteps = torch.randint(0, self.scheduler.T, (B,), device=self.device).long()
-        batch['noisy_actions'] = self.scheduler.add_noise(gt_actions, timesteps, noise)
-        batch['timesteps'] = timesteps
-        
-        # Use the EMA model for all validation
-        with torch.no_grad():
-            predicted_noise = self.ema.ema_model(batch)
-        val_loss = F.mse_loss(predicted_noise, noise)
-        self.log('val/loss', val_loss, on_epoch=True, prog_bar=True, sync_dist=True)
-
-        # Slow Path: Periodically run expensive inference and metrics
-        run_full_val = (self.trainer.current_epoch + 1) % self.cfg.validation.run_full_validation_every_n_epoch == 0
-        if run_full_val:
-            with torch.no_grad():
-                predicted_actions = self.ema.ema_model.sample(
-                    batch=batch,
-                    scheduler=self.scheduler,
-                    guidance_plan=self.cfg.validation.guidance_scale_plan,
-                    guidance_obs=self.cfg.validation.guidance_scale_obs
-                )
-            action_mse = F.mse_loss(predicted_actions, gt_actions)
-            self.log('val/action_mse', action_mse, on_epoch=True, sync_dist=True)
-
-            if batch_idx == 0 and self.trainer.is_global_zero:
-                self._log_action_trajectory_plot(predicted_actions, gt_actions)
-
-    def on_train_epoch_end(self):
-        """Saves a high-frequency backup checkpoint after every training epoch."""
-        if not self.trainer.is_global_zero: return
-
-        epoch = self.trainer.current_epoch
-        backup_path = Path("/content/drive/MyDrive/pda/models/v1") / f"backup_epoch_{epoch}.ckpt"
-        log.info(f"Saving per-epoch backup checkpoint to {backup_path}...")
-        try:
-            self.trainer.save_checkpoint(backup_path)
-            # Clean up previous backup to save space
-            if self.last_backup_path and self.last_backup_path.exists():
-                self.last_backup_path.unlink()
-            self.last_backup_path = backup_path
-        except Exception as e:
-            log.error(f"Failed to save per-epoch backup: {e}")
-
-    def _create_full_checkpoint(self) -> Dict[str, Any]:
-        """
-        Creates a full training state checkpoint, robust to early crashes
-        before optimizers are initialized.
-        """
-        optimizer_states = [opt.state_dict() for opt in self.trainer.optimizers] if hasattr(self.trainer, "optimizers") else []
-        lr_scheduler_states = [s['scheduler'].state_dict() for s in self.trainer.lr_schedulers] if hasattr(self.trainer, "lr_schedulers") else []
-        
-        return {
-            "epoch": self.trainer.current_epoch,
-            "global_step": self.trainer.global_step,
-            "state_dict": self.model.state_dict(),
-            "ema_state_dict": self.ema.state_dict(),
-            "optimizer_states": optimizer_states,
-            "lr_schedulers": lr_scheduler_states,
-        }
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(), lr=self.cfg.optimizer.lr, weight_decay=self.cfg.optimizer.weight_decay
-        )
-        total_steps = self.trainer.estimated_stepping_batches
-        warmup_steps_config = self.cfg.optimizer.get('warmup_steps', 0.05)
-        num_warmup_steps = int(total_steps * warmup_steps_config) if isinstance(warmup_steps_config, float) else int(warmup_steps_config)
-        
-        scheduler = get_scheduler("cosine", optimizer, num_warmup_steps, total_steps)
-        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
-
-    def _log_action_trajectory_plot(self, pred_actions, gt_actions):
-        try:
-            pred_np, gt_np = pred_actions[0].cpu().numpy(), gt_actions[0].cpu().numpy()
-            H_a, D_a = pred_np.shape
-            fig, axes = plt.subplots(D_a, 1, figsize=(10, 2 * D_a), sharex=True)
-            if D_a == 1: axes = [axes]
-            for i in range(D_a):
-                axes[i].plot(np.arange(H_a), gt_np[:, i], 'g-', label='Ground Truth')
-                axes[i].plot(np.arange(H_a), pred_np[:, i], 'b--', label='Prediction')
-                axes[i].set_ylabel(f'Action Dim {i}'); axes[i].grid(True, alpha=0.5)
-            axes[0].legend(); axes[0].set_title(f'Action Trajectory (Epoch {self.current_epoch})')
-            axes[-1].set_xlabel('Horizon Timestep')
-            plt.tight_layout()
-            for logger in self.trainer.loggers:
-                if isinstance(logger, TensorBoardLogger): logger.experiment.add_figure("val/action_trajectory", fig, self.global_step)
-                elif isinstance(logger, WandbLogger): logger.experiment.log({"val/action_trajectory": wandb.Image(fig)}, step=self.global_step)
-            plt.close(fig)
-        except Exception as e:
-            log.warning(f"Failed to log action trajectory plot: {e}")
-
-# -----------------------------------------------------------------------------
-# 3. Hydra Main Entry Point
-# -----------------------------------------------------------------------------
-
-@hydra.main(version_base=None, config_path="./configs", config_name="train_ego_planner_config")
-def main(cfg: DictConfig):
-    log.info(OmegaConf.to_yaml(cfg))
-    pl.seed_everything(cfg.seed, workers=True)
-
-    # Set WANDB_MODE from config before logger initialization
-    if cfg.logging.use_wandb:
-        import os
-        os.environ["WANDB_MODE"] = cfg.logging.get("wandb_mode", "online")
-
-    output_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
+def generate_live_trajectory(
+    cfg: Dict[str, Any],
+    seed: int
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    Runs a single, deterministic episode in a live environment and yields the
+    full expert observation dictionary at each timestep.
+    """
+    logger.info(f"--- Starting LIVE re-simulation for seed {seed} ---")
     
-    datamodule = EgoPlannerDataModule(cfg)
-    model = EgoPlannerLightningModule(cfg)
+    env = PandaEnv(xml_path=cfg["xml_path"], control_mode='delta')
+    expert_cfg = ExpertConfig(**cfg.get("expert_config", {}))
+    object_profile = ObjectProfile(
+        size=np.array(cfg.get("object_size")),
+        grasp_width_normalized=float(cfg.get("grasp_width"))
+    )
+    expert = ScriptedExpert(object_profile=object_profile, cfg=expert_cfg)
+    ik_solver = IKSolver(urdf_path=cfg["urdf_path"])
+    
+    # Deterministic Reset
+    obs, _ = env.reset(seed=seed)
+    env.set_object_size(object_profile.size)
+    expert.reset()
+    ik_solver.reset_controller_state()
 
-    loggers = [TensorBoardLogger(str(output_dir), name="", version="tb_logs")]
-    if cfg.logging.use_wandb:
-        wandb_logger = WandbLogger(project=cfg.logging.wandb_project, name=output_dir.name, save_dir=str(output_dir))
-        wandb_logger.watch(model, log='gradients', log_freq=100)
-        loggers.append(wandb_logger)
+    # Controller parameters needed for action computation
+    N_SUBSTEPS = 20
+    effective_dt = env.model.opt.timestep * N_SUBSTEPS
+    arm_joint_ids = np.arange(7)
+    max_dq = env.ACTION_SCALING_FACTOR / effective_dt
 
-    callbacks = [
-        ModelCheckpoint(dirpath=output_dir / "checkpoints", filename="best-val_loss={val/loss:.4f}-epoch={epoch}", monitor="val/loss", mode="min", save_top_k=3),
-        LearningRateMonitor('step'),
-        TQDMProgressBar()
-    ]
-    if cfg.training.get('use_swa', False):
-        callbacks.append(StochasticWeightAveraging(swa_lrs=cfg.training.swa_lrs))
+    for step in range(env.max_episode_steps):
+        expert_obs = env.get_expert_obs()
+        expert_obs['expert_state'] = expert.get_state()
+        
+        # Yield the observation BEFORE the step is taken, to match saved data
+        yield expert_obs
 
-    trainer = pl.Trainer(logger=loggers, callbacks=callbacks, **OmegaConf.to_container(cfg.trainer, resolve=True))
+        target_ee_pose, gripper_action = expert.get_target_pose(expert_obs)
 
+        delta_arm_action = ik_solver.compute_delta_action(
+            target_ee_pose=target_ee_pose,
+            model=env.model, data=env.data, ee_site_id=env.ee_site_id,
+            joint_qpos_indices=arm_joint_ids,
+            effective_dt=effective_dt, max_dq=max_dq
+        )
+        final_action = np.concatenate([delta_arm_action, [gripper_action]])
+
+        obs, _, terminated, truncated, _ = env.step(final_action)
+        
+        if terminated or truncated or expert.is_done():
+            # Yield the final observation state
+            final_expert_obs = env.get_expert_obs()
+            final_expert_obs['expert_state'] = expert.get_state()
+            yield final_expert_obs
+            logger.info(f"Live simulation finished at step {step}. Final state: {expert.get_state()}")
+            break
+    
+    env.close()
+    logger.info("--- Live re-simulation complete ---")
+
+
+def find_episode_by_seed(loader: SoAEpisodeLoader, target_seed: int) -> Tuple[int, Dict[str, Any]]:
+    """Finds the index and data for the first episode matching a given seed."""
+    for i in range(len(loader)):
+        ep_meta = loader.episode_metadata[i]
+        if ep_meta.get("seed") == target_seed:
+            logger.info(f"Found episode for seed {target_seed} at index {i}.")
+            return i, loader.get_episode(i)
+    raise ValueError(f"Could not find an episode with seed {target_seed} in the dataset.")
+
+
+def format_array_for_csv(arr: np.ndarray) -> str:
+    """Formats a numpy array into a compact, readable string for CSV logging."""
+    return np.array2string(arr, precision=6, separator=',', suppress_small=True)
+
+
+
+def main(args):
+    """Main orchestration function for the verification process."""
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # --- 1. Load Configuration from Data Generation ---
     try:
-        trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.training.resume_from_checkpoint)
-    except (Exception, KeyboardInterrupt) as e:
-        log.warning(f"Training interrupted or failed: {e}", exc_info=True) # Log stack trace
-        log.info("Attempting to save a final 'interrupted.ckpt'...")
-        final_ckpt_path = output_dir / "checkpoints" / "interrupted.ckpt"
-        try:
-            final_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(model._create_full_checkpoint(), final_ckpt_path)
-            log.info(f"Final checkpoint saved successfully to {final_ckpt_path}")
-        except Exception as e2:
-            log.error(f"Could not save final interrupted checkpoint: {e2}")
+        with open(args.gen_config, "r") as f:
+            gen_cfg = yaml.safe_load(f)
+    except FileNotFoundError:
+        logger.error(f"Generation config not found at {args.gen_config}. Cannot run deterministic simulation.")
+        return
+        
+    # --- 2. Load the Saved Episode from the LMDB Dataset ---
+    try:
+        loader = SoAEpisodeLoader(args.demo_path)
+        ep_idx, saved_episode = find_episode_by_seed(loader, args.seed)
+        saved_obs_list = saved_episode["obs_list"]
+        logger.info(f"Successfully loaded saved trajectory for seed {args.seed}. Length: {len(saved_obs_list)}")
+    except (FileNotFoundError, ValueError) as e:
+        logger.error(f"Failed to load saved episode: {e}")
+        return
     finally:
-        if cfg.logging.use_wandb and WANDB_AVAILABLE and wandb.run is not None:
-            wandb.finish()
+        if 'loader' in locals() and loader:
+            loader.close()
+
+    # --- 3. Generate the "Live" Trajectory ---
+    live_obs_generator = generate_live_trajectory(gen_cfg, args.seed)
+    
+    # --- 4. Setup Logging and Video Writing ---
+    video_path = output_dir / f"verification_seed_{args.seed}.mp4"
+    csv_path = output_dir / f"verification_log_seed_{args.seed}.csv"
+
+    # Get frame dimensions from the first frame of the saved data
+    h, w, _ = saved_obs_list[0]['image_primary'].shape
+    # Video will be side-by-side, so width is doubled
+    video_writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*'mp4v'), args.fps, (w * 2, h))
+
+    csv_file = open(csv_path, 'w', newline='')
+    csv_writer = csv.writer(csv_file)
+
+    csv_writer.writerow([
+        "step", "expert_state_live", "expert_state_saved", "state_match",
+        "proprio_error", "ee_pose_error",
+        "live_proprio_qpos", "saved_proprio_qpos",
+        "live_ee_pose", "saved_ee_pose"
+    ])
+    
+    error_history = {"proprio": [], "ee_pose": []}
+
+    # --- 5. The Synchronized Comparison Loop ---
+    logger.info(f"Starting synchronized comparison. Writing video to {video_path} and log to {csv_path}")
+    comparison_len = min(len(saved_obs_list), 500) # Cap comparison length for safety
+    
+    for t in tqdm(range(comparison_len), desc="Comparing Timesteps"):
+        try:
+            live_obs = next(live_obs_generator)
+        except StopIteration:
+            logger.warning(f"Live generator stopped early at step {t}. Ending comparison.")
+            break
+        
+        saved_obs = saved_obs_list[t]
+        
+        # --- Quantitative Comparison ---
+        proprio_err = np.linalg.norm(live_obs['proprio'] - saved_obs['proprio'])
+        ee_pose_err = np.linalg.norm(live_obs['ee_pose_world'] - saved_obs['ee_pose_world'])
+        state_match = live_obs['expert_state'] == saved_obs.get('expert_state', 'N/A')
+        
+        error_history["proprio"].append(proprio_err)
+        error_history["ee_pose"].append(ee_pose_err)
+        saved_expert_state = saved_obs.get('expert_state', 'N/A')
+        state_match = live_obs['expert_state'] == saved_expert_state
+
+        csv_writer.writerow([
+            t,
+            live_obs['expert_state'],
+            saved_expert_state,
+            state_match,
+            f"{proprio_err:.8f}",
+            f"{ee_pose_err:.8f}",
+            format_array_for_csv(live_obs['proprio'][:7]), # Log qpos part of proprio
+            format_array_for_csv(saved_obs['proprio'][:7]),
+            format_array_for_csv(live_obs['ee_pose_world']),
+            format_array_for_csv(saved_obs['ee_pose_world'])
+        ])
+        
+        # --- Qualitative Comparison (Video Frame) ---
+        live_frame = cv2.cvtColor(live_obs['image_primary'], cv2.COLOR_RGB2BGR)
+        saved_frame = cv2.cvtColor(saved_obs['image_primary'], cv2.COLOR_RGB2BGR)
+        
+        # Add labels to each frame
+        cv2.putText(live_frame, "LIVE SIMULATION", (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1, cv2.LINE_AA)
+        cv2.putText(saved_frame, "SAVED FROM LMDB", (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 200, 255), 1, cv2.LINE_AA)
+        
+        # Create side-by-side composite frame
+        composite_frame = np.concatenate((live_frame, saved_frame), axis=1)
+        
+        # Add overlay text with diagnostics
+        cv2.putText(composite_frame, f"Step: {t}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(composite_frame, f"State Match: {state_match}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if state_match else (0, 0, 255), 2)
+        cv2.putText(composite_frame, f"Proprio Error: {proprio_err:.4f}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(composite_frame, f"EE Pose Error: {ee_pose_err:.4f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        video_writer.write(composite_frame)
+
+    # --- 6. Finalization and Reporting ---
+    logger.info("Comparison loop finished. Finalizing outputs.")
+    video_writer.release()
+    csv_file.close()
+
+    avg_proprio_err = np.mean(error_history["proprio"]) if error_history["proprio"] else 0
+    avg_ee_pose_err = np.mean(error_history["ee_pose"]) if error_history["ee_pose"] else 0
+    
+    logger.info("="*50)
+    logger.info("VERIFICATION SUMMARY")
+    logger.info("="*50)
+    logger.info(f"Average Proprioception Error: {avg_proprio_err:.6f}")
+    logger.info(f"Average End-Effector Pose Error: {avg_ee_pose_err:.6f}")
+
+    if avg_proprio_err < 1e-4 and avg_ee_pose_err < 1e-4:
+        logger.info("✅ VERIFICATION PASSED: The saved data is a near-perfect match to the live simulation.")
+    else:
+        logger.warning("❌ VERIFICATION FAILED: Significant discrepancies found between saved and live data.")
+        logger.warning("Check the generated CSV and video for details. This may indicate non-determinism in the simulation or data saving process.")
+    logger.info("="*50)
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="SOTA end-to-end data verification script.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        "demo_path", type=str,
+        help="Path to the .lmdb dataset file to verify."
+    )
+    parser.add_argument(
+        "--gen-config", type=str, required=True,
+        help="Path to the original `gen_dataset_config.yaml` used to create the data."
+    )
+    parser.add_argument(
+        "--seed", type=int, required=True, default=42,
+        help="The specific episode seed to verify."
+    )
+    parser.add_argument(
+        "--output-dir", type=str, default="verification/run",
+        help="Directory to save the output video and CSV log."
+    )
+    parser.add_argument(
+        "--fps", type=int, default=30,
+        help="Frames per second for the output comparison video."
+    )
+    
+    main(parser.parse_args())
+
+
+# python -m s10 "C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validation\validation_dataset.lmdb" --gen-config "configs\gen_dataset_config.yaml" --seed 702

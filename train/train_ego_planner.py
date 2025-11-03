@@ -300,26 +300,51 @@ class EgoPlannerLightningModule(pl.LightningModule):
 
         return val_loss
 
-    # --- SOTA FEATURE: High-Frequency Per-Epoch Backups ---
-    def on_train_epoch_end(self):
+    def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int) -> None:
+        """
+        SOTA Hook: Called after every training batch.
+        We use this to manually save a backup checkpoint on the very last batch of the epoch.
+        This is more robust than `on_train_epoch_end` because it happens before the
+        training progress bar is destroyed.
+        """
+        # Ensure this only runs on the main process in a multi-GPU setup
         if not self.trainer.is_global_zero:
             return
-
-        epoch = self.trainer.current_epoch
-        # backup_path = self.backup_dir / f"backup_epoch_{epoch}.ckpt"
         
-        base_path = Path("/content/drive/MyDrive/pda/models/v1")
-        backup_path = base_path / f"backup_epoch_{epoch}.ckpt"
-        log.info(f"Saving per-epoch backup checkpoint to {backup_path}...")
-        try:
-            self.trainer.save_checkpoint(backup_path)
-            # Delete previous backup to save space
-            if self.last_backup_path and self.last_backup_path.exists():
-                self.last_backup_path.unlink()
-            self.last_backup_path = backup_path
-            log.info(f"Backup for epoch {epoch} saved successfully.")
-        except Exception as e:
-            log.error(f"Failed to save per-epoch backup: {e}")
+
+        if (self.trainer.current_epoch + 1) % 3 != 0:
+            return
+
+        # Check if this is the last batch of the training epoch.
+        # self.trainer.num_training_batches gives the total number of batches in the loader.
+        is_last_batch = (batch_idx + 1) == self.trainer.num_training_batches
+
+        if is_last_batch:
+            epoch = self.trainer.current_epoch
+            log.info(f"Last training batch of epoch {epoch} finished. Saving backup checkpoint...")
+            
+            base_path = Path("/content/drive/MyDrive/pda/models/v1")
+            base_path.mkdir(parents=True, exist_ok=True) 
+            backup_path = base_path / f"backup_epoch_{epoch}.ckpt"
+
+            # backup_path = Path.cwd() / "checkpoints" / "backup"
+             
+            
+            # backup_path = backup_path / f"backup_epoch_{epoch}.ckpt"
+         
+            try:
+                self.trainer.save_checkpoint(backup_path)
+                
+                # Delete the previous epoch's backup to save space
+                if self.last_backup_path and self.last_backup_path.exists():
+                    self.last_backup_path.unlink()
+                    log.info(f"Deleted previous backup: {self.last_backup_path}")
+
+                self.last_backup_path = backup_path
+                log.info(f"Backup for epoch {epoch} saved successfully to {backup_path}.")
+            except Exception as e:
+                log.error(f"Failed to save per-epoch backup: {e}", exc_info=True)
+                
 
     # Helper to construct checkpoint data
     def _create_full_checkpoint(self) -> Dict[str, Any]:
@@ -390,7 +415,7 @@ def main(cfg: DictConfig):
     # Set the WANDB_MODE environment variable based on the config.
     # This MUST be done before the WandbLogger is initialized.
     if cfg.logging.use_wandb:
-        wandb_mode = cfg.logging.get("wandb_mode", "online")
+        wandb_mode = cfg.logging.get("wandb_mode", "offline")
         os.environ["WANDB_MODE"] = wandb_mode
         log.info(f"W&B mode explicitly set to: '{wandb_mode}'")
 

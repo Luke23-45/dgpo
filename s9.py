@@ -4,7 +4,7 @@ from utils.expert_dataset import ExpertTrajectoryDataset
 
 # IMPORTANT: Update this path to point to the LMDB file you are using for training.
 # This should be the same path as `train_path` in your YAML config.
-DATASET_PATH =   "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"   # Replace with actual path
+DATASET_PATH =   "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training/training_data.lmdb"   # Replace with actual path
 
 def verify_dimensions(dataset_path: str):
     """

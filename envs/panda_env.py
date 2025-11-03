@@ -11,7 +11,7 @@ import cv2
 from dataclasses import dataclass, field 
 from typing import Optional
 from scipy.spatial.transform import Rotation, Slerp
-
+from typing import Any
 import copy
 
 @dataclass
@@ -182,7 +182,7 @@ class PandaEnv(gym.Env):
             dr_config: DomainRandomizationConfig = None,
             enable_domain_randomization: bool = True,
             post_config: RenderPostConfig = None,
-            control_mode: str = "absolute",
+            control_mode: str = "delta",
             grasp_mode: str = "stateful", 
             action_scaling_factor: float = 0.5,
         ):
@@ -513,7 +513,36 @@ class PandaEnv(gym.Env):
         y = radius * np.cos(elevation) * np.sin(azimuth)
         z = radius * np.sin(elevation)
         return target + np.array([x, y, z])
-  
+
+
+    def get_camera_params(self, camera_name: str) -> Dict[str, Any]:
+        """
+        Returns a dictionary of parameters for a given camera,
+        essential for 3D-to-2D projections.
+        """
+        cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
+        if cam_id == -1:
+            raise ValueError(f"Camera '{camera_name}' not found in the model.")
+
+        # Get extrinsics
+        pos = self.model.cam_pos[cam_id].copy()
+        quat_wxyz = self.model.cam_quat[cam_id].copy()
+        quat_xyzw = self._mujoco_quat_to_scipy_xyzw(quat_wxyz) # Use existing helper
+
+        # Get intrinsics-related info
+        fovy = self.model.cam_fovy[cam_id]
+        
+        # Get image dimensions from the observation space for this camera
+        target_key = "image_wrist" if "wrist" in camera_name else "image_primary"
+        height, width, _ = self.observation_space.spaces[target_key].shape
+
+        return {
+            "pos": pos.astype(np.float32),
+            "quat_xyzw": quat_xyzw.astype(np.float32),
+            "fovy": float(fovy),
+            "height": int(height),
+            "width": int(width),
+        }
 
     def _apply_domain_randomization(self, gripper_pos: np.ndarray, goal_pos: np.ndarray):
         """
@@ -1014,6 +1043,7 @@ class PandaEnv(gym.Env):
             self.data.qvel[finger_joint2_vel_idx]
         ], dtype=np.float32)
         # --- [END OF THE FIX] ---
+        obs["camera_params"] = self.get_camera_params("fixed_camera")
 
         return obs
       

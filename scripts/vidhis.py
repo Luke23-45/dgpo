@@ -49,11 +49,7 @@ except ImportError as e:
 
 log = logging.getLogger(__name__)
 
-# FILE: eval/run_vidhis_oracle.py
 
-# ... (imports and existing helper functions like denormalize_image)
-
-# --- START: ROBUST PATCH 1 (Oracle Planner & Env Reset) ---
 
 class OraclePlanner:
     """
@@ -488,7 +484,8 @@ def run_vidhis_evaluation(cfg: DictConfig):
         action_horizon=cfg.model.controller.action_horizon,
         subgoal_horizon_k=cfg.dataset.subgoal_horizon_k
     )
-    
+
+
     # --- Initialize Environment ---
     log.info("Initializing environment...")
     env = PandaEnv(**cfg.environment.env_kwargs)
@@ -547,7 +544,7 @@ def run_vidhis_evaluation(cfg: DictConfig):
 
             # 5. Update history buffer with the NEW observation from the simulator
             obs_history_buffer.append(0, next_obs_dict)
-            step_count += 1
+
         
         # --- Episode End ---
         success = info.get('is_success', False)

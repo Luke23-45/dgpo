@@ -113,7 +113,7 @@ optimizer:
 
 # --- Trainer Configuration (PyTorch Lightning) ---
 trainer:
-  accelerator: "cuda"
+  accelerator: "cpu"
   devices: "auto" # Use all available CPU cores
   precision: "16-mixed"  # Use 'bf16-mixed' if CPU supports bfloat16 for potential speedup
   # deterministic: false # Set true for strict reproducibility (might slow down)

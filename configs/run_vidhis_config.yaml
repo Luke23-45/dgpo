@@ -26,9 +26,12 @@ evaluation:
   num_episodes: 20 # Number of episodes to run
   seed: 100
 # --- Environment ---
+
+
 environment:
   # xml_path: "envs/panda_pick_place.xml"
   max_episode_steps: 500 # Timeout for evaluation episodes
+  control_mode: "delta"
   env_kwargs:
     # Move the xml_path inside here, as it's an argument for PandaEnv.
     xml_path: ${hydra:runtime.cwd}/envs/panda_pick_place.xml

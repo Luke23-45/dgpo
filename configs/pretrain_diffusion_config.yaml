@@ -25,7 +25,8 @@ logging:
 # 3. DATASET & DATALOADING
 # ===================================================================
 dataset:
-  train_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"      # Replace with actual path
+  # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb"      # Replace with actual path
+  train_path: 'C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training/training_data.lmdb'
   val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"   # Replace with actual path
   batch_size: 128               # Maximized for 16GB RAM to get stable gradients.
   num_workers: 2                # Use 4 parallel workers to hide data loading latency. Set to 0 if errors occur.

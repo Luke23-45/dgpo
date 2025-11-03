@@ -7,7 +7,7 @@
 # 1. RUN MANAGEMENT & OUTPUT
 # ===================================================================
 # Directory where the final dataset files (LMDB/pickle, index, metadata) will be saved.
-output_dir: "data/dataset_part_2"
+output_dir: "data/training"
 
 # A descriptive name for this specific generation run.
 # The final filename will include this name and a hash of this config.
@@ -17,6 +17,9 @@ run_name: "expert_run_validation_dataset"
 # deterministically from this, ensuring full reproducibility.
 seed: 10513
 
+# seed: 701
+
+# seed: 43
 
 
 # ===================================================================
@@ -25,11 +28,12 @@ seed: 10513
 # The total number of *samples* (timesteps) to generate and save after filtering.
 # A good starting point for a high-quality dataset is 20,000 - 50,000 samples.
 # num_samples: 50000 
-num_samples: 25000 
+# num_samples: 25000 
+num_episodes: 80
 # Number of parallel worker processes to spawn.
 # A good rule of thumb is to set this to the number of available CPU cores minus one or two.
 # For debugging, set to 0 to run in the main thread.
-num_workers: 1 # e.g., for a 10-core CPU
+num_workers: 2 # e.g., for a 10-core CPU
 
 # Seed offsets are used to guarantee unique seeds across workers and shards.
 # These defaults are large primes and are very safe.

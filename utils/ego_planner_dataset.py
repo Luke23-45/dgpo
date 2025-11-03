@@ -191,8 +191,56 @@ class EgoPlannerDataset(Dataset):
         except Exception as e:
             log.error(f"Error loading data for sample index {idx}, returning None. Error: {e}", exc_info=True)
             return None
-# --- END OF DEFINITIVE PATCH ---
+# FILE: utils/ego_planner_dataset.py
+# In class EgoPlannerDataset, add this new method. A good place is after __len__ or __getitem__.
 
+    def get_episode_sample(self, episode_idx: int, timestep_t: int) -> Optional[Dict[str, torch.Tensor]]:
+        """
+        Retrieves a fully processed sample for a specific timestep within a specific episode.
+
+        This method acts as a reverse lookup, converting an (episode, timestep)
+        coordinate into a global sample index that can be passed to __getitem__.
+        This is primarily used for evaluation to get the starting state of an episode.
+
+        Args:
+            episode_idx: The index of the desired episode.
+            timestep_t: The local timestep within that episode.
+
+        Returns:
+            A dictionary containing the fully processed sample, or None on error.
+        """
+        try:
+            # The self.samples list is our explicit map of (ep_idx, t) tuples.
+            # We can use the .index() method to find the global index of our desired sample.
+            global_idx = self.samples.index((episode_idx, timestep_t))
+        except ValueError:
+            # This error occurs if the (episode_idx, timestep_t) tuple doesn't exist in our map,
+            # meaning it's not a valid starting point for a sample.
+            log.error(f"Could not find a valid sample for episode {episode_idx} at timestep {timestep_t}.")
+            return None
+
+        # Once we have the correct global index, we can simply use the standard __getitem__
+        # to get the fully processed data.
+        return self[global_idx]
+
+
+    def get_num_episodes(self) -> int:
+        """
+        Returns the total number of episodes in the dataset by delegating
+        the call to the underlying high-performance expert reader.
+        """
+        # Correctly call the method on the composed expert_reader object
+        return self.expert_reader.get_num_episodes()
+
+
+    
+    def get_episode_length(self, episode_idx: int) -> int:
+        """
+        Returns the length of a specific episode by delegating the call
+        to the underlying high-performance expert reader.
+        """
+        return self.expert_reader.get_episode_length(episode_idx)
+        
     def _get_image_primary_at(self, ep_idx: int, timestep_t: int) -> np.ndarray:
         """
         Private helper to get a single primary image frame from an episode.

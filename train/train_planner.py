@@ -329,9 +329,11 @@ class PlannerLightningModule(pl.LightningModule):
             log.info(f"--- [Manual Backup] Last training batch of epoch {epoch} finished. Saving backup... ---")
             
             # current_backup_path = self.backup_dir / f"backup_epoch_{epoch}.ckpt"
-            base_path = Path("/content/drive/MyDrive/pda/models/v1")
-            current_backup_path = base_path / f"backup_epoch_{epoch}.ckpt"
-
+            # base_path = Path("/content/drive/MyDrive/pda/models/v1")
+            # current_backup_path = base_path / f"backup_epoch_{epoch}.ckpt"
+            
+            current_backup_path = Path.cwd() / "checkpoints" / "backup"
+            current_backup_path.mkdir(parents=True, exist_ok=True)
             try:
                 # Use the trainer's save function, which is aware of the full training state.
                 self.trainer.save_checkpoint(current_backup_path)

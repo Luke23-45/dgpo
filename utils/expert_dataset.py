@@ -121,8 +121,21 @@ class ExpertDatasetWriter:
         """
         self.episodes_in_memory.append(ep_dict)
 
-  
-    
+    def _write_pickled_modality(self, txn, ep_meta, prefix, name, data_list):
+        """Helper to write a list of generic Python objects by pickling."""
+        if not data_list:
+            return
+        key = f"{prefix}_{name}"
+        # We pickle the entire list of objects at once.
+        txn.put(key.encode("ascii"), pickle.dumps(data_list))
+        
+        ep_meta["modalities"][name] = {
+            "key": key,
+            "compression": "pickle", # A new compression type
+            "dtype": "object",
+            "shape": [len(data_list)]
+        }  
+        
     def save_batch(self, episode_list: List[Dict[str, Any]]):
         """Append a list of episodes directly to LMDB (safe for large datasets)."""
         if not episode_list:
@@ -142,23 +155,39 @@ class ExpertDatasetWriter:
         lmdb_path = self._lmdb_path
 
         # open env (match same args as save())
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=5.0, subdir=False)
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=1.0, subdir=False)
         try:
             with env.begin(write=True) as txn:
                 for ep_dict in episode_list:
                     prefix = f"ep_{self._episode_id_counter:06d}"
                     self._episode_id_counter += 1
+
                     ep_meta = {"episode_id": prefix, "length": len(ep_dict["actions"]), "success": bool(ep_dict.get("success", False)), "seed": ep_dict.get("seed", None), "modalities": {}}
+                    
                     self._write_raw_numpy(txn, ep_meta, prefix, "actions", np.array(ep_dict["actions"], dtype=np.float32))
                     self._write_raw_numpy(txn, ep_meta, prefix, "proprio", np.stack([o["proprio"] for o in ep_dict["obs_list"]]).astype(np.float32))
                     self._write_compressed_images(txn, ep_meta, prefix, "image_primary", [o["image_primary"] for o in ep_dict["obs_list"]])
                     self._write_compressed_images(txn, ep_meta, prefix, "image_wrist", [o["image_wrist"] for o in ep_dict["obs_list"]])
+
+                    ee_poses_arr = np.stack([o["ee_pose_world"] for o in ep_dict["obs_list"]]).astype(np.float32)
+                    self._write_raw_numpy(txn, ep_meta, prefix, "ee_pose_world", ee_poses_arr)
+                    # if "goal_image_primary" in ep_dict and ep_dict["goal_image_primary"] is not None:
+                    #     goal_img_list = [ep_dict["goal_image_primary"]]
+                    #     self._write_compressed_images(txn, ep_meta, prefix, "goal_image_primary", goal_img_list)
+                    # else:
+                    #     logger.warning(f"Episode {prefix} is missing 'goal_image_primary'.")
+                    expert_states_list = [o["expert_state"] for o in ep_dict["obs_list"]]
+                    self._write_pickled_modality(txn, ep_meta, prefix, "expert_states", expert_states_list)
+                    camera_params_list = [o["camera_params"] for o in ep_dict["obs_list"]]
+                    self._write_pickled_modality(txn, ep_meta, prefix, "camera_params", camera_params_list)
+
                     self.index_data["episodes"].append(ep_meta)
-            env.sync()
+                    self._episode_id_counter += 1
         finally:
+            env.sync()
             close_lmdb_env(env)
-        # persist partial index/config if you want:
-        json_path = self.out_dir / (base_name + "_index.json")
+        
+        json_path = self._lmdb_path.parent / f"{self._lmdb_path.stem}_index.json"
         with open(json_path, "w") as f:
             json.dump(self.index_data, f)
 
@@ -182,7 +211,7 @@ class ExpertDatasetWriter:
 
         # --- 2. Open LMDB Environment ---
         # Use a large map size for a 25GB+ dataset. 50GB is safe.
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=16.0, subdir=False) 
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=6.0, subdir=False) 
         
         try:
             with env.begin(write=True) as txn: 
@@ -218,7 +247,13 @@ class ExpertDatasetWriter:
                         self._write_compressed_images(txn, ep_meta, episode_key_prefix, "goal_image_primary", goal_img_list)
                     else:
                         logger.warning(f"Episode {episode_key_prefix} is missing 'goal_image_primary'. This key will not be saved for this episode.")
+                        
+                    expert_states_list = [o["expert_state"] for o in ep_dict["obs_list"]]
+                    self._write_pickled_modality(txn, ep_meta, episode_key_prefix, "expert_states", expert_states_list)
 
+                    # F) 'camera_params' (Pickled List of Dictionaries)
+                    camera_params_list = [o["camera_params"] for o in ep_dict["obs_list"]]
+                    self._write_pickled_modality(txn, ep_meta, episode_key_prefix, "camera_params", camera_params_list)
                     # --- 4. Add this episode's metadata to the main index ---
                     self.index_data["episodes"].append(ep_meta)
 
@@ -394,6 +429,54 @@ class ExpertTrajectoryDataset(Dataset):
         # The result is an array containing a single image. We return just that image.
         return full_array[0]
 
+    def get_num_episodes(self) -> int:
+        """
+        Returns the total number of episodes in the dataset.
+        This is a fast, metadata-only operation.
+        """
+        return len(self.episode_metadata)
+    
+    def get_episode_length(self, episode_idx: int) -> int:
+        """
+        Returns the length (number of timesteps) of a specific episode.
+        This is a fast, metadata-only operation.
+        """
+        if not (0 <= episode_idx < len(self.episode_metadata)):
+            raise IndexError(f"Episode index {episode_idx} is out of range.")
+        return self.episode_metadata[episode_idx]['length']
+
+    def get_episode_and_timestep(self, idx: int) -> Tuple[int, int]:
+        """
+        Performs a "reverse lookup" to map a global sample index back to its
+        corresponding episode index and local timestep within that episode.
+
+        This is a critical utility for orchestrator datasets that need to access
+        both chunked and single-timestep data for a given sample.
+
+        Args:
+            idx: The global sample index.
+
+        Returns:
+            A tuple of (episode_index, timestep_in_episode).
+        """
+        if not (0 <= idx < self.total_chunks):
+            raise IndexError(f"Index {idx} out of range for dataset with {self.total_chunks} chunks.")
+
+        # This is the same highly-efficient O(log N) lookup logic used in __getitem__.
+        # Find the first episode index where the cumulative sum of chunks is >= idx.
+        ep_idx = np.searchsorted(self._cumulative_chunks, idx, side='right')
+        
+        # Determine the starting global index for this episode's chunks.
+        ep_start_chunk_idx = self._cumulative_chunks[ep_idx - 1] if ep_idx > 0 else 0
+        
+        # The local chunk index is the offset from the episode's start.
+        local_chunk_idx = idx - ep_start_chunk_idx
+        
+        # The local timestep `t` is the first possible start time plus the local chunk index.
+        timestep_t = (self.observation_horizon - 1) + local_chunk_idx
+        
+        return int(ep_idx), int(timestep_t)
+
 
     def get_proprioception_dim(self) -> int:
         """
@@ -446,35 +529,48 @@ class ExpertTrajectoryDataset(Dataset):
                 raise KeyError(f"Missing LMDB key {key!r} in {self.demo_path}") 
             return blob
 
-    @functools.lru_cache(maxsize=128) # Bounded, per-worker cache
-    def _get_full_modality_array(self, key: str, compression: str, dtype_str: str, shape_list: list) -> np.ndarray:
+    @functools.lru_cache(maxsize=128)
+    def _get_full_modality_array(self, key: str, compression: str, dtype_str: str, shape_list: tuple) -> Any:
         """
+        [DEFINITIVE, FULLY PATCHED, SOTA VERSION]
         This is the cached, expensive part. It loads an *entire* modality
         (e.g., all 'proprio' for one episode) from LMDB and decodes it.
-        The LRU cache ensures we don't reload this if we need another
-        chunk from the same episode.
+        This version correctly handles 'raw', 'jpeg'/'png', and 'pickle' compression.
         """
         blob = self._get_lmdb_blob(key)
-        dtype = np.dtype(dtype_str)
-        shape = tuple(shape_list)
+        shape = tuple(shape_list) # Ensure shape is a tuple for consistency
 
         if compression == "raw":
+            dtype = np.dtype(dtype_str)
             data = np.frombuffer(blob, dtype=dtype).reshape(shape)
+            return data
+
         elif compression in ("jpeg", "png"):
-            # Unpickle the list of byte strings
             byte_list = pickle.loads(blob)
             
-            # Decode images. This is the CPU-heavy part.
-            # Note: cv2 decodes to BGR by default.
-            images = [cv2.imdecode(np.frombuffer(b, dtype=np.uint8), cv2.IMREAD_COLOR) for b in byte_list]
-            # cv2.imdecode returns images in BGR. Convert each to RGB by reversing last axis.
-            # Using numpy slicing is faster and avoids cv2.cvtColor errors on 4D arrays.
-            data = np.stack(images)  # shape (N, H, W, 3), dtype=uint8
-            data = data[..., ::-1]   # BGR -> RGB by channel reversal
+            # This logic robustly handles color (3-ch) and grayscale (1-ch) images.
+            is_grayscale = len(shape) == 4 and shape[3] == 1
+            im_read_flag = cv2.IMREAD_GRAYSCALE if is_grayscale else cv2.IMREAD_COLOR
+            
+            images = [cv2.imdecode(np.frombuffer(b, dtype=np.uint8), im_read_flag) for b in byte_list]
+            data = np.stack(images)
+            
+            if not is_grayscale:
+                data = data[..., ::-1]  # BGR to RGB for color images
+            if is_grayscale and len(data.shape) == 3:
+                data = data[..., np.newaxis] # Ensure channel dim exists for grayscale
+
+            return data
+
+        elif compression == "pickle":
+            # THIS IS THE CRITICAL MISSING BLOCK.
+            # For modalities like expert_states and camera_params, we just unpickle the blob.
+            # The result is a list of objects, which is correct.
+            data = pickle.loads(blob)
+            return data
+
         else:
             raise ValueError(f"Unknown compression type: {compression}")
-        
-        return data
 
     def __getitem__(self, idx: int) -> Tuple[Dict[str, np.ndarray], np.ndarray]: 
         if not (0 <= idx < self.total_chunks):
@@ -582,6 +678,7 @@ class ExpertDataset(IterableDataset):
         env_xml_path: Optional[str] = None,
         base_seed: Optional[int] = None,
         max_samples_per_epoch: Optional[int] = None, 
+        max_episodes_per_epoch: Optional[int] = None,
         skip_on_error: bool = True,
         warmup: bool = False,
         scripted_cfg: ExpertConfig = ExpertConfig(),
@@ -604,6 +701,7 @@ class ExpertDataset(IterableDataset):
         self.scripted_cfg = scripted_cfg 
         self.yield_full_obs = yield_full_obs
         self.action_scaling_factor = action_scaling_factor
+        self.max_episodes_per_epoch = max_episodes_per_epoch
         
         # balancing / filtering parameters
         self.p_low_vel = p_low_vel
@@ -778,7 +876,18 @@ class ExpertDataset(IterableDataset):
 
         while True:
             # stop condition
-            if self.max_samples_per_epoch is not None and samples_this_epoch >= self.max_samples_per_epoch: 
+            samples_limit_reached = (self.max_samples_per_epoch is not None and
+                                    samples_this_epoch >= self.max_samples_per_epoch)
+            
+            episodes_limit_reached = (self.max_episodes_per_epoch is not None and
+                                      self._episode_id_counter >= self.max_episodes_per_epoch)
+
+            if samples_limit_reached:
+                logger.info(f"Sample limit reached ({samples_this_epoch}/{self.max_samples_per_epoch}). Worker stopping.")
+                return
+
+            if episodes_limit_reached:
+                logger.info(f" Episode limit reached ({self._episode_id_counter}/{self.max_episodes_per_epoch}). Worker stopping.")
                 return
 
             # if buffer empty, generate a new episode
@@ -807,11 +916,15 @@ class ExpertDataset(IterableDataset):
                         # convert and copy immediately to avoid aliasing
                         obs_snapshot = {k: (np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v)) 
                                         for k, v in policy_obs.items()}
-                        action_arr = np.asarray(action, dtype=np.float32).copy() 
+                        action_arr = np.asarray(action, dtype=np.float32).copy()
 
+                        # CRITICAL FIX: Add the expert state to the snapshot BEFORE appending it to the list.
+                        obs_snapshot['expert_state'] = self._scripted_expert.get_state()
+
+                        # Now, append the complete and correct snapshot to the trajectory lists.
                         unfiltered_obs.append(obs_snapshot) 
                         unfiltered_actions.append(action_arr) 
-                        unfiltered_ik_flags.append(bool(ik_failed)) 
+                        unfiltered_ik_flags.append(bool(ik_failed))
 
                         # step simulator with sim_act (absolute action used to step)
                         obs, _, terminated, truncated, _ = self._env.step(action) 

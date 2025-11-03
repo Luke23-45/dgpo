@@ -1,0 +1,2 @@
+- output_video=ego_planner_eval1.mp4
+- checkpoint_path=./notes/checkpoints/backup_epoch_80.ckpt

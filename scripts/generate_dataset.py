@@ -2,8 +2,8 @@
 """
 generate_dataset.py - Robust LMDB-sharded dataset generator.
 
-This definitive version ensures consistency by using single-file LMDBs (`subdir=False`),
-which is more robust on Windows and aligns with the data loading pipeline.
+This definitive version includes episode-based generation control, SOTA
+SoA formatting, and robust multiprocessing orchestration.
 """
 
 from __future__ import annotations
@@ -22,12 +22,14 @@ import pickle
 import argparse
 import shutil
 import copy
+from typing import Optional
+
 # project imports
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from utils.expert_dataset import ExpertDataset, replay_validate_episode
-from utils.scripted_expert import ExpertConfig # Ensure this import is correct
-from utils.expert_dataset import ExpertDatasetWriter # Add this import at the top
+from utils.expert_dataset import ExpertDataset
+from utils.scripted_expert import ExpertConfig
+from utils.expert_dataset import ExpertDatasetWriter
 
 try:
     import lmdb
@@ -41,98 +43,102 @@ def load_config(path: str) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
-def open_lmdb_writer(db_path: Path, map_size: int):
-    """Opens a SINGLE-FILE LMDB environment for writing."""
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    if lmdb is None:
-        raise RuntimeError("lmdb not available; please install python-lmdb.")
-    return lmdb.open(str(db_path), map_size=map_size, subdir=False, readonly=False, lock=True)
-
-
-# ...
-
-# DELETE the old merge_shards_to_lmdb function.
-
-# --- START OF SOTA PATCH 2 ---
-
-def merge_sota_shards(shard_dirs: list[Path], out_dir: Path, run_name: str, total_samples: int):
+def merge_sota_shards(shard_dirs: list[Path], out_dir: Path, run_name: str, total_target: int, use_episode_target: bool):
     """
     Merges SOTA-formatted shards by combining their JSON indexes and copying
     the LMDB files into a single, unified dataset directory.
+    This version correctly names the final dataset based on the target type.
     """
-    final_dataset_name = f"expert_{run_name}_{total_samples}_samples"
+    if use_episode_target:
+        final_dataset_name = f"expert_{run_name}_{total_target}_episodes"
+    else:
+        final_dataset_name = f"expert_{run_name}_{total_target}_samples"
+
     final_dataset_path = out_dir / final_dataset_name
     final_dataset_path.mkdir(parents=True, exist_ok=True)
     logger.info(f"Creating final merged dataset at: {final_dataset_path}")
 
     merged_index = {"episodes": [], "metadata": {}}
     total_episodes = 0
+    all_keys_in_use = set() # To manage keys across multiple LMDB files
 
-    for shard_dir in tqdm(shard_dirs, desc="Merging Shards"):
-        # Find the index and lmdb file in the shard directory
-        shard_index_files = list(shard_dir.glob("*_index.json"))
-        shard_lmdb_files = list(shard_dir.glob("*.lmdb"))
+    # We need a central LMDB writer for the merged data
+    final_lmdb_path = final_dataset_path / f"{final_dataset_name}.lmdb"
+    map_size = int(1 * 1024**3)  # 100 GB, adjust as needed
+    final_env = lmdb.open(str(final_lmdb_path), map_size=map_size, subdir=False, readonly=False, lock=True)
 
-        if not shard_index_files or not shard_lmdb_files:
-            logger.warning(f"Shard at {shard_dir} is incomplete, skipping.")
-            continue
-        
-        shard_index_path = shard_index_files[0]
-        shard_lmdb_path = shard_lmdb_files[0]
+    try:
+        with final_env.begin(write=True) as final_txn:
+            for shard_dir in tqdm(shard_dirs, desc="Merging Shards"):
+                shard_index_files = list(shard_dir.glob("*_index.json"))
+                shard_lmdb_files = list(shard_dir.glob("*.lmdb"))
 
-        # 1. Load the shard's index
-        with open(shard_index_path, "r") as f:
-            shard_index_data = json.load(f)
-        
-        if not merged_index["metadata"]:
-            merged_index["metadata"] = shard_index_data.get("metadata", {})
+                if not shard_index_files or not shard_lmdb_files:
+                    logger.warning(f"Shard at {shard_dir} is incomplete, skipping.")
+                    continue
 
-        # 2. Re-key and append episode metadata
-        for ep_meta in shard_index_data["episodes"]:
-            new_ep_id = f"ep_{total_episodes:06d}"
-            
-            # Create a deep copy to modify
-            new_ep_meta = copy.deepcopy(ep_meta)
-            new_ep_meta["episode_id"] = new_ep_id
-            
-            # IMPORTANT: Update the internal keys for each modality
-            for modality_name in new_ep_meta["modalities"]:
-                old_modality_key = new_ep_meta["modalities"][modality_name]["key"]
-                # The key was like "ep_000001_actions", based on local episode ID
-                # We need to find the old local ID to replace it
-                old_ep_id = ep_meta["episode_id"]
-                new_modality_key = old_modality_key.replace(old_ep_id, new_ep_id)
-                new_ep_meta["modalities"][modality_name]["key"] = new_modality_key
+                shard_index_path = shard_index_files[0]
+                shard_lmdb_path = shard_lmdb_files[0]
 
-            merged_index["episodes"].append(new_ep_meta)
-            total_episodes += 1
-            
-        # 3. Copy the LMDB file to the final destination with a new name
-        final_lmdb_path = final_dataset_path / f"{shard_lmdb_path.stem}.lmdb"
-        shutil.copy(shard_lmdb_path, final_lmdb_path)
+                with open(shard_index_path, "r") as f:
+                    shard_index_data = json.load(f)
 
-    # 4. Write the final, merged JSON index
+                if not merged_index["metadata"] and "metadata" in shard_index_data:
+                    merged_index["metadata"] = shard_index_data["metadata"]
+
+                shard_env = lmdb.open(str(shard_lmdb_path), subdir=False, readonly=True, lock=False)
+                with shard_env.begin() as shard_txn:
+                    for ep_meta in shard_index_data["episodes"]:
+                        new_ep_id = f"ep_{total_episodes:06d}"
+                        new_ep_meta = copy.deepcopy(ep_meta)
+                        new_ep_meta["episode_id"] = new_ep_id
+
+                        for modality_name, modality_meta in ep_meta["modalities"].items():
+                            old_modality_key = modality_meta["key"]
+                            new_modality_key = old_modality_key.replace(ep_meta["episode_id"], new_ep_id)
+                            new_ep_meta["modalities"][modality_name]["key"] = new_modality_key
+
+                            # Copy the data from the shard LMDB to the final LMDB with the new key
+                            data_blob = shard_txn.get(old_modality_key.encode('ascii'))
+                            if data_blob:
+                                final_txn.put(new_modality_key.encode('ascii'), data_blob)
+                                all_keys_in_use.add(new_modality_key)
+                            else:
+                                logger.warning(f"Key {old_modality_key} not found in shard {shard_lmdb_path}")
+
+                        merged_index["episodes"].append(new_ep_meta)
+                        total_episodes += 1
+                shard_env.close()
+
+    finally:
+        final_env.sync()
+        final_env.close()
+
     final_index_path = final_dataset_path / f"{final_dataset_name}_index.json"
     with open(final_index_path, "w") as f:
         json.dump(merged_index, f)
-    
+
     logger.info(f"Merge complete. Total episodes: {total_episodes}")
     return total_episodes
 
-# --- END OF SOTA PATCH 2 ---
-
-def worker_loop_fn_SOTA(worker_id: int, cfg: dict, shard_dir_path_str: str, samples_per_worker: int, summary_path_str: str):
+def worker_loop_fn_SOTA(worker_id: int, cfg: dict, shard_dir_path_str: str,
+                        summary_path_str: str, samples_per_worker: Optional[int] = None,
+                        episodes_per_worker: Optional[int] = None):
     """
     SOTA Worker entrypoint that uses ExpertDatasetWriter to generate an
     optimized, SoA-formatted, self-contained dataset shard.
     """
+    if samples_per_worker is None and episodes_per_worker is None:
+        raise ValueError("Must provide either samples_per_worker or episodes_per_worker target.")
+
     shard_dir_path = Path(shard_dir_path_str)
     summary_path = Path(summary_path_str)
     log_prefix = f"[worker {worker_id}]"
 
     try:
         run_name = f"shard_w{worker_id}"
-        logging.info(f"{log_prefix} starting. seed_base={cfg.get('seed',0)} target={samples_per_worker} shard_dir={shard_dir_path}")
+        target_str = f"{episodes_per_worker} episodes" if episodes_per_worker is not None else f"{samples_per_worker} samples"
+        logging.info(f"{log_prefix} starting. seed_base={cfg.get('seed',0)} target={target_str} shard_dir={shard_dir_path}")
 
         # --- 1. Initialize the SOTA Writer for this specific shard ---
         writer = ExpertDatasetWriter(
@@ -153,6 +159,7 @@ def worker_loop_fn_SOTA(worker_id: int, cfg: dict, shard_dir_path_str: str, samp
             env_xml_path=cfg.get("xml_path"),
             base_seed=seed_for_worker,
             max_samples_per_epoch=samples_per_worker,
+            max_episodes_per_epoch=episodes_per_worker,
             skip_on_error=cfg.get("skip_on_error", True),
             scripted_cfg=expert_config_instance,
             object_size=tuple(np.array(cfg.get("object_size", [0.04,0.04,0.04])).tolist()),
@@ -164,30 +171,30 @@ def worker_loop_fn_SOTA(worker_id: int, cfg: dict, shard_dir_path_str: str, samp
 
         # --- 3. Run the Generation Loop and Stream to the Writer ---
         last_saved_episode_count = 0
-        pbar = tqdm(total=samples_per_worker, desc=f"Worker {worker_id}", leave=True)
-        samples_yielded_by_ds = 0
+        
+        # Intelligent Progress Bar setup
+        use_episode_target = episodes_per_worker is not None
+        pbar_total = episodes_per_worker if use_episode_target else samples_per_worker
+        pbar_desc = f"Worker {worker_id} (Episodes)" if use_episode_target else f"Worker {worker_id} (Samples)"
+        pbar = tqdm(total=pbar_total, desc=pbar_desc, leave=True)
 
-        for _ in ds:
-            samples_yielded_by_ds += 1
-            pbar.update(1)
+        for _ in ds: # This iterator will now stop based on the correct limit
+            # Update pbar based on mode
+            if use_episode_target:
+                if ds._episode_id_counter > pbar.n:
+                    pbar.update(ds._episode_id_counter - pbar.n)
+            else:
+                pbar.update(1) # Old behavior: update per sample
 
             # Check if new episodes have been collected by the generator
             if len(ds.episodes) > last_saved_episode_count:
                 new_eps_to_write = ds.episodes[last_saved_episode_count:]
-                
-                # Use the writer's batch saving mechanism
                 writer.save_batch(new_eps_to_write)
-                
                 last_saved_episode_count = len(ds.episodes)
         
         pbar.close()
 
-        # Save any remaining episodes that didn't form a full batch
-        if len(ds.episodes) > last_saved_episode_count:
-            writer.save_batch(ds.episodes[last_saved_episode_count:])
-
         # Finalize the writer (this saves the final index.json for the shard)
-        # The save() method is now idempotent if save_batch was used, it will just finalize.
         writer.save() 
         
         # --- 4. Write Worker Summary ---
@@ -214,113 +221,6 @@ def worker_loop_fn_SOTA(worker_id: int, cfg: dict, shard_dir_path_str: str, samp
         except Exception: pass
         raise
 
-
-def worker_stream_write_lmdb(env, base_key_idx: int, episodes_iter):
-    idx = int(base_key_idx)
-    count = 0
-    with env.begin(write=True) as txn:
-        for ep in episodes_iter:
-            key = f"{idx:08d}".encode("ascii")
-            val = pickle.dumps(ep, protocol=pickle.HIGHEST_PROTOCOL)
-            txn.put(key, val)
-            idx += 1
-            count += 1
-    return idx, count
-
-def worker_loop_fn(worker_id: int, cfg: dict, shard_file_path_str: str, shard_map_size: int, samples_per_worker: int, summary_path_str: str):
-    """Worker entrypoint that streams episodes to a single LMDB file."""
-    shard_file_path = Path(shard_file_path_str)
-    summary_path = Path(summary_path_str)
-    log_prefix = f"[worker {worker_id}]"
-    
-    try:
-        logging.info(f"{log_prefix} starting. seed base={cfg.get('seed',0)} target={samples_per_worker} shard={shard_file_path}")
-
-        expert_config_dict = cfg.get("expert_config", {})
-        expert_config_instance = ExpertConfig(**expert_config_dict)
-
-        base_seed = int(cfg.get("seed", 0)) if cfg.get("seed") is not None else int(time.time())
-        seed_for_worker = base_seed + worker_id * cfg.get("worker_seed_offset", 10000)
-        
-        ds = ExpertDataset(
-            urdf_path=cfg["urdf_path"],
-            env_xml_path=cfg.get("xml_path"),
-            base_seed=seed_for_worker,
-            max_samples_per_epoch=samples_per_worker,
-            skip_on_error=cfg.get("skip_on_error", True),
-            scripted_cfg=expert_config_instance,
-            object_size=tuple(np.array(cfg.get("object_size", [0.04,0.04,0.04])).tolist()),
-            object_grasp_width=float(cfg.get("grasp_width", 0.6)),
-            action_scaling_factor=float(cfg.get("action_scaling_factor", 0.5)),
-            warmup=bool(cfg.get("warmup", True)),
-            yield_full_obs=True,
-        )
-
-        env = open_lmdb_writer(shard_file_path, map_size=shard_map_size)
-        written_episodes = 0
-        key_idx = 0
-        last_saved_episode_count = 0
-
-        pbar = tqdm(total=samples_per_worker, desc=f"Worker {worker_id}", leave=True)
-        samples_yielded_by_ds = 0
-
-        for _ in ds:
-            samples_yielded_by_ds += 1
-            pbar.update(1)
-            
-            if len(ds.episodes) > last_saved_episode_count:
-                new_eps = ds.episodes[last_saved_episode_count:]
-                _, wrote = worker_stream_write_lmdb(env, key_idx, new_eps)
-                written_episodes += wrote
-                key_idx += wrote
-                last_saved_episode_count = len(ds.episodes)
-        
-        pbar.close()
-
-        if len(ds.episodes) > last_saved_episode_count:
-            new_eps = ds.episodes[last_saved_episode_count:]
-            _, wrote = worker_stream_write_lmdb(env, key_idx, new_eps)
-            written_episodes += wrote
-        
-        env.sync()
-        env.close()
-
-        summary = { "worker_id": worker_id, "status": "ok", "written_episodes": written_episodes, "samples_yielded": samples_yielded_by_ds, "shard_path": str(shard_file_path), "seed_used": int(seed_for_worker) }
-        with open(summary_path, "w") as f:
-            json.dump(summary, f, indent=2)
-
-        logging.info(f"{log_prefix} finished. wrote {written_episodes} episodes to {shard_file_path}")
-
-    except Exception as e:
-        logging.exception(f"{log_prefix} failed: {e}")
-        summary = { "worker_id": worker_id, "status": "error", "error": str(e) }
-        try:
-            with open(summary_path, "w") as f:
-                json.dump(summary, f, indent=2)
-        except Exception: pass
-        raise
-
-def merge_shards_to_lmdb(shard_files: list[Path], out_file: Path, map_size: int):
-    out_env = open_lmdb_writer(out_file, map_size=map_size)
-    nxt = 0
-    with out_env.begin(write=True) as out_txn:
-        for shard_file in shard_files:
-            if not shard_file.exists():
-                logger.warning(f"Shard file not found, skipping: {shard_file}")
-                continue
-            
-            env = lmdb.open(str(shard_file), subdir=False, readonly=True, lock=False)
-            with env.begin() as txn:
-                cursor = txn.cursor()
-                for k, v in tqdm(cursor, desc=f"Merging {shard_file.name}", leave=False):
-                    key = f"{nxt:08d}".encode("ascii")
-                    out_txn.put(key, v)
-                    nxt += 1
-            env.close()
-    out_env.sync()
-    out_env.close()
-    return nxt
-
 def main():
     parser = argparse.ArgumentParser(description="Robust dataset generation (LMDB-sharded)")
     parser.add_argument("--config", required=True, help="YAML config")
@@ -332,20 +232,27 @@ def main():
     out_dir = Path(args.out_dir) if args.out_dir else Path(cfg["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    run_name = time.strftime("%Y%m%d_%H%M%S") # Generate a run name
-
-    run_name = time.strftime("%Y%m%d_%H%M%S")
+    run_name = cfg.get("run_name", time.strftime("%Y%m%d_%H%M%S"))
 
     num_workers = int(cfg.get("num_workers", 0))
-    total_samples = int(cfg["num_samples"])
-
-    # --- START OF PATCH 3 ---
 
     # Each worker now creates a directory, not a single file
     shards_base_dir = out_dir / "shards"
     shards_base_dir.mkdir(parents=True, exist_ok=True)
     
-    samples_per_worker = (total_samples + num_workers - 1) // num_workers if num_workers > 0 else total_samples
+    # --- START OF MODIFICATION: Implement Episode-Based Target ---
+    # Prioritize num_episodes if it exists, otherwise fall back to num_samples.
+    if "num_episodes" in cfg and cfg["num_episodes"] is not None:
+        use_episode_target = True
+        total_target = int(cfg["num_episodes"])
+        target_per_worker = (total_target + num_workers - 1) // num_workers if num_workers > 0 else total_target
+        logger.info(f"TARGET MODE: EPISODES. Total: {total_target}, Per Worker: {target_per_worker}")
+    else:
+        use_episode_target = False
+        total_target = int(cfg["num_samples"])
+        target_per_worker = (total_target + num_workers - 1) // num_workers if num_workers > 0 else total_target
+        logger.info(f"TARGET MODE: SAMPLES. Total: {total_target}, Per Worker: {target_per_worker}")
+    # --- END OF MODIFICATION ---
 
     ctx = mp.get_context("spawn")
     worker_processes = []
@@ -364,11 +271,16 @@ def main():
                         logger.info(f"Shard for worker {w} at {shard_dir} already complete. Skipping.")
                         continue
 
-            # Ensure the directory exists for the worker
             shard_dir.mkdir(exist_ok=True)
 
-            # Call the new SOTA worker function
-            p = ctx.Process(target=worker_loop_fn_SOTA, args=(w, cfg, str(shard_dir), samples_per_worker, str(summary_file)), daemon=False)
+            # Use kwargs for flexible worker arguments
+            worker_kwargs = {
+                "worker_id": w, "cfg": cfg, "shard_dir_path_str": str(shard_dir),
+                "summary_path_str": str(summary_file),
+                "samples_per_worker": None if use_episode_target else target_per_worker,
+                "episodes_per_worker": target_per_worker if use_episode_target else None
+            }
+            p = ctx.Process(target=worker_loop_fn_SOTA, kwargs=worker_kwargs, daemon=False)
             p.start()
             worker_processes.append(p)
         
@@ -379,25 +291,49 @@ def main():
         summary_file = shard_dir / "summary.json"
         shard_dirs_to_merge.append(shard_dir)
         
-        # ... (resume logic for single worker) ...
-        
         shard_dir.mkdir(exist_ok=True)
         try:
-            worker_loop_fn_SOTA(0, cfg, str(shard_dir), samples_per_worker, str(summary_file))
+            worker_kwargs = {
+                "worker_id": 0, "cfg": cfg, "shard_dir_path_str": str(shard_dir),
+                "summary_path_str": str(summary_file),
+                "samples_per_worker": None if use_episode_target else target_per_worker,
+                "episodes_per_worker": target_per_worker if use_episode_target else None
+            }
+            worker_loop_fn_SOTA(**worker_kwargs)
         except Exception:
             logger.exception("Single-threaded generation failed")
             return
 
     logger.info(f"All worker shards written to subdirectories in: {shards_base_dir}")
 
-    # Call the new merge function
-    final_dataset_name = f"expert_{run_name}_{total_samples}_samples"
-    merged_count = merge_sota_shards(shard_dirs_to_merge, out_dir, run_name, total_samples)
-    
-    # --- END OF PATCH 3 ---
+    # Final merge step
+    all_workers_succeeded = True
+    for shard_dir in shard_dirs_to_merge:
+        summary_file = shard_dir / "summary.json"
+        if not summary_file.exists():
+            all_workers_succeeded = False
+            logger.error(f"Worker shard at {shard_dir} is missing a summary file. Merge might be incomplete.")
+            continue
+        with open(summary_file, 'r') as f:
+            summary = json.load(f)
+            if summary.get("status") != "ok":
+                all_workers_succeeded = False
+                logger.error(f"Worker {summary.get('worker_id')} at {shard_dir} reported an error. Merge might be incomplete.")
 
-    logger.info(f"Merged episodes count: {merged_count}")
+    if all_workers_succeeded or args.resume:
+        if not all_workers_succeeded:
+            logger.warning("Resuming and merging despite some workers failing. The dataset may be smaller than targeted.")
+        merged_count = merge_sota_shards(shard_dirs_to_merge, out_dir, run_name, total_target, use_episode_target)
+        logger.info(f"Merged episodes count: {merged_count}")
+        # Optional: Clean up shard directories after successful merge
+        shutil.rmtree(shards_base_dir)
+    else:
+        logger.error("One or more workers failed and not in resume mode. Skipping final merge.")
+
     logger.info("Dataset generation complete.")
 
 if __name__ == "__main__":
     main()
+
+
+# python -m scripts.generate_dataset --config "configs\gen_dataset_config.yaml" 

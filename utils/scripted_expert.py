@@ -3,7 +3,7 @@
 # FILE: utils/scripted_expert.py
 
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Tuple, Optional
 from scipy.spatial.transform import Rotation as R,Slerp
 
@@ -35,12 +35,12 @@ class ExpertConfig:
     pos_tolerance: float = 0.025 # Still used for final checks
     
     workspace: dict = None
-    descent_xy_offset: np.ndarray = np.array([0.00, 0.0, 0.0])   
+    descent_xy_offset: np.ndarray = field(default_factory=lambda: np.array([0.00, 0.0, 0.0]))  
     max_grasp_retries: int = 2
     verify_lift_height: float = 0.03 
     gripper_open_threshold: float = 0.038
     gripper_closed_threshold: float = 0.002
-    home_pose_7d: np.ndarray = np.array([0.5, 0.0, 0.7, 0.0, 1.0, 0.0, 0.0])
+    home_pose_7d: np.ndarray = field(default_factory=lambda: np.array([0.5, 0.0, 0.7, 0.0, 1.0, 0.0, 0.0]))
     orn_tolerance_rad: float = 0.05 
     max_lift_height: float = 0.65
     lookahead_distance: float = 0.03
@@ -96,7 +96,8 @@ class ScriptedExpert:
 
     def is_done(self) -> bool:
         return self._state == "DONE"
-
+    
+    
     def reset(self):
         self._state = "MOVE_TO_PRE_GRASP"
         self._gripper_action = -1.0  
@@ -136,6 +137,7 @@ class ScriptedExpert:
     def was_successful(self) -> bool:
         """Returns True only if the FSM completed the task successfully."""
         return self.succeeded
+  
     def _clamp_to_workspace(self, pos: np.ndarray) -> np.ndarray:
         """Clamps position to safe workspace bounds."""
         pos = pos.copy()
