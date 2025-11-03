@@ -91,7 +91,7 @@ training:
 # ===================================================================
 validation:
   # Run the expensive qualitative image logging every N epochs
-  run_qualitative_every_n_epoch: 10
+  run_qualitative_every_n_epoch: 30
 
 # ===================================================================
 # 7. OPTIMIZER CONFIGURATION (`optimizer`)
@@ -105,15 +105,15 @@ optimizer:
 # 8. PYTORCH LIGHTNING TRAINER CONFIGURATION (`trainer`)
 # ===================================================================
 trainer:
-  accelerator: "cpu"
-  # devices: [0] # Or [0, 1] for multi-GPU
+  accelerator: "cuda"
+  devices: [0] # Or [0, 1] for multi-GPU
 
-  devices: 1  # this is for cpu
+  # devices: 1  # this is for cpu
   max_epochs: 1000
   precision: "16-mixed" # Use "bf16-mixed" on A100/H100 GPUs
   
   # Log validation metrics every N epochs
-  check_val_every_n_epoch: 5
+  check_val_every_n_epoch: 130
   
   # Accumulate gradients to simulate a larger batch size
   # Effective batch size = batch_size * accumulate_grad_batches
