@@ -46,8 +46,8 @@ scheduler:
 # 4. DATASET & DATALOADER CONFIGURATION (`dataset`)
 # ===================================================================
 dataset:
-  train_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb"
-  val_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb"
+  train_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
+  val_path: "/content/drive/MyDrive/pda/data/validation/validation_dataset.lmdb"
   num_workers: 1
 
 resilience:
