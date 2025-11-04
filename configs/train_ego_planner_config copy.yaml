@@ -1,133 +1,135 @@
-# FILE: configs/train_ego_planner_config.yaml
-# The definitive, state-of-the-art Hydra configuration for training the Ego-Planner v4.
-# Every parameter is meticulously documented to ensure clarity, reproducibility, and ease of use.
+# FILE: configs/train_vip_c_config.yaml
+#
+# Definitive, SOTA, Production-Ready Hydra Configuration for train_vip_c.py
+#
 
-# How to Use:
-# This configuration is the central control panel for training.
-# You can override any parameter from the command line.
-# Example: To run a training session with a different learning rate and batch size:
-# > python train_ego_planner.py training.batch_size=64 optimizer.lr=5e-5
-
+# Allows Hydra to find this file as the primary config
 defaults:
   - _self_
 
-# --- Global Settings ---
-seed: 42  # Seed for all random number generators for full reproducibility.
+# ===================================================================
+# 1. GLOBAL SETTINGS
+# ===================================================================
+seed: 42
+project_name: "vip_c_training"
 
-# --- Model Architecture Configuration (EgoPlannerConfig) ---
-# This block maps directly to the EgoPlannerConfig dataclass in models/ego_planner.py
+# ===================================================================
+# 2. MODEL CONFIGURATION (`model`)
+# ===================================================================
 model:
-  # Data-dependent dimensions. These MUST match your dataset.
-  action_dim: 8         # Dimension of the robot's action space.
-  proprio_dim: 22       # Dimension of the proprioceptive state vector.
-  action_horizon: 8     # H_a: Number of future action steps to predict.
-  obs_horizon: 2        # H_o: Number of past observation steps to use as context.
+  planner_cfg:
+    vision_backbone_model: "google/siglip-base-patch16-224"
+    num_task_phases: 5
+    fusion_transformer_layers: 4
+    fusion_transformer_heads: 12
+    
+  controller_cfg:
+    action_dim: 8       # MUST match your dataset
+    proprio_dim: 22     # MUST match your dataset
+    action_horizon: 8
+    obs_horizon: 2
+    controller_hidden_dim: 512
+    resnet_feature_dim: 256
+    denoiser_layers: 6
+    denoiser_heads: 8
 
-  # Strategist (Contextual Plan Encoder)
-  vision_backbone_model: "google/siglip-base-patch16-224" # Pre-trained ViT for global feature extraction.
-  vision_feature_dim: 768    # Hidden size of the ViT backbone. MUST match the chosen model.
-  fusion_transformer_layers: 4 # Depth of the transformer that fuses start and goal image tokens.
-  fusion_transformer_heads: 8  # Number of attention heads in the fusion transformer.
-
-  # Pilot (Grounded Action Decoder)
-  resnet_feature_dim: 256    # Output feature dimension of the lightweight ResNet encoders for real-time vision.
-  pilot_d_model: 512         # The main hidden dimension for all components within the Pilot.
-  denoiser_layers: 6         # Depth of the Diffusion Transformer (DiT) that generates actions.
-  denoiser_heads: 8          # Number of attention heads in the DiT.
-
-  # Classifier-Free Guidance (CFG) Training Parameters
-  p_plan_drop: 0.1           # Probability of dropping the strategic plan_vector during training.
-  p_obs_drop: 0.1            # Probability of dropping the tactical observation context during training.
-
-# --- Diffusion Scheduler Configuration ---
-# Maps to NoiseSchedulerConfig in models/diffusion_policy.py
+# ===================================================================
+# 3. SCHEDULER CONFIGURATION (`scheduler`)
+# ===================================================================
 scheduler:
-  timesteps: 100             # CORRECT KEY NAME
-  beta_schedule: "cosine"    # It's also good practice to quote string values
-  beta_start: 1e-4           # Use scientific notation for clarity
+  timesteps: 100
+  beta_schedule: "squaredcos_cap_v2" # A modern, stable schedule
+  beta_start: 0.0001
   beta_end: 0.02
 
-# --- Dataset & DataLoader Configuration ---
+# ===================================================================
+# 4. DATASET & DATALOADER CONFIGURATION (`dataset`)
+# ===================================================================
 dataset:
-  # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"      
-  # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"   
-  train_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+  train_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
+  val_path: "/content/drive/MyDrive/pda/data/validation/validation_dataset.lmdb"
+  num_workers: 2
 
-  val_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
-  #C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
-  num_workers: 2            
-  use_aug: false
+resilience:
+  # Enable periodic, failsafe backups. HIGHLY recommended.
+  use_per_epoch_backup: true
+  
+  # Directory to save the periodic backup checkpoints.
+  # Use `null` to use a default "backups" folder in the run's output directory.
+  backup_dir: "/content/drive/MyDrive/pda/models/v1" # Or your local path
+  
+  # Save a backup every N epochs.
+  backup_every_n_epochs: 1
 
-# --- Core Training Loop Configuration ---
+# ===================================================================
+# 5. CORE TRAINING LOOP CONFIGURATION (`training`)
+# ===================================================================
 training:
-  batch_size: 64             # Per-GPU batch size. Adjust based on your VRAM.
-  val_batch_size: 64 # Use the same batch size for validation by default.
+  batch_size: 32
+  val_batch_size: 32
+  ema_decay: 0.999
+  
+  # The crucial weights for the dual-objective loss
+  loss_weights:
+    planner: 1.0
+    controller: 0.5
+    
+  # Checkpointing configuration
+  checkpoint_monitor: "val/loss_planner_raw" # Monitor the key planner metric
+  save_top_k: 3
+  
+  # Path to a .ckpt file to resume from (e.g., "outputs/.../checkpoints/last.ckpt")
+  # Set to null for a fresh run.
+  resume_from_checkpoint: null
 
-  ema_decay: 0.999           # Decay rate for the Exponential Moving Average of model weights. Critical for diffusion model stability.
+  # SWA configuration
+  use_swa: false
+  swa_lrs: 1e-5
 
-  # SOTA ENHANCEMENT: Activation checkpointing for memory savings.
-  # Rationale: Trades a small amount of compute time for a very large reduction in VRAM usage by not
-  # storing all intermediate activations. Allows training larger models or using larger batch sizes.
-  use_activation_checkpointing: True # Set to True to enable memory savings. Default to True for this large model.
-
-  # SOTA ENHANCEMENT: Optional Stochastic Weight Averaging (SWA).
-  # Rationale: SWA can find broader, flatter minima in the loss landscape, often improving generalization.
-  # It is a low-cost way to potentially boost final model performance.
-  use_swa: false             # Set to true to enable SWA towards the end of training.
-  swa_lrs: 1e-5              # Learning rate for the SWA phase.
-
-  resume_from_checkpoint: null # Path to a .ckpt file to resume training from. e.g., "/path/to/last.ckpt"
-
-# --- Validation & Inference Configuration ---
+# ===================================================================
+# 6. VALIDATION CONFIGURATION (`validation`)
+# ===================================================================
 validation:
-  # The 'Slow Path' for expensive diagnostics will run every N epochs.
-  # Rationale: Running full sampling and plot generation every epoch is slow. This provides a balance
-  # between frequent, fast feedback (loss) and periodic, deep insights (plots, action MSE).
-  run_full_validation_every_n_epoch: 30
+  # Run the expensive qualitative image logging every N epochs
+  run_qualitative_every_n_epoch: 30
 
-  sampling_steps: 30         # Number of DDIM steps for inference. A value between 20-50 is a good trade-off.
-  
-  # Principled Multi-Conditioner Guidance Scales
-  # Rationale: These control the strength of the guidance signals during inference.
-  guidance_scale_plan: 7.5   # How strongly to adhere to the high-level strategic plan. (Typically higher)
-  guidance_scale_obs: 1.5    # How strongly to adhere to the low-level observation context. (Typically lower)
-
-# --- Optimizer & LR Scheduler Configuration ---
+# ===================================================================
+# 7. OPTIMIZER CONFIGURATION (`optimizer`)
+# ===================================================================
 optimizer:
-  lr: 1e-4                   # Peak learning rate for the AdamW optimizer. A standard choice for Transformer-based models.
-  weight_decay: 1e-6         # Strength of weight decay for regularization.
-  
-  # Warmup + Cosine Decay Learning Rate Scheduler
-  # Rationale: Starting with a low LR and warming up prevents early training instability.
-  # The cosine decay then smoothly anneals the LR to zero, a proven technique for good convergence.
-  warmup_steps: 0.05         # Percentage of total training steps to use for linear warmup (e.g., 0.05 = 5%). Can also be an integer.
-  
-  gradient_clip_val: 1.0     # Maximum norm for gradient clipping to prevent exploding gradients. 1.0 is a standard, safe value.
+  lr: 1e-4
+  weight_decay: 1e-6
+  warmup_percentage: 0.05 # 5% of total steps will be warmup
 
-# --- PyTorch Lightning Trainer Configuration ---
+# ===================================================================
+# 8. PYTORCH LIGHTNING TRAINER CONFIGURATION (`trainer`)
+# ===================================================================
 trainer:
-  accelerator: "cuda"         # Hardware accelerator to use ('gpu', 'cpu').
-  devices: 1                 # Number of devices to use (e.g., 1 for a single GPU, [0, 1] for two GPUs).
-  
-  # SOTA ENHANCEMENT: Automatic Mixed Precision (AMP).
-  # Rationale: Uses float16 or bfloat16 for certain operations to dramatically speed up training
-  # and reduce memory usage, with minimal to no loss in final precision.
-  precision: "16-mixed"      # Use "16-mixed" for NVIDIA GPUs (Tensor Cores). Use "bf16-mixed" on A100/H100 for more stability.
-  
-  max_epochs: 1000           # Maximum number of epochs to train for.
-  
-  # Frequency of validation checks.
-  check_val_every_n_epoch: 30
+  accelerator: "cuda"
+  devices: [0] # Or [0, 1] for multi-GPU
 
-  # Batches to process before performing an optimizer step. Simulates a larger batch size.
-  # Effective batch size = batch_size * accumulate_grad_batches.
-  accumulate_grad_batches: 1
+  # devices: 1  # this is for cpu
+  max_epochs: 1000
+  precision: "16-mixed" # Use "bf16-mixed" on A100/H100 GPUs
+  
+  # Log validation metrics every N epochs
+  check_val_every_n_epoch: 130
+  
+  # Accumulate gradients to simulate a larger batch size
+  # Effective batch size = batch_size * accumulate_grad_batches
+  accumulate_grad_batches: 2
+  
+  # Gradient clipping for stability
+  gradient_clip_val: 1.0
 
-# --- Logging & Experiment Tracking Configuration ---
+# ===================================================================
+# 9. LOGGING CONFIGURATION (`logging`)
+# ===================================================================
 logging:
-  use_wandb: true            # Set to true to enable Weights & Biases logging.
-  wandb_project: "ego_planner_v4" # Your W&B project name.
-  wandb_run_name: null       # Optional: A specific name for this run. If null, a random name is generated.
+  use_wandb: true
+  wandb_project: ${project_name} # Use the global project name
+  wandb_run_name: null # Let W&B generate a name, or specify one
+  wandb_mode: "offline" # "online", "offline", or "disabled"
 
-  log_every_n_steps: 50      # How often to log metrics to the console and loggers.
-  wandb_mode: "offline" 
+  log_grad_freq: 500 # Log gradients every 500 steps
+  progress_bar_refresh_rate: 10

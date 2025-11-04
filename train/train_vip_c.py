@@ -14,6 +14,8 @@ import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 import wandb
+from models.vip_c import LinearNormalizer
+from tqdm import tqdm
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning.callbacks import (LearningRateMonitor, ModelCheckpoint,
@@ -41,71 +43,76 @@ logging.basicConfig(
 )
 logger = logging.getLogger("train_vip_c")
 
-# --- I. Component Deep Dive: The ViPCDataModule ---
 
 class ViPCDataModule(pl.LightningDataModule):
     """
-    The Definitive, SOTA DataModule for the ViP-C Framework.
-
-    This module is a high-performance, resilient interface between the enhanced
-    LMDB dataset and the ViPCLightningModule. It encapsulates all data loading
-    and serving logic, leveraging PyTorch Lightning's best practices for
-    maximum GPU utilization.
-
-    Key SOTA Features:
-    - **Persistent Workers:** Minimizes epoch-to-epoch overhead by keeping
-      data loading processes alive.
-    - **Robust Collation:** Uses a custom collate function to gracefully handle
-      potential data loading errors without crashing the training run.
-    - **Clean Encapsulation:** Follows the LightningDataModule paradigm for
-      perfect separation of data logic from model logic.
+    [DEFINITIVE, CORRECTED VERSION]
+    The SOTA DataModule for the ViP-C Framework. Implements a robust
+    two-stage setup to compute normalization statistics before training.
     """
     def __init__(self, cfg: DictConfig):
         super().__init__()
-        
-        # We store the entire config, but specifically use the 'dataset' section.
         self.cfg = cfg
         self.train_dataset: Optional[ViPCDataset] = None
         self.val_dataset: Optional[ViPCDataset] = None
-        
-        # For state management and ensuring setup is called correctly.
         self._has_setup = False
+        self.action_normalizer = LinearNormalizer()
+        self.proprio_normalizer = LinearNormalizer()
 
     def setup(self, stage: Optional[str] = None):
-        """
-        Called by PyTorch Lightning to prepare the dataset.
-        This is where the actual ViPCDataset objects are instantiated.
-        """
         if self._has_setup:
-            return # Prevent re-initialization
-
+            return
         logger.info(f"Setting up ViPCDataModule for stage: {stage}")
-        
         dataset_cfg = self.cfg.dataset
-        model_cfg = self.cfg.model # For horizon parameters
+        model_cfg = self.cfg.model
 
-        if stage == 'fit' or stage is None:
-            # --- Training Dataset ---
-            logger.info(f"Loading TRAINING dataset from: {dataset_cfg.train_path}")
-            self.train_dataset = ViPCDataset(
+        # This logic is now robust to resuming from a checkpoint.
+        is_resuming = hasattr(self.trainer, 'ckpt_path') and self.trainer.ckpt_path is not None
+
+        if stage == 'fit' and not is_resuming:
+            logger.info("Fresh run detected. Computing normalization stats...")
+            
+            # Stage 1: Create a temporary dataset that returns RAW, unnormalized data.
+            temp_train_dataset = ViPCDataset(
                 enhanced_dataset_path=dataset_cfg.train_path,
                 obs_horizon=model_cfg.controller_cfg.obs_horizon,
-                action_horizon=model_cfg.controller_cfg.action_horizon
+                action_horizon=model_cfg.controller_cfg.action_horizon,
+                action_normalizer=LinearNormalizer(), # Pass empty normalizers
+                proprio_normalizer=LinearNormalizer()
             )
-            logger.info(f"Training dataset loaded with {len(self.train_dataset)} samples.")
 
-            # --- Validation Dataset (Optional) ---
-            if dataset_cfg.val_path:
-                logger.info(f"Loading VALIDATION dataset from: {dataset_cfg.val_path}")
-                self.val_dataset = ViPCDataset(
-                    enhanced_dataset_path=dataset_cfg.val_path,
-                    obs_horizon=model_cfg.controller_cfg.obs_horizon,
-                    action_horizon=model_cfg.controller_cfg.action_horizon
-                )
-                logger.info(f"Validation dataset loaded with {len(self.val_dataset)} samples.")
-            else:
-                logger.warning("No validation dataset path provided.")
+            temp_loader = DataLoader(
+                temp_train_dataset, batch_size=self.cfg.training.batch_size,
+                num_workers=0, collate_fn=vip_c_collate_fn
+            )
+            all_actions, all_proprios = [], []
+            for batch in tqdm(temp_loader, desc="Computing Normalization Stats"):
+                if batch.get("batch_failed"): continue
+                all_actions.append(batch['ground_truth_action_chunk_raw'].numpy())
+                all_proprios.append(batch['controller_observation_history']['proprio_raw'].numpy())
+
+            # Stage 2: Fit the normalizers that are attributes of THIS class.
+            self.action_normalizer.fit(np.concatenate(all_actions).reshape(-1, self.cfg.model.controller_cfg.action_dim))
+            self.proprio_normalizer.fit(np.concatenate(all_proprios).reshape(-1, self.cfg.model.controller_cfg.proprio_dim))
+            logger.info("Normalization stats computed and fitted.")
         
+        # Stage 3: Create the final datasets using the (now possibly fitted) normalizers.
+        logger.info("Creating final datasets for training and validation...")
+        self.train_dataset = ViPCDataset(
+            enhanced_dataset_path=dataset_cfg.train_path,
+            obs_horizon=model_cfg.controller_cfg.obs_horizon,
+            action_horizon=model_cfg.controller_cfg.action_horizon,
+            action_normalizer=self.action_normalizer,
+            proprio_normalizer=self.proprio_normalizer
+        )
+        if dataset_cfg.val_path:
+            self.val_dataset = ViPCDataset(
+                enhanced_dataset_path=dataset_cfg.val_path,
+                obs_horizon=model_cfg.controller_cfg.obs_horizon,
+                action_horizon=model_cfg.controller_cfg.action_horizon,
+                action_normalizer=self.action_normalizer,
+                proprio_normalizer=self.proprio_normalizer
+            )
         self._has_setup = True
 
     def train_dataloader(self) -> DataLoader:
@@ -187,7 +194,10 @@ class ViPCLightningModule(pl.LightningModule):
             controller_cfg=cfg.model.controller_cfg
         )
         self.last_backup_path = None
-        
+
+        self.joint_limits_low = None
+        self.joint_limits_high = None
+
         # EMA is critical for stabilizing diffusion model training
         self.ema = EMA(self.model, decay=cfg.training.ema_decay)
         
@@ -199,23 +209,86 @@ class ViPCLightningModule(pl.LightningModule):
             beta_end=cfg.scheduler.beta_end,
             clip_sample=False # We handle clipping in our model/data if needed
         )
-        
+
+        self.action_normalizer = LinearNormalizer()
+        self.proprio_normalizer = LinearNormalizer()
+
         logger.info("ViPCLightningModule initialized successfully.")
-        
+
+
+
+    def setup(self, stage: str) -> None:
+        """
+        [DEFINITIVE, CORRECTED VERSION]
+        This hook is the single source of truth for linking normalizers between
+        the DataModule and the LightningModule, handling both fresh and resumed runs.
+        """
+        if stage == 'fit':
+            # This hook runs AFTER the datamodule's setup has completed.
+            is_resuming = hasattr(self.trainer, 'ckpt_path') and self.trainer.ckpt_path is not None
+
+
+            if is_resuming:
+                # If we are resuming, the normalizers were loaded in `on_load_checkpoint`.
+                # We now push them to the already-created datamodule.
+                self.trainer.datamodule.action_normalizer = self.action_normalizer
+                self.trainer.datamodule.proprio_normalizer = self.proprio_normalizer
+                self.trainer.datamodule.train_dataset.action_normalizer = self.action_normalizer
+                self.trainer.datamodule.train_dataset.proprio_normalizer = self.proprio_normalizer
+                if self.trainer.datamodule.val_dataset:
+                    self.trainer.datamodule.val_dataset.action_normalizer = self.action_normalizer
+                    self.trainer.datamodule.val_dataset.proprio_normalizer = self.proprio_normalizer
+                logger.info("Normalizers from checkpoint have been restored and linked to the DataModule.")
+            else:
+                # On a fresh run, the datamodule has just fitted the normalizers.
+                # We pull them into the LightningModule so they can be checkpointed.
+                self.action_normalizer = self.trainer.datamodule.action_normalizer
+                self.proprio_normalizer = self.trainer.datamodule.proprio_normalizer
+                logger.info("Fitted normalizers have been linked from DataModule to LightningModule.")
+            
+            self.ema.ema_model.to(self.device)
+
+            if self.joint_limits_low is None:
+                logger.info("Dynamically extracting kinematic limits from the environment...")
+                from envs.panda_env import PandaEnv # Local import
+                temp_env = PandaEnv(xml_path=self.cfg.env.xml_path)
+                low, high = temp_env.get_action_space_limits()
+                self.joint_limits_low = torch.tensor(low, dtype=torch.float32)
+                self.joint_limits_high = torch.tensor(high, dtype=torch.float32)
+                temp_env.close()
+                logger.info("Kinematic limits successfully extracted and stored.")
+
+
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Saves the EMA state dict alongside the model state."""
+        """Saves the EMA state and normalizers alongside the model state."""
         checkpoint["ema_state_dict"] = self.ema.state_dict()
+        checkpoint["action_normalizer"] = self.action_normalizer
+        checkpoint["proprio_normalizer"] = self.proprio_normalizer
+        checkpoint["joint_limits_low"] = self.joint_limits_low
+        checkpoint["joint_limits_high"] = self.joint_limits_high
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Loads the EMA state dict from a checkpoint."""
+        """Loads the EMA state and normalizers from a checkpoint."""
         if "ema_state_dict" in checkpoint:
             self.ema.load_state_dict(checkpoint["ema_state_dict"])
             logger.info("Successfully loaded EMA weights from checkpoint.")
+
+        
+        if "action_normalizer" in checkpoint and "proprio_normalizer" in checkpoint:
+            self.action_normalizer = checkpoint["action_normalizer"]
+            self.proprio_normalizer = checkpoint["proprio_normalizer"]
+            logger.info("Successfully loaded normalizers from checkpoint into LightningModule.")
         else:
-            logger.warning("No EMA state found in checkpoint. Re-initializing EMA from current model weights.")
-            # Re-initialize EMA from the loaded model state
-            self.ema.ema_model.load_state_dict(self.model.state_dict())
-            logger.info("EMA model state has been synced with the loaded model state.")
+            logger.warning("No normalizers found in checkpoint. A fresh fit is required.")
+
+
+        if "joint_limits_low" in checkpoint and "joint_limits_high" in checkpoint:
+            self.joint_limits_low = checkpoint["joint_limits_low"]
+            self.joint_limits_high = checkpoint["joint_limits_high"]
+            logger.info("Successfully loaded kinematic limits from checkpoint.")
+        else:
+            logger.warning("No kinematic limits found in checkpoint. They will be re-derived if possible.")
+
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> Optional[torch.Tensor]:
         """
@@ -246,10 +319,12 @@ class ViPCLightningModule(pl.LightningModule):
         predictions = self.model(batch)
 
         # --- 4. Compute and Log Losses ---
-        raw_loss_planner = F.mse_loss(
+        raw_loss_planner = F.binary_cross_entropy(
             predictions['predicted_heatmap'],
             batch['ground_truth_subgoal_heatmap']
         )
+
+
         raw_loss_controller = F.mse_loss(predictions['predicted_noise'], noise)
         
         # Apply configured weights
@@ -269,11 +344,16 @@ class ViPCLightningModule(pl.LightningModule):
         }, on_step=True, on_epoch=True, prog_bar=True)
         
         return combined_loss
-    
+
+
+
+
     def on_before_optimizer_step(self, optimizer) -> None:
         # This is a hook to update EMA weights *after* the forward pass
         # but *before* the optimizer updates the model weights.
         self.ema.update(self.model)
+
+
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         """
@@ -299,10 +379,11 @@ class ViPCLightningModule(pl.LightningModule):
             # Use the EMA-averaged model for all validation
             predictions = self.ema.ema_model(batch)
 
-        raw_loss_planner = F.mse_loss(
+        raw_loss_planner = F.binary_cross_entropy(
             predictions['predicted_heatmap'],
             batch['ground_truth_subgoal_heatmap']
         )
+
         raw_loss_controller = F.mse_loss(predictions['predicted_noise'], noise)
         
         self.log_dict({
@@ -321,7 +402,7 @@ class ViPCLightningModule(pl.LightningModule):
         try:
             with torch.no_grad():
                 # Run the Planner in inference mode on the validation data
-                predicted_heatmap, _ = self.ema.ema_model.plan(
+                predicted_heatmap, _, _ = self.ema.ema_model.plan(
                     current_image=batch['planner_current_image'],
                     goal_image=batch['planner_goal_image'],
                     task_phase=batch['planner_task_phase']
@@ -430,40 +511,39 @@ class ViPCLightningModule(pl.LightningModule):
 
     def configure_optimizers(self):
         """
-        Configures the AdamW optimizer and a warmup-cosine learning rate scheduler.
+        [DEFINITIVE, REVERTED VERSION]
+        This version uses all parameters, which is necessary for correctly
+        resuming from a checkpoint saved with the same configuration. The
+        robustness is now handled by the correct EMA and device placement hooks.
         """
+        # --- START OF THE DEFINITIVE, FINAL PATCH ---
+
+        logger.info("Configuring optimizer for all model parameters.")
+
         optimizer = torch.optim.AdamW(
-            self.parameters(),
+            self.parameters(), # Use all parameters to match the checkpoint's optimizer
             lr=self.cfg.optimizer.lr,
             weight_decay=self.cfg.optimizer.weight_decay
         )
         
+        # The scheduler logic remains correct.
         num_training_steps = self.trainer.estimated_stepping_batches
         num_warmup_steps = int(num_training_steps * self.cfg.optimizer.warmup_percentage)
 
-        # --- [DELETE THIS INCORRECT LINE] ---
-        # scheduler = get_scheduler(
-        #     "cosine_with_restarts", ...
-        # )
-        # --- [END DELETE] ---
-        
-        # --- [REPLACE WITH THE CORRECT SCHEDULER] ---
-        # This is the correct "cosine" schedule which performs a single, smooth
-        # decay over the entire training run after the warmup phase.
         scheduler = get_scheduler(
             "cosine",
             optimizer,
             num_warmup_steps=num_warmup_steps,
             num_training_steps=num_training_steps,
         )
-        # --- [END REPLACE] ---
+        
+        # --- END OF THE DEFINITIVE, FINAL PATCH ---
         
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step",
-                "frequency": 1
+                "interval": "step"
             }
         }
 

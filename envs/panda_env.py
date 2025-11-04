@@ -1520,3 +1520,37 @@ class PandaEnv(gym.Env):
         self.data.time = state.time
         # You may need to copy other fields depending on your env, but these are the core ones.
         mujoco.mj_forward(self.model, self.data)
+
+
+    def get_action_space_limits(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        [SOTA, DEFINITIVE VERSION]
+        Programmatically extracts the action space limits directly from the MuJoCo model.
+
+        This is the single source of truth for robot kinematics, ensuring that
+        the policy's constraints always match the simulation's constraints.
+
+        Returns:
+            A tuple of (low_limits, high_limits) for the entire 8-DoF action space.
+        """
+        low_limits = []
+        high_limits = []
+
+        # 1. Get limits for the 7 arm joints
+        for i in range(1, 8): # Joints are named joint1 through joint7
+            joint_name = f"joint{i}"
+            joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            if joint_id == -1:
+                raise ValueError(f"Joint '{joint_name}' not found in the MuJoCo model.")
+            
+            # The range is stored in model.jnt_range
+            jnt_range = self.model.jnt_range[joint_id]
+            low_limits.append(jnt_range[0])
+            high_limits.append(jnt_range[1])
+            
+        # 2. Add the abstract limits for the gripper action (-1 to 1)
+        # This corresponds to the normalized gripper command, not the physical range.
+        low_limits.append(-1.0)
+        high_limits.append(1.0)
+        
+        return np.array(low_limits, dtype=np.float32), np.array(high_limits, dtype=np.float32)

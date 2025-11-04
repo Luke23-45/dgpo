@@ -9,16 +9,14 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
-
+from models.vip_c import LinearNormalizer
 import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-# We build upon the powerful, existing ExpertTrajectoryDataset for all low-level I/O.
-# NOTE: This assumes ExpertTrajectoryDataset has been extended with a method
-# to map a global index back to (episode, timestep).
+
 from utils.expert_dataset import ExpertTrajectoryDataset
 
 logger = logging.getLogger(__name__)
@@ -42,7 +40,9 @@ class ViPCDataset(Dataset):
     def __init__(self,
                  enhanced_dataset_path: str,
                  obs_horizon: int,
-                 action_horizon: int):
+                 action_horizon: int,
+                 action_normalizer: LinearNormalizer,
+                 proprio_normalizer: LinearNormalizer):
         super().__init__()
         logger.info(f"Initializing ViPCDataset (SOTA Orchestrator) with H_o={obs_horizon}, H_a={action_horizon}")
 
@@ -53,7 +53,8 @@ class ViPCDataset(Dataset):
             observation_horizon=obs_horizon,
             action_horizon=action_horizon
         )
-
+        self.action_normalizer = action_normalizer
+        self.proprio_normalizer = proprio_normalizer
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
 
@@ -81,99 +82,73 @@ class ViPCDataset(Dataset):
         # The total number of valid samples is determined by the underlying reader.
         return len(self.expert_reader)
 
+
     def __getitem__(self, idx: int) -> Optional[Dict[str, torch.Tensor]]:
         """
-        The orchestrator method. Assembles a complete training sample for ViP-C.
+        [DEFINITIVE, DUAL-MODE VERSION]
+        Assembles a complete sample, operating in 'stat computation' mode or
+        'training' mode based on whether the passed normalizers are fitted.
         """
-        ep_idx, timestep_t = -1, -1 # Initialize for robust error logging
+        ep_idx, timestep_t = -1, -1
         try:
-            # 1. Map the global sample index `idx` to its episode and timestep coordinate.
-            #    This is a fast, O(log N) lookup thanks to the reader's virtual index.
-            #    NOTE: This requires `get_episode_and_timestep` to be implemented in ExpertTrajectoryDataset.
             ep_idx, timestep_t = self.expert_reader.get_episode_and_timestep(idx)
             ep_meta = self.expert_reader.episode_metadata[ep_idx]
-
-            # 2. Fetch the chunked data for the Controller.
-            #    This is one of the main, efficient reads from the database.
             obs_chunk_np, action_chunk_np = self.expert_reader[idx]
 
-            # 3. Fetch the single-timestep supervisory signals for the Planner.
-            #    These calls are fast and cached by the reader's LRU mechanism.
-            
-            # The "current image" for the planner is the last image in the history chunk.
             current_image_np = obs_chunk_np["image_primary"][-1]
             
-            # Get the ground-truth task phase for the current timestep.
             def get_full_modality(modality_name: str):
-                """Helper to robustly call the reader with correct, hashable arguments."""
                 meta = ep_meta["modalities"][modality_name]
                 return self.expert_reader._get_full_modality_array(
-                    key=meta["key"],
-                    compression=meta["compression"],
-                    dtype_str=meta["dtype"],
-                    shape_list=tuple(meta["shape"]) # Ensure hashable tuple
+                    key=meta["key"], compression=meta["compression"],
+                    dtype_str=meta["dtype"], shape_list=tuple(meta["shape"])
                 )
 
-            # Get the ground-truth task phase for the current timestep.
             all_phases = get_full_modality("task_phases")
             current_task_phase = all_phases[timestep_t]
-
-            # Get the ground-truth subgoal heatmap.
             all_heatmaps_uint8 = get_full_modality("subgoal_heatmaps")
             gt_heatmap_uint8 = all_heatmaps_uint8[timestep_t]
 
-            # 4. Fetch the episode-level goal image for the Planner.
-            all_primary_images = get_full_modality("image_primary")
-            
-            # 2. The goal image is the last one in this sequence.
-            goal_image_np = all_primary_images[-1]
+            # goal_image_np = self.expert_reader.get_goal_image(ep_idx)
+            goal_image_np = get_full_modality("image_primary")[-1]
 
-
-            # --- Data Transformation (NumPy/PIL to PyTorch Tensors) ---
-
-            # A. Transform Planner inputs
+            # --- Data Transformation ---
             current_image = self.transform_planner_img(Image.fromarray(current_image_np))
             goal_image = self.transform_planner_img(Image.fromarray(goal_image_np))
             task_phase = torch.tensor(current_task_phase, dtype=torch.long)
             
-            # B. Transform Controller inputs
-            observation_history = {
-                "image_primary": torch.stack([
-                    self.transform_controller_primary(Image.fromarray(img))
-                    for img in obs_chunk_np["image_primary"]
-                ]),
-                "image_wrist": torch.stack([
-                    self.transform_controller_wrist(Image.fromarray(img))
-                    for img in obs_chunk_np["image_wrist"]
-                ]),
-                "proprio": torch.from_numpy(obs_chunk_np["proprio"].copy()).float(),
-            }
-            action_chunk = torch.from_numpy(action_chunk_np.copy()).float()
+            proprio_raw = torch.from_numpy(obs_chunk_np["proprio"].copy()).float()
+            action_raw = torch.from_numpy(action_chunk_np.copy()).float()
             
-            # C. Transform the ground-truth heatmap.
-            #    Convert from uint8 [0, 255] back to a float32 [0.0, 1.0] tensor
-            #    and add the channel dimension.
-            gt_heatmap = torch.from_numpy(gt_heatmap_uint8.copy()).float() / 255.0
-            gt_heatmap = gt_heatmap.squeeze().unsqueeze(0) # Ensure shape [1, H, W]
+            is_stat_computation_mode = self.action_normalizer.min is None
 
-            # 5. Assemble and return the final, model-ready dictionary.
-            return {
-                # --- Planner Supervisory Data ---
-                "planner_current_image": current_image,
-                "planner_goal_image": goal_image,
-                "planner_task_phase": task_phase,
-                "ground_truth_subgoal_heatmap": gt_heatmap,
-                
-                # --- Controller Supervisory Data ---
+            observation_history = {
+                "image_primary": torch.stack([self.transform_controller_primary(Image.fromarray(img)) for img in obs_chunk_np["image_primary"]]),
+                "image_wrist": torch.stack([self.transform_controller_wrist(Image.fromarray(img)) for img in obs_chunk_np["image_wrist"]]),
+                "proprio": self.proprio_normalizer.normalize(proprio_raw) if not is_stat_computation_mode else proprio_raw,
+            }
+            action_chunk = self.action_normalizer.normalize(action_raw) if not is_stat_computation_mode else action_raw
+            
+            gt_heatmap = torch.from_numpy(gt_heatmap_uint8.copy()).float() / 255.0
+            gt_heatmap = gt_heatmap.squeeze().unsqueeze(0)
+
+            result = {
+                "planner_current_image": current_image, "planner_goal_image": goal_image,
+                "planner_task_phase": task_phase, "ground_truth_subgoal_heatmap": gt_heatmap,
                 "controller_observation_history": observation_history,
                 "ground_truth_action_chunk": action_chunk,
             }
+            
+            if is_stat_computation_mode:
+                result['ground_truth_action_chunk_raw'] = action_raw
+                result['controller_observation_history']['proprio_raw'] = proprio_raw
+            
+            return result
 
         except Exception as e:
-            # If anything goes wrong, log the error and return None.
-            # The custom collate_fn will handle this gracefully.
             logger.error(f"Error loading data for sample index {idx} (ep: {ep_idx}, t: {timestep_t}). Error: {e}", exc_info=False)
             return None
+
 
 # --- Custom Collate Function for Robust Batching ---
 

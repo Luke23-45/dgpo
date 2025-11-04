@@ -8,11 +8,60 @@ from typing import Dict, List, Any, Tuple
 import logging
 import math
 from transformers import SiglipVisionModel # Import the CORRECT model class
-
+import numpy as np
 
 logger = logging.getLogger(__name__)
 # --- I. Component Deep Dive: The Planner ("Foreman") ---
 from models.ego_planner import ResNetEncoder, EgoPlannerBlock
+
+
+class LinearNormalizer:
+    """
+    SOTA Linear Normalizer, adapted from Diffusion Policy implementations.
+    This class learns the min/max of a dataset and provides methods to
+    normalize data to [-1, 1] and un-normalize it back to the original scale.
+    """
+    def __init__(self):
+        self.min = None
+        self.max = None
+
+    def fit(self, data: np.ndarray):
+        """
+        Computes and stores the min and max values from the training data.
+        Args:
+            data: A NumPy array of shape (N_samples, D_features).
+        """
+        self.min = np.min(data, axis=0)
+        self.max = np.max(data, axis=0)
+        logger.info(f"Normalizer fitted. Min shape: {self.min.shape}, Max shape: {self.max.shape}")
+
+    def normalize(self, data: torch.Tensor) -> torch.Tensor:
+        """
+        Normalizes data to the [-1, 1] range.
+        """
+        if self.min is None or self.max is None:
+            raise RuntimeError("Normalizer must be fitted before use.")
+        
+        min_t = torch.tensor(self.min, dtype=data.dtype, device=data.device)
+        max_t = torch.tensor(self.max, dtype=data.dtype, device=data.device)
+        
+        range_t = max_t - min_t
+        # Add a small epsilon for features with no variance
+        return 2 * (data - min_t) / (range_t + 1e-8) - 1
+
+    def unnormalize(self, data: torch.Tensor) -> torch.Tensor:
+        """
+        Un-normalizes data from [-1, 1] back to the original scale.
+        """
+        if self.min is None or self.max is None:
+            raise RuntimeError("Normalizer must be fitted before use.")
+            
+        min_t = torch.tensor(self.min, dtype=data.dtype, device=data.device)
+        max_t = torch.tensor(self.max, dtype=data.dtype, device=data.device)
+        
+        range_t = max_t - min_t
+        return (data + 1) / 2 * range_t + min_t
+
 
 class Planner(nn.Module):
     """
@@ -29,7 +78,9 @@ class Planner(nn.Module):
                  vision_backbone_model: str = "google/siglip-base-patch16-224",
                  num_task_phases: int = 5,
                  fusion_transformer_layers: int = 4,
-                 fusion_transformer_heads: int = 12):
+                 fusion_transformer_heads: int = 12,
+                 implicit_subgoal_dim: int = 128
+                 ):
         super().__init__()
         
         logger.info(f"Initializing Planner with backbone: {vision_backbone_model}")
@@ -52,6 +103,11 @@ class Planner(nn.Module):
                 f"Please inspect the config: {config}"
             )
         
+        self.implicit_head = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim // 2, implicit_subgoal_dim)
+        )        
         
         # --- 2. Learnable Embeddings ---
         self.task_phase_embedding = nn.Embedding(num_task_phases, self.hidden_dim)
@@ -107,8 +163,12 @@ class Planner(nn.Module):
         B = current_image.shape[0]
         device = current_image.device
 
+        if current_image.device != self.vision_backbone.device:
+            self.to(current_image.device)
+
         # --- Step 1: Encode Images with Frozen Backbone ---
         with torch.no_grad():
+            # The vision_backbone is now guaranteed to be on the correct device.
             current_img_outputs = self.vision_backbone(pixel_values=current_image)
             goal_img_outputs = self.vision_backbone(pixel_values=goal_image)
         
@@ -136,21 +196,17 @@ class Planner(nn.Module):
         # contextualized representation for every token.
         fused_sequence = self.fusion_transformer(full_sequence)
         
-        # --- Step 4: Decode to a Heatmap ---
-
-        # Extract the hidden states corresponding to the current image's *patch* tokens.
-        # We take the first 197 tokens (the ones for current_image) and discard the [CLS] token (at index 0).
-        contextualized_patch_tokens = fused_sequence[:, 1:197, :] # Shape: [B, 196, D]
-        
-        # Reshape the sequence of patch tokens back into a spatial grid.
-        # The ViT patch order is row-major, so this is a valid operation.
-        # [B, 196, D] -> [B, 14, 14, D] -> [B, D, 14, 14]
+        contextualized_patch_tokens = fused_sequence[:, 1:197, :]
         patch_grid = contextualized_patch_tokens.permute(0, 2, 1).reshape(B, self.hidden_dim, 14, 14)
-        
-        # Pass the grid through the convolutional decoder head to upsample to the final heatmap.
         predicted_heatmap = self.heatmap_head(patch_grid)
         
-        return predicted_heatmap
+        # --- Step 4b: Decode to a Latent Vector (Implicit Subgoal) ---
+        # The [CLS] token of the current_image (at index 0) is the best
+        # source for a global summary of the contextualized scene.
+        cls_token_output = fused_sequence[:, 0, :]
+        predicted_implicit_subgoal = self.implicit_head(cls_token_output)
+        
+        return predicted_heatmap, predicted_implicit_subgoal
     
 
 
@@ -204,7 +260,9 @@ class Controller(nn.Module):
                  controller_hidden_dim: int = 512,
                  resnet_feature_dim: int = 256,
                  denoiser_layers: int = 6,
-                 denoiser_heads: int = 8):
+                 denoiser_heads: int = 8,
+                 implicit_subgoal_dim: int = 128
+                 ):
         super().__init__()
         logger.info(f"Initializing Controller with hidden_dim: {controller_hidden_dim}")
 
@@ -238,6 +296,7 @@ class Controller(nn.Module):
             nn.GELU(),
             nn.Linear(controller_hidden_dim, controller_hidden_dim)
         )
+        self.implicit_subgoal_proj = nn.Linear(implicit_subgoal_dim, controller_hidden_dim)
 
         # --- 3. Denoising Core (Diffusion Transformer) ---
         
@@ -266,13 +325,16 @@ class Controller(nn.Module):
     def forward(self,
                 observation_history: Dict[str, torch.Tensor],
                 subgoal_coordinate: torch.Tensor,
+                implicit_subgoal: torch.Tensor,
                 noisy_action_sequence: torch.Tensor,
                 diffusion_timestep: torch.Tensor) -> torch.Tensor:
         """
         Performs the full, end-to-end denoising pass for the Controller.
         """
         # --- Step 1: Encode all conditioning information ---
-
+        input_device = observation_history['proprio'].device
+        if next(self.parameters()).device != input_device:
+            self.to(input_device)
         # A. Encode real-time observations
         primary_tokens = self.primary_obs_encoder(observation_history['image_primary'])
         wrist_tokens = self.wrist_obs_encoder(observation_history['image_wrist'])
@@ -294,10 +356,11 @@ class Controller(nn.Module):
         v_emb = self.subgoal_pos_emb(subgoal_coordinate[:, 1:2]) # [B, 128]
         subgoal_emb = torch.cat([u_emb, v_emb], dim=-1) # [B, 256]
         subgoal_token = self.subgoal_encoder(subgoal_emb).unsqueeze(1) # [B, 1, D_ctrl]
+        implicit_subgoal_token = self.implicit_subgoal_proj(implicit_subgoal).unsqueeze(1)
         
         # C. Assemble the full conditioning context for the Transformer
         # Shape: [B, L_vis + H_o + 1, D_ctrl]
-        unified_context = torch.cat([vision_tokens, proprio_tokens, subgoal_token], dim=1)
+        unified_context = torch.cat([vision_tokens, proprio_tokens, subgoal_token, implicit_subgoal_token], dim=1)
         
         # --- Step 2: Prepare inputs for the Denoising Transformer ---
         
@@ -348,40 +411,34 @@ class ViPC(nn.Module):
 
     def forward(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """
-        The unified training forward pass with teacher forcing.
-
-        Args:
-            batch: A dictionary from the ViPCDataset containing supervisory
-                   signals for both the Planner and Controller.
-
-        Returns:
-            A dictionary containing the predictions from both components,
-            ready for the combined loss calculation.
+        [DEFINITIVE, CORRECTED HYBRID VERSION]
+        The unified training forward pass with indirect training for the implicit head.
         """
-        # --- 1. Planner Forward Pass ---
-        # The Planner is trained on its own ground-truth data.
-        predicted_heatmap = self.planner(
+        # --- 1. Planner Forward Pass now returns a tuple ---
+        predicted_heatmap, predicted_implicit_subgoal = self.planner(
             current_image=batch['planner_current_image'],
             goal_image=batch['planner_goal_image'],
             task_phase=batch['planner_task_phase']
         )
         
-        # --- 2. Controller Forward Pass (with Teacher Forcing) ---
-        
-        # We need to extract the ground-truth subgoal coordinate to feed
-        # to the controller. We use a "soft argmax" for a differentiable
-        # and stable way to find the peak of the ground-truth heatmap.
+        # --- 2. Controller Forward Pass (with Teacher Forcing for EXPLICIT subgoal) ---
         gt_heatmap = batch['ground_truth_subgoal_heatmap']
         ground_truth_subgoal_coord = self.soft_argmax_2d(gt_heatmap)
         
-        # The Controller is trained using the ground-truth subgoal.
+        # --- START OF THE DEFINITIVE FIX ---
+        # The Controller is trained using the ground-truth explicit subgoal,
+        # but the PREDICTED implicit subgoal from the planner.
+        # This creates the end-to-end path for gradients to train the implicit head.
         predicted_noise = self.controller(
             observation_history=batch['controller_observation_history'],
-            subgoal_coordinate=ground_truth_subgoal_coord, # Teacher-forced
+            subgoal_coordinate=ground_truth_subgoal_coord,
+            implicit_subgoal=predicted_implicit_subgoal, # Use the PREDICTED one
             noisy_action_sequence=batch['noisy_actions'],
             diffusion_timestep=batch['timesteps']
         )
+        # --- END OF THE DEFINITIVE FIX ---
         
+        # We only need to return the two predictions that have a direct loss term.
         return {
             "predicted_heatmap": predicted_heatmap,
             "predicted_noise": predicted_noise
@@ -391,35 +448,59 @@ class ViPC(nn.Module):
     def plan(self,
              current_image: torch.Tensor,
              goal_image: torch.Tensor,
-             task_phase: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+             task_phase: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Inference-only method to run the Planner and extract the subgoal.
+        Inference-only method to run the Planner and extract the subgoals.
+        Returns: predicted_heatmap, predicted_implicit_subgoal, predicted_subgoal_coord
         """
-        # Set to evaluation mode
         self.eval()
         
-        predicted_heatmap = self.planner(current_image, goal_image, task_phase)
-        
-        # Use the same soft argmax to get the normalized coordinate
+        # --- [MODIFY THIS] ---
+        predicted_heatmap, predicted_implicit_subgoal = self.planner(current_image, goal_image, task_phase)
         predicted_subgoal_coord = self.soft_argmax_2d(predicted_heatmap)
-        
-        return predicted_heatmap, predicted_subgoal_coord
+        return predicted_heatmap, predicted_implicit_subgoal, predicted_subgoal_coord
+
+
 
     @torch.no_grad()
     def act(self,
             observation_history: Dict[str, torch.Tensor],
+            implicit_subgoal: torch.Tensor,
             predicted_subgoal_coord: torch.Tensor,
             noise_scheduler,
-            num_inference_steps: int) -> torch.Tensor:
+            num_inference_steps: int,
+            action_normalizer: LinearNormalizer,
+            # --- [ADD THIS ARGUMENT] ---
+            proprio_normalizer: LinearNormalizer,
+            # --- [END ADD] ---
+            joint_limits_low: torch.Tensor,
+            joint_limits_high: torch.Tensor
+            ) -> torch.Tensor:
         """
-        Inference-only method to generate an action sequence from the Controller
-        using DDPM/DDIM sampling.
+        [DEFINITIVE, KINEMATICS-AWARE, NORMALIZATION-AWARE VERSION]
+        Inference-only method to generate a physically plausible action sequence.
+
+        This method performs the full diffusion sampling loop and then applies the
+        necessary post-processing (un-normalization and clamping) to produce
+        actions that can be directly executed by the environment.
         """
         self.eval()
+
+
+        inference_obs_history = observation_history.copy()
+        raw_proprio = inference_obs_history['proprio']
+        normalized_proprio = proprio_normalizer.normalize(raw_proprio)
+        inference_obs_history['proprio'] = normalized_proprio         
+        
+        
         
         B = observation_history['proprio'].shape[0]
         device = observation_history['proprio'].device
         
+        # Ensure limits are on the correct device for the final clamp
+        joint_limits_low = joint_limits_low.to(device)
+        joint_limits_high = joint_limits_high.to(device)
+
         # 1. Initialize random noise for the action sequence
         latents = torch.randn(
             (B, self.controller.action_horizon, self.controller.action_dim),
@@ -430,27 +511,39 @@ class ViPC(nn.Module):
         # 2. Set up the timesteps for the diffusion sampling loop
         noise_scheduler.set_timesteps(num_inference_steps)
         
-        # 3. The denoising loop
+        # 3. The denoising loop (this part is unchanged)
         for t in noise_scheduler.timesteps:
-            # Expand the timestep for batch compatibility
             timesteps = t.expand(B).to(device)
-            
-            # Predict the noise for the current latents
+
             predicted_noise = self.controller(
-                observation_history=observation_history,
+                observation_history=inference_obs_history, # Use the NORMALIZED dict
                 subgoal_coordinate=predicted_subgoal_coord,
+                implicit_subgoal=implicit_subgoal, # Pass the new argument
                 noisy_action_sequence=latents,
                 diffusion_timestep=timesteps
             )
-            
-            # Use the scheduler to compute the previous noisy sample
+
+
             latents = noise_scheduler.step(
                 model_output=predicted_noise,
                 timestep=t,
                 sample=latents
             ).prev_sample
             
-        return latents
+        # At this point, `latents` is the sequence of PREDICTED NORMALIZED ACTIONS.
+        
+        # 4. Un-normalize the actions back to their original, physical scale.
+        #    This is the crucial step to bridge the "norm-to-raw" gap.
+        unnormalized_actions = action_normalizer.unnormalize(latents)
+
+        # 5. Apply the hard kinematic constraints as a final safety net.
+        clamped_actions = torch.clamp(
+            unnormalized_actions,
+            min=joint_limits_low,
+            max=joint_limits_high
+        )
+
+        return clamped_actions # Return the safe, raw-scale actions.
 
     @staticmethod
     def soft_argmax_2d(heatmaps: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:

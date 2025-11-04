@@ -22,6 +22,7 @@ model:
     num_task_phases: 5
     fusion_transformer_layers: 4
     fusion_transformer_heads: 12
+    implicit_subgoal_dim: 128
     
   controller_cfg:
     action_dim: 8       # MUST match your dataset
@@ -32,6 +33,7 @@ model:
     resnet_feature_dim: 256
     denoiser_layers: 6
     denoiser_heads: 8
+    implicit_subgoal_dim: 128
 
 # ===================================================================
 # 3. SCHEDULER CONFIGURATION (`scheduler`)
@@ -46,9 +48,19 @@ scheduler:
 # 4. DATASET & DATALOADER CONFIGURATION (`dataset`)
 # ===================================================================
 dataset:
-  train_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
+  # train_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
+  train_path: "/content/drive/MyDrive/pda/data/validation/validation_dataset.lmdb"
   val_path: "/content/drive/MyDrive/pda/data/validation/validation_dataset.lmdb"
-  num_workers: 1
+  # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb"
+  # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb"
+  num_workers: 2
+
+env:
+  # --- DEFINITIVE FIX ---
+  # Use a Hydra resolver to construct an absolute path from the
+  # original working directory. This makes the path robust to where
+  # Hydra runs the script.
+  xml_path: "${hydra:runtime.cwd}/envs/panda_pick_place.xml"
 
 resilience:
   # Enable periodic, failsafe backups. HIGHLY recommended.
@@ -59,7 +71,7 @@ resilience:
   backup_dir: "/content/drive/MyDrive/pda/models/v1" # Or your local path
   
   # Save a backup every N epochs.
-  backup_every_n_epochs: 3
+  backup_every_n_epochs: 8
 
 # ===================================================================
 # 5. CORE TRAINING LOOP CONFIGURATION (`training`)
@@ -80,6 +92,7 @@ training:
   
   # Path to a .ckpt file to resume from (e.g., "outputs/.../checkpoints/last.ckpt")
   # Set to null for a fresh run.
+  # resume_from_checkpoint: "/content/drive/MyDrive/pda/Models/backup_epoch_0.ckpt"
   resume_from_checkpoint: null
 
   # SWA configuration
@@ -133,3 +146,5 @@ logging:
 
   log_grad_freq: 500 # Log gradients every 500 steps
   progress_bar_refresh_rate: 10
+
+
