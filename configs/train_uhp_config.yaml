@@ -55,10 +55,12 @@ training:
   batch_size: 32
   val_batch_size: 16
   ema_decay: 0.999 # Decay rate for the Exponential Moving Average model.
+  check_val_every_n_epoch: 30
 
   # The metric to monitor for saving the best checkpoints.
   # 'val/loss_action_raw' is the primary indicator of policy performance.
   checkpoint_monitor: "val/loss_action_raw"
+  backup_every_n_epochs: 8
   save_top_k: 3 # Save the top 3 best models.
 
   # Path to a checkpoint to resume training from. `null` for a fresh run.
@@ -96,7 +98,7 @@ scheduler:
 validation:
   # Frequency for the "slow path" validation (qualitative logging).
   # Runs every N epochs to avoid slowing down training too much.
-  run_qualitative_every_n_epoch: 5
+  run_qualitative_every_n_epoch: 60
 
 # ==============================================================================
 # Logging Configuration

@@ -504,7 +504,60 @@ class UHPLightningModule(pl.LightningModule):
             "lr_scheduler": { "scheduler": scheduler, "interval": "step" }
         }
     
+    def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int) -> None:
+        """
+        SOTA Hook for Failsafe Backups.
 
+        This hook is called after every training batch. We use it to manually
+        save a separate, independent backup checkpoint on the very last batch
+        of a designated epoch. This is more robust than `on_train_epoch_end`.
+        """
+        # Run only on the main process in a distributed setup.
+        if not self.trainer.is_global_zero:
+            return
+
+        # Check if this is the last batch of the current training epoch.
+        is_last_batch = (batch_idx + 1) == self.trainer.num_training_batches
+        if not is_last_batch:
+            return
+
+        # Check if a backup is scheduled for this epoch.
+        epoch = self.trainer.current_epoch
+        backup_freq = self.cfg.training.get("backup_every_n_epochs", 0)
+        if backup_freq <= 0 or (epoch + 1) % backup_freq != 0:
+            return
+        
+        # If all conditions are met, perform the failsafe backup.
+        logger.info(
+            f"End of epoch {epoch}: Triggering periodic failsafe backup..."
+        )
+        
+        # Determine the backup directory from the config.
+        # Default to a 'backups' folder inside the main Hydra output directory.
+        output_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
+        backup_dir = output_dir / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        
+        backup_path = backup_dir / f"backup_epoch_{epoch}.ckpt"
+        
+        try:
+            # Save the new checkpoint.
+            self.trainer.save_checkpoint(backup_path)
+            
+            # SOTA Refinement: To save disk space, delete the *previous* backup
+            # after the new one is successfully saved. We find the previous one
+            # by looking for a backup from `epoch - backup_freq`.
+            prev_backup_epoch = epoch - backup_freq
+            if prev_backup_epoch >= 0:
+                prev_backup_path = backup_dir / f"backup_epoch_{prev_backup_epoch}.ckpt"
+                if prev_backup_path.exists():
+                    prev_backup_path.unlink()
+                    logger.info(f"Deleted previous failsafe backup: {prev_backup_path}")
+
+            logger.info(f"Failsafe backup for epoch {epoch} saved successfully to {backup_path}.")
+
+        except Exception as e:
+            logger.error(f"Failed to save per-epoch failsafe backup: {e}", exc_info=True)
 
 
 
