@@ -1,0 +1,9 @@
+[2025-11-04 22:27:38,595][__main__][INFO] - --- ViP-C Hierarchical Visual Evaluation ---
+[2025-11-04 22:27:38,596][__main__][INFO] - Full evaluation config:
+checkpoint_path: /notes/checkpoints/backup_epoch_31.ckpt
+output_video: vip_c_evaluation.mp4
+seed: 42
+num_episodes: 1
+inference_steps: 20
+
+[2025-11-04 22:27:38,601][__main__][INFO] - Loading Lightning checkpoint from: /notes/checkpoints/backup_epoch_31.ckpt

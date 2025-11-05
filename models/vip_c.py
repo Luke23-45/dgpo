@@ -142,7 +142,7 @@ class Planner(nn.Module):
             # State: [B, 128, 56, 56]
             nn.Conv2d(128, 1, kernel_size=1),
             # Output: [B, 1, 56, 56]
-            nn.Sigmoid() # Ensure output is in [0, 1] range
+            # nn.Sigmoid() # Ensure output is in [0, 1] range
         )
 
     def forward(self,
@@ -444,6 +444,9 @@ class ViPC(nn.Module):
             "predicted_noise": predicted_noise
         }
 
+# In FILE: models/vip_c.py
+# In CLASS: ViPC
+
     @torch.no_grad()
     def plan(self,
              current_image: torch.Tensor,
@@ -451,14 +454,19 @@ class ViPC(nn.Module):
              task_phase: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Inference-only method to run the Planner and extract the subgoals.
-        Returns: predicted_heatmap, predicted_implicit_subgoal, predicted_subgoal_coord
+        Returns: sigmoid_activated_heatmap, predicted_implicit_subgoal, predicted_subgoal_coord
         """
         self.eval()
         
-        # --- [MODIFY THIS] ---
-        predicted_heatmap, predicted_implicit_subgoal = self.planner(current_image, goal_image, task_phase)
-        predicted_subgoal_coord = self.soft_argmax_2d(predicted_heatmap)
-        return predicted_heatmap, predicted_implicit_subgoal, predicted_subgoal_coord
+        predicted_heatmap_logits, predicted_implicit_subgoal = self.planner(current_image, goal_image, task_phase)
+        
+        # --- START OF THE DEFINITIVE FIX ---
+        # Apply sigmoid to convert logits to probabilities for soft_argmax and visualization.
+        sigmoid_heatmap = torch.sigmoid(predicted_heatmap_logits)
+        predicted_subgoal_coord = self.soft_argmax_2d(sigmoid_heatmap)
+        
+        return sigmoid_heatmap, predicted_implicit_subgoal, predicted_subgoal_coord
+        # --- [END OF DEFINITIVE FIX] ---
 
 
 

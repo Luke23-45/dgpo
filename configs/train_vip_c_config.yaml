@@ -40,7 +40,7 @@ model:
 # ===================================================================
 scheduler:
   timesteps: 100
-  beta_schedule: "squaredcos_cap_v2" # A modern, stable schedule
+  beta_schedule: "squaredcos_cap_v2"
   beta_start: 0.0001
   beta_end: 0.02
 
@@ -49,11 +49,11 @@ scheduler:
 # ===================================================================
 dataset:
   # train_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
-  train_path: "/content/drive/MyDrive/pda/data/validation/validation_dataset.lmdb"
+  train_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
   val_path: "/content/drive/MyDrive/pda/data/validation/validation_dataset.lmdb"
   # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb"
   # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb"
-  num_workers: 2
+  num_workers: 1
 
 env:
   # --- DEFINITIVE FIX ---
@@ -71,14 +71,14 @@ resilience:
   backup_dir: "/content/drive/MyDrive/pda/models/v1" # Or your local path
   
   # Save a backup every N epochs.
-  backup_every_n_epochs: 8
+  backup_every_n_epochs: 1
 
 # ===================================================================
 # 5. CORE TRAINING LOOP CONFIGURATION (`training`)
 # ===================================================================
 training:
-  batch_size: 32
-  val_batch_size: 32
+  batch_size: 16
+  val_batch_size: 16
   ema_decay: 0.999
   
   # The crucial weights for the dual-objective loss
@@ -93,7 +93,7 @@ training:
   # Path to a .ckpt file to resume from (e.g., "outputs/.../checkpoints/last.ckpt")
   # Set to null for a fresh run.
   # resume_from_checkpoint: "/content/drive/MyDrive/pda/Models/backup_epoch_0.ckpt"
-  resume_from_checkpoint: null
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/Models/backup_epoch_31.ckpt"
 
   # SWA configuration
   use_swa: false
@@ -104,7 +104,7 @@ training:
 # ===================================================================
 validation:
   # Run the expensive qualitative image logging every N epochs
-  run_qualitative_every_n_epoch: 30
+  run_qualitative_every_n_epoch: 90
 
 # ===================================================================
 # 7. OPTIMIZER CONFIGURATION (`optimizer`)
@@ -130,7 +130,7 @@ trainer:
   
   # Accumulate gradients to simulate a larger batch size
   # Effective batch size = batch_size * accumulate_grad_batches
-  accumulate_grad_batches: 2
+  accumulate_grad_batches: 4
   
   # Gradient clipping for stability
   gradient_clip_val: 1.0

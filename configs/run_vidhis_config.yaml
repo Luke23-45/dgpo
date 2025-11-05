@@ -11,7 +11,7 @@ hydra:
 # REQUIRED: Update these paths to your trained models
 planner_ckpt_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_7.ckpt"
 
-controller_ckpt_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/outputs/diffusion_pretrain_controller/v1/2025-10-31/02-17-03/checkpoints/backup/backup_epoch_3.pth"
+controller_ckpt_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/outputs/diffusion_pretrain_controller/v1/2025-10-31/19-27-34/checkpoints/backup/backup_epoch_4.pth"
 
 
 dataset:

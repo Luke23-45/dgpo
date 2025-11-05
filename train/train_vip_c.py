@@ -157,8 +157,6 @@ class ViPCDataModule(pl.LightningDataModule):
 
 
 
-# --- II. Component Deep Dive: The ViPCLightningModule (The Training Engine) ---
-
 class ViPCLightningModule(pl.LightningModule):
     """
     The Definitive, SOTA Training Engine for the ViP-C Framework.
@@ -319,7 +317,7 @@ class ViPCLightningModule(pl.LightningModule):
         predictions = self.model(batch)
 
         # --- 4. Compute and Log Losses ---
-        raw_loss_planner = F.binary_cross_entropy(
+        raw_loss_planner = F.binary_cross_entropy_with_logits(
             predictions['predicted_heatmap'],
             batch['ground_truth_subgoal_heatmap']
         )
@@ -379,7 +377,7 @@ class ViPCLightningModule(pl.LightningModule):
             # Use the EMA-averaged model for all validation
             predictions = self.ema.ema_model(batch)
 
-        raw_loss_planner = F.binary_cross_entropy(
+        raw_loss_planner = F.binary_cross_entropy_with_logits(
             predictions['predicted_heatmap'],
             batch['ground_truth_subgoal_heatmap']
         )
@@ -402,7 +400,7 @@ class ViPCLightningModule(pl.LightningModule):
         try:
             with torch.no_grad():
                 # Run the Planner in inference mode on the validation data
-                predicted_heatmap, _, _ = self.ema.ema_model.plan(
+                predicted_heatmap_display, _, _ = self.ema.ema_model.plan(
                     current_image=batch['planner_current_image'],
                     goal_image=batch['planner_goal_image'],
                     task_phase=batch['planner_task_phase']
@@ -411,7 +409,7 @@ class ViPCLightningModule(pl.LightningModule):
             # Select the first item in the batch for visualization
             img = batch['planner_current_image'][0].cpu().numpy()
             gt_h = batch['ground_truth_subgoal_heatmap'][0].cpu().numpy()
-            pred_h = predicted_heatmap[0].cpu().numpy()
+            pred_h = predicted_heatmap_display[0].cpu().numpy()
             
             # Un-normalize image for visualization
             mean = np.array([0.485, 0.456, 0.406])

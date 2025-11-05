@@ -73,3 +73,31 @@ logging:
 [2025-11-04 20:20:13,675][train_vip_c][INFO] - W&B mode set to: 'offline'
 [2025-11-04 20:20:13,684][models.vip_c][INFO] - Initializing the ViPC Orchestrator...
 [2025-11-04 20:20:13,684][models.vip_c][INFO] - Initializing Planner with backbone: google/siglip-base-patch16-224
+[2025-11-04 20:20:14,627][models.vip_c][INFO] - Initializing Controller with hidden_dim: 512
+[2025-11-04 20:20:15,305][models.vip_c][INFO] - ViPC Orchestrator initialized successfully.
+[2025-11-04 20:20:15,644][train_vip_c][INFO] - ViPCLightningModule initialized successfully.
+[2025-11-04 20:20:15,651][train_vip_c][INFO] - TensorBoard logs will be saved to: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\2025-11-04\20-20-13/tb_logs
+[2025-11-04 20:20:16,511][train_vip_c][INFO] - W&B logging enabled for project 'vip_c_training'.
+[2025-11-04 20:20:16,512][train_vip_c][INFO] - ModelCheckpoint enabled. Monitoring 'val/loss_planner_raw'.
+[2025-11-04 20:20:16,545][train_vip_c][INFO] - Starting trainer.fit()...
+[2025-11-04 20:20:16,563][train_vip_c][INFO] - Setting up ViPCDataModule for stage: fit
+[2025-11-04 20:20:16,564][train_vip_c][INFO] - Fresh run detected. Computing normalization stats...
+[2025-11-04 20:20:16,564][utils.vip_c_dataset][INFO] - Initializing ViPCDataset (SOTA Orchestrator) with H_o=2, H_a=8
+[2025-11-04 20:20:16,565][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validation\validation_dataset_index.json...
+[2025-11-04 20:20:16,567][utils.expert_dataset][INFO] - Loaded 10 episodes, 2580 total valid chunks (Virtually Indexed).
+[2025-11-04 20:20:16,571][lmdb_utils][INFO] -  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validation\validation_dataset.lmdb | mode=RO | file-mode
+[2025-11-04 20:20:53,266][models.vip_c][INFO] - Normalizer fitted. Min shape: (8,), Max shape: (8,)
+[2025-11-04 20:20:53,268][models.vip_c][INFO] - Normalizer fitted. Min shape: (22,), Max shape: (22,)
+[2025-11-04 20:20:53,269][train_vip_c][INFO] - Normalization stats computed and fitted.
+[2025-11-04 20:20:53,269][train_vip_c][INFO] - Creating final datasets for training and validation...
+[2025-11-04 20:20:53,270][utils.vip_c_dataset][INFO] - Initializing ViPCDataset (SOTA Orchestrator) with H_o=2, H_a=8
+[2025-11-04 20:20:53,270][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validation\validation_dataset_index.json...
+[2025-11-04 20:20:53,271][utils.expert_dataset][INFO] - Loaded 10 episodes, 2580 total valid chunks (Virtually Indexed).
+[2025-11-04 20:20:53,272][utils.vip_c_dataset][INFO] - Initializing ViPCDataset (SOTA Orchestrator) with H_o=2, H_a=8
+[2025-11-04 20:20:53,273][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validation\validation_dataset_index.json...
+[2025-11-04 20:20:53,274][utils.expert_dataset][INFO] - Loaded 10 episodes, 2580 total valid chunks (Virtually Indexed).
+[2025-11-04 20:20:53,277][train_vip_c][INFO] - Fitted normalizers have been linked from DataModule to LightningModule.
+[2025-11-04 20:20:53,286][train_vip_c][INFO] - Dynamically extracting kinematic limits from the environment...
+[2025-11-04 20:20:55,838][train_vip_c][INFO] - Kinematic limits successfully extracted and stored.
+[2025-11-04 20:20:55,857][train_vip_c][INFO] - Configuring optimizer for all model parameters.
+[2025-11-04 20:54:42,670][train_vip_c][INFO] - W&B run finalized.
