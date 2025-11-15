@@ -167,7 +167,41 @@ def _enhance_one_episode(
     all_ee_poses = get_modality_with_hashable_args("ee_pose_world")
 
     task_phases = np.array([EXPERT_STATE_TO_TASK_PHASE.get(state, -1) for state in all_expert_states], dtype=np.int32)
+    phase_goal_image_indices = np.zeros_like(task_phases, dtype=np.int32)
 
+    # 1. Find the first index where each new phase begins.
+    # We add a large number at the end to handle the final phase gracefully.
+    phase_changes = np.concatenate([np.diff(task_phases), [999]])
+    
+    # Find the start index of each phase (0 through 4).
+    try:
+        start_of_phase_1 = np.where(phase_changes > 0)[0][0] + 1
+        start_of_phase_2 = np.where(phase_changes > 0)[0][1] + 1
+        start_of_phase_3 = np.where(phase_changes > 0)[0][2] + 1
+        start_of_phase_4 = np.where(phase_changes > 0)[0][3] + 1
+    except IndexError:
+        logger.warning(f"Episode {episode_idx}: Incomplete phase transitions found. Failsafe will use last frame.")
+        # If an episode is too short or fails early, it might not have all phases.
+        # We handle this by setting missing start indices to the end of the episode.
+        last_frame_idx = ep_len - 1
+        start_of_phase_1 = locals().get('start_of_phase_1', last_frame_idx)
+        start_of_phase_2 = locals().get('start_of_phase_2', last_frame_idx)
+        start_of_phase_3 = locals().get('start_of_phase_3', last_frame_idx)
+        start_of_phase_4 = locals().get('start_of_phase_4', last_frame_idx)
+
+    final_goal_idx = ep_len - 1
+
+    # 2. Assign the goal index for each timestep based on its phase.
+    # The goal of a phase is the image of the first frame of the *next* phase.
+    phase_goal_image_indices[task_phases == 0] = start_of_phase_1
+    phase_goal_image_indices[task_phases == 1] = start_of_phase_2
+    phase_goal_image_indices[task_phases == 2] = start_of_phase_3
+    phase_goal_image_indices[task_phases == 3] = start_of_phase_4
+    # The goal for the final phase is the last frame of the episode.
+    phase_goal_image_indices[task_phases == 4] = final_goal_idx
+
+    # For any timesteps with an invalid phase (-1), also use the last frame.
+    phase_goal_image_indices[task_phases == -1] = final_goal_idx
     # SOTA: Pre-compute keyframe indices.
     keyframe_indices = {
         1: np.where(task_phases == 1)[0],
@@ -236,6 +270,7 @@ def _enhance_one_episode(
     new_modalities = {
         "task_phases": task_phases,
         "subgoal_heatmaps_compressed": compressed_heatmaps,
+        "phase_goal_image_indices": phase_goal_image_indices,
     }
     return episode_idx, new_modalities
 
@@ -265,7 +300,7 @@ def main(args):
 
     worker_args = [{"episode_idx": i, "source_db_path": str(dest_path), "heatmap_config": {"height": 56, "width": 56, "sigma": args.sigma}} for i in range(num_episodes)]
 
-    dest_env = lmdb.open(str(dest_path), map_size=int(7.8 * 1024**3), subdir=False, readonly=False, lock=True)
+    dest_env = lmdb.open(str(dest_path), map_size=int(2 * 1024**3), subdir=False, readonly=False, lock=True)
 
     try:
         if args.num_workers > 0:
@@ -277,7 +312,8 @@ def main(args):
                         with dest_env.begin(write=True) as txn:
                             ep_prefix = f"ep_{ep_idx:06d}"
                             txn.put(f"{ep_prefix}_task_phases".encode('ascii'), new_modalities["task_phases"].tobytes())
-                            txn.put(f"{ep_prefix}_subgoal_heatmaps".encode('ascii'), pickle.dumps(new_modalities["subgoal_heatmaps_compressed"]))
+                            txn.put(f"{ep_prefix}_subgoal_heatmaps".encode('ascii'), pickle.dumps(new_modalities["subgoal_heatmaps_compressed"])),
+                            txn.put(f"{ep_prefix}_phase_goal_image_indices".encode('ascii'), new_modalities["phase_goal_image_indices"].tobytes())
                         pbar.update(1)
                     else:
                         logger.warning(f"Skipped failed episode {ep_idx}.")
@@ -290,12 +326,20 @@ def main(args):
                         ep_prefix = f"ep_{ep_idx:06d}"
                         txn.put(f"{ep_prefix}_task_phases".encode('ascii'), new_modalities["task_phases"].tobytes())
                         txn.put(f"{ep_prefix}_subgoal_heatmaps".encode('ascii'), pickle.dumps(new_modalities["subgoal_heatmaps_compressed"]))
+                        txn.put(f"{ep_prefix}_phase_goal_image_indices".encode('ascii'), new_modalities["phase_goal_image_indices"].tobytes())                  
 
         logger.info("Updating index...")
         for i in range(num_episodes):
             ep_prefix = f"ep_{i:06d}"
-            index_data["episodes"][i]["modalities"]["task_phases"] = {"key": f"{ep_prefix}_task_phases", "compression": "raw", "dtype": "int32", "shape": [index_data["episodes"][i]["length"]]}
-            index_data["episodes"][i]["modalities"]["subgoal_heatmaps"] = {"key": f"{ep_prefix}_subgoal_heatmaps", "compression": "png", "dtype": "uint8", "shape": [index_data["episodes"][i]["length"], 56, 56, 1]}
+            ep_len = index_data["episodes"][i]["length"]
+            modalities = index_data["episodes"][i]["modalities"]
+
+            modalities["task_phases"] = {"key": f"{ep_prefix}_task_phases", "compression": "raw", "dtype": "int32", "shape": [ep_len]}
+            modalities["subgoal_heatmaps"] = {"key": f"{ep_prefix}_subgoal_heatmaps", "compression": "png", "dtype": "uint8", "shape": [ep_len, 56, 56, 1]}
+            # Add the metadata for our new modality to the index JSON file.
+            modalities["phase_goal_image_indices"] = {
+                "key": f"{ep_prefix}_phase_goal_image_indices", "compression": "raw", "dtype": "int32", "shape": [ep_len]
+            }
 
         with open(dest_index_path, "w") as f:
             json.dump(index_data, f, indent=2)

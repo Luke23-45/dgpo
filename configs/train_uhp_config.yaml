@@ -55,7 +55,7 @@ training:
   batch_size: 32
   val_batch_size: 16
   ema_decay: 0.999 # Decay rate for the Exponential Moving Average model.
-  check_val_every_n_epoch: 30
+
 
   # The metric to monitor for saving the best checkpoints.
   # 'val/loss_action_raw' is the primary indicator of policy performance.
@@ -124,6 +124,7 @@ logging:
 trainer:
   accelerator: "auto"
   devices: "auto"
+  check_val_every_n_epoch: 30
   max_epochs: 500
   # Use 16-bit mixed precision for faster training and lower memory usage.
   precision: "16-mixed"

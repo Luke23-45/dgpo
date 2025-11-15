@@ -1,0 +1,21 @@
+[2025-11-15 01:32:02,700][__main__][INFO] - --- UHP v2.0 Hierarchical Visual Evaluation ---
+[2025-11-15 01:32:02,702][__main__][INFO] - Full evaluation config:
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_31.ckpt
+output_video: evaluation_uhp.mp4
+seed: 43
+num_episodes: 1
+inference:
+  inference_steps: 20
+
+[2025-11-15 01:32:02,709][__main__][INFO] - Loading Lightning checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_31.ckpt
+[2025-11-15 01:32:03,975][models.uhp][INFO] - Initializing the UHP Orchestrator...
+[2025-11-15 01:32:03,976][models.uhp][INFO] - Initializing Sequencer with backbone: google/siglip-base-patch16-224
+[2025-11-15 01:32:05,038][models.uhp][INFO] - Determined vision model hidden dimension: 768
+[2025-11-15 01:32:05,146][models.uhp][INFO] - Initializing Executor with hidden_dim: 512
+[2025-11-15 01:32:05,820][models.uhp][INFO] - UHP Orchestrator initialized successfully.
+[2025-11-15 01:32:06,143][train.train_uhp][INFO] - UHPLightningModule initialized successfully.
+[2025-11-15 01:32:06,255][train.train_uhp][INFO] - Successfully loaded EMA weights from checkpoint.
+[2025-11-15 01:32:06,256][train.train_uhp][INFO] - Successfully loaded normalizers from checkpoint into LightningModule.
+[2025-11-15 01:32:06,256][train.train_uhp][INFO] - Successfully loaded kinematic limits from checkpoint.
+[2025-11-15 01:32:06,655][__main__][INFO] - EMA weights successfully applied for inference.
+[2025-11-15 01:32:06,659][__main__][INFO] - LightningModule loaded successfully and set to eval mode.

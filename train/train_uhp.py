@@ -356,23 +356,15 @@ class UHPLightningModule(pl.LightningModule):
 
         # --- Compute and Log Hybrid Losses ---
         raw_loss_action = F.mse_loss(predictions['predicted_noise'], noise)
-        raw_loss_heatmap = F.binary_cross_entropy_with_logits(
-            predictions['predicted_heatmap_logits'],
-            batch['ground_truth_subgoal_heatmap']
-        )
 
-        # Apply configured weights
-        lambda_heatmap = self.cfg.training.loss_weights.lambda_heatmap
-        weighted_loss_heatmap = lambda_heatmap * raw_loss_heatmap
+
         
-        combined_loss = raw_loss_action + weighted_loss_heatmap
+        combined_loss = raw_loss_action 
 
         # Extensive diagnostic logging for deep analysis.
         self.log_dict({
             'train/loss_combined': combined_loss,
-            'train/loss_action_raw': raw_loss_action,
-            'train/loss_heatmap_raw': raw_loss_heatmap,
-            'train/loss_heatmap_weighted': weighted_loss_heatmap,
+            'train/loss_action_raw': raw_loss_action
         }, on_step=True, on_epoch=True, prog_bar=True)
 
         return combined_loss
@@ -402,13 +394,10 @@ class UHPLightningModule(pl.LightningModule):
             predictions = self.ema.ema_model(batch)
             
             val_loss_action = F.mse_loss(predictions['predicted_noise'], noise)
-            val_loss_heatmap = F.binary_cross_entropy_with_logits(
-                predictions['predicted_heatmap_logits'], batch['ground_truth_subgoal_heatmap']
-            )
+
 
         self.log_dict({
             'val/loss_action_raw': val_loss_action,
-            'val/loss_heatmap_raw': val_loss_heatmap,
         }, on_step=False, on_epoch=True, sync_dist=True)
 
         # --- Slow Path: Qualitative Visual Validation (runs periodically) ---
@@ -420,7 +409,7 @@ class UHPLightningModule(pl.LightningModule):
             logger.info(f"Epoch {self.trainer.current_epoch}: Running full validation.")
             
             # 1. Plan using the EMA model to get the subgoal embedding.
-            subgoal_embedding, pred_heatmap_viz = self.ema.ema_model.plan(
+            subgoal_embedding = self.ema.ema_model.plan(
                 current_image=batch['planner_current_image'],
                 goal_image=batch['planner_goal_image'],
                 task_phase=batch['planner_task_phase']
@@ -442,44 +431,7 @@ class UHPLightningModule(pl.LightningModule):
             action_mse = F.mse_loss(predicted_actions, gt_actions)
             self.log('val/action_mse', action_mse, on_epoch=True, sync_dist=True)
 
-            # 4. Log the qualitative heatmap visualization.
-            self._log_qualitative_validation(batch, pred_heatmap_viz)
 
-    # In UHPLightningModule:
-
-    def _log_qualitative_validation(self, batch: Dict[str, Any], pred_heatmap_viz: torch.Tensor):
-        """Helper function to generate and log diagnostic images."""
-        try:
-
-
-            # The logic now begins directly with selecting the items for visualization.
-            img = batch['planner_current_image'][0].cpu().numpy()
-            gt_h = batch['ground_truth_subgoal_heatmap'][0].cpu().numpy()
-            pred_h = pred_heatmap_viz[0].cpu().numpy()
-            
-            # Un-normalize image for visualization
-            mean = np.array([0.485, 0.456, 0.406])
-            std = np.array([0.229, 0.224, 0.225])
-            img = (img.transpose(1, 2, 0) * std + mean).clip(0, 1)
-
-            # Create a composite image (reusing code from ViPC's logger)
-            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-            fig.suptitle(f"Sequencer Validation - Epoch {self.current_epoch}", fontsize=16)
-            axes[0].imshow(img); axes[0].set_title("Current Image"); axes[0].axis('off')
-            axes[1].imshow(img); axes[1].imshow(gt_h[0], cmap='jet', alpha=0.5); axes[1].set_title("Ground Truth Subgoal"); axes[1].axis('off')
-            axes[2].imshow(img); axes[2].imshow(pred_h[0], cmap='jet', alpha=0.5); axes[2].set_title("Predicted Subgoal"); axes[2].axis('off')
-            plt.tight_layout()
-
-            # Log to active loggers (W&B, TensorBoard, etc.)
-            self.logger.experiment.log({
-                "val/sequencer_visualization": wandb.Image(fig)
-            }, step=self.global_step)
-
-            plt.close(fig)
-            logger.info("Logged qualitative validation image to W&B.")
-
-        except Exception as e:
-            logger.error(f"Failed to log qualitative validation image: {e}", exc_info=True)
 
     def configure_optimizers(self):
         """Configures the AdamW optimizer and a cosine learning rate scheduler."""
@@ -521,7 +473,8 @@ class UHPLightningModule(pl.LightningModule):
         if not is_last_batch:
             return
 
-        # Check if a backup is scheduled for this epoch.
+        # --- THIS IS THE CRITICAL LOGIC THAT MUST MATCH THE CONFIG ---
+        # It reads the frequency from the `training` section of the config.
         epoch = self.trainer.current_epoch
         backup_freq = self.cfg.training.get("backup_every_n_epochs", 0)
         if backup_freq <= 0 or (epoch + 1) % backup_freq != 0:
@@ -532,24 +485,21 @@ class UHPLightningModule(pl.LightningModule):
             f"End of epoch {epoch}: Triggering periodic failsafe backup..."
         )
         
-        # Determine the backup directory from the config.
-        # Default to a 'backups' folder inside the main Hydra output directory.
-        output_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
-        backup_dir = output_dir / "backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        # Determine the backup directory from the main Hydra output directory.
+        # output_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
+        base_path = Path("/content/drive/MyDrive/pda/models/v1")
+        base_path.mkdir(parents=True, exist_ok=True) 
         
-        backup_path = backup_dir / f"backup_epoch_{epoch}.ckpt"
+        backup_path = base_path / f"backup_epoch_{epoch}.ckpt"
         
         try:
             # Save the new checkpoint.
             self.trainer.save_checkpoint(backup_path)
             
-            # SOTA Refinement: To save disk space, delete the *previous* backup
-            # after the new one is successfully saved. We find the previous one
-            # by looking for a backup from `epoch - backup_freq`.
+            # To save disk space, delete the previous backup.
             prev_backup_epoch = epoch - backup_freq
             if prev_backup_epoch >= 0:
-                prev_backup_path = backup_dir / f"backup_epoch_{prev_backup_epoch}.ckpt"
+                prev_backup_path = backup_path / f"backup_epoch_{prev_backup_epoch}.ckpt"
                 if prev_backup_path.exists():
                     prev_backup_path.unlink()
                     logger.info(f"Deleted previous failsafe backup: {prev_backup_path}")
@@ -616,15 +566,25 @@ def main(cfg: DictConfig) -> None:
     callbacks = []
 
     # ModelCheckpoint: Saves the best models and the last model for resumption.
+    callbacks = []
+
+    # ModelCheckpoint: Saves the best models and the last model for resumption.
+    # --- [START OF DEFINITIVE PATCH 2] ---
+    # REMOVE the `every_n_epochs` argument. The Trainer's `check_val_every_n_epoch`
+    # implicitly controls when this callback is triggered. This makes the Trainer
+    # the single source of truth for scheduling.
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_dir / "checkpoints",
         filename="best-epoch={epoch}-loss_act={val/loss_action_raw:.4f}",
         monitor=cfg.training.checkpoint_monitor,
         mode="min",
         save_top_k=cfg.training.save_top_k,
-        save_last=True,  # Critical for easy resumption.
+        save_last=True,
     )
+    # --- [END OF DEFINITIVE PATCH 2] ---
     callbacks.append(checkpoint_callback)
+
+
     logger.info(f"ModelCheckpoint enabled. Monitoring '{cfg.training.checkpoint_monitor}'.")
 
     # LearningRateMonitor: Logs the learning rate at each step.

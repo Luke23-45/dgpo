@@ -1,38 +1,33 @@
 #!/usr/bin/env python3
 
 """
-ViP-C (Visual Planner-Controller) SOTA Evaluation Script
+UHP (Unified Hierarchical Policy) v2.0 SOTA Evaluation Script
 
 This script provides a comprehensive, diagnostic-rich evaluation for the
-hierarchical ViP-C policy. It loads a trained model, its normalizers, and
+advanced UHP v2.0 architecture. It loads a trained model, its normalizers, and
 kinematic limits from a checkpoint and executes the policy in the PandaEnv,
 recording a video with rich visual overlays.
 
 Key SOTA Features:
 1.  **Hierarchical Control Loop:** Correctly implements the "Plan -> Act -> Re-plan"
-    dialogue. The high-level Planner is called only when the task phase changes,
-    and the low-level Controller executes the received subgoal.
-2.  **Full State Restoration:** Robustly loads the complete training state,
-    including the model (EMA weights), action/proprio normalizers, and
-    kinematic limits directly from the PyTorch Lightning checkpoint.
+    dialogue. The high-level Sequencer is called when the task phase changes
+    to produce a dense `subgoal_embedding`.
+2.  **Full State Restoration:** Robustly loads the complete training state by
+    restoring the entire UHPLightningModule, including the model (EMA weights),
+    action/proprio normalizers, and kinematic limits.
 3.  **Correct "Norm-to-Raw" Workflow:** Implements the full, symmetrical data
-    flow required for inference:
-    - Raw proprioception from the env is *normalized* before being passed to the model.
-    - Normalized actions from the model are *un-normalized* and *clamped* before
-      being sent to the environment.
-4.  **Ground-Truth State Determination:** Programmatically determines the current
-    `TaskPhase` at each step using ground-truth information from the environment,
-    perfectly mirroring the data labeling logic.
-5.  **Diagnostic Visualization:** Overlays the Planner's predicted subgoal
+    flow required for inference: raw env data is normalized for the model, and
+    normalized model outputs are un-normalized and clamped for the env.
+4.  **Oracle Task Phase:** Programmatically determines the current `TaskPhase` at
+    each step using ground-truth state, mirroring the data labeling logic and
+    providing a perfect signal to the Sequencer.
+5.  **Diagnostic Visualization:** Overlays the Sequencer's predicted subgoal
     heatmap directly onto the recorded video, providing invaluable insight into
-    the model's high-level decision-making process in real-time.
+    the model's high-level spatial reasoning in real-time.
 
 Usage:
-    python evaluate_vip_c.py \
-        checkpoint_path=/path/to/your/vip_c.ckpt \
-        output_video=vip_c_evaluation.mp4
-
-python -m s2 checkpoint_path=/notes/checkpoints/backup_epoch_31.ckpt output_video=vip_c_evaluation.mp4
+    python -m evaluate.evaluate_uhp checkpoint_path=/path/to/your/uhp.ckpt
+    
 """
 
 import logging
@@ -42,83 +37,55 @@ import cv2
 import hydra
 import numpy as np
 import torch
+import pytorch_lightning as pl
 import mujoco
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from typing import Dict
-import pytorch_lightning as pl
+import sys
+
+# --- Add Project Root to `sys.path` for Robust Imports ---
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
 # --- Import Project Modules ---
 from envs.panda_env import PandaEnv
-from train.train_uhp import UHPLightningModule
-from models.vip_c import ViPC, LinearNormalizer
-from train.train_vip_c import ViPCLightningModule
-from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from models.uhp import UHP_Orchestrator, LinearNormalizer
-from typing import List, Any
-import csv
+from train.train_uhp import UHPLightningModule
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(name)s] - %(message)s')
 log = logging.getLogger(__name__)
 
-# In FILE: evaluate_vip_c.py
-
-# --- [REPLACE THE ENTIRE get_goal_image FUNCTION WITH THIS] ---
 
 def get_goal_image(env: PandaEnv, obs: dict) -> np.ndarray:
     """
-    [DEFINITIVE, CORRECTED VERSION - COMPATIBLE WITH OUR PandaEnv]
-    Creates a 'goal_image' by saving the current state, moving the object
-    to the goal position, rendering, and then restoring the original state.
+    [SOTA, STATE-RESTORATION VERSION]
+    Creates a 'goal_image' by saving the current state, temporarily moving the
+    object to the goal position, rendering, and then perfectly restoring the
+    original state. This is the only robust way to generate a goal image.
     """
-    log.debug("Capturing goal image by temporarily moving object...")
-    
-    # 1. Save the current complete simulation state using our env's method
     original_mj_state = env.get_mj_state()
-
     try:
-        # 2. Get the goal position from the observation
         goal_pos_world = obs['goal_pos_world']
-        
-        # 3. Manually set the object's free joint to the goal position
         qpos_addr = env.model.jnt_qposadr[env.object_joint_id]
         env.data.qpos[qpos_addr:qpos_addr + 3] = goal_pos_world
         
-        # Set orientation if available
         if 'goal_orn_world' in obs:
              quat_xyzw = obs['goal_orn_world']
-             # Convert xyzw (SciPy) to wxyz (MuJoCo)
              quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
              env.data.qpos[qpos_addr + 3:qpos_addr + 7] = quat_wxyz
 
-        # 4. Propagate this change through the simulation state
         mujoco.mj_forward(env.model, env.data)
-        
-        # 5. Render the "goal" scene from the correct camera
         goal_img_np = env.render(camera_name="fixed_camera")
-        
-    except Exception as e:
-        log.error(f"Error manually setting goal pose: {e}", exc_info=True)
-        goal_img_np = obs['image_primary'] # Fallback to current image
     finally:
-        # 6. CRITICAL: Always restore the original simulation state
         env.set_mj_state(original_mj_state)
-            
-    log.debug("Goal image captured and state restored.")
     return goal_img_np
 
-def _prepare_for_csv(data: Any) -> List[float]:
-    """A robust helper to convert tensors, arrays, or scalars into a flat list of floats for CSV logging."""
-    if data is None:
-        return []
-    if isinstance(data, torch.Tensor):
-        data = data.detach().cpu().numpy()
-    if isinstance(data, np.ndarray):
-        return data.flatten().tolist()
-    if isinstance(data, (int, float)):
-        return [float(data)]
-    return []
 
 def load_lightning_module_from_checkpoint(
     checkpoint_path: str, device: torch.device
@@ -142,7 +109,6 @@ def load_lightning_module_from_checkpoint(
     lightning_model.eval()
     log.info("LightningModule loaded successfully and set to eval mode.")
     return lightning_model
-
 
 
 def get_current_task_phase(obs: Dict[str, np.ndarray], proximity_threshold: float = 0.08) -> int:
@@ -170,7 +136,6 @@ def get_current_task_phase(obs: Dict[str, np.ndarray], proximity_threshold: floa
             # Phase 2: Object is grasped and being transported to the goal.
             return 2
 
-# --- Main Evaluation Function ---
 
 @hydra.main(version_base=None, config_path="./configs", config_name="evaluate_uhp_config")
 def evaluate(cfg: DictConfig):
@@ -180,20 +145,20 @@ def evaluate(cfg: DictConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pl.seed_everything(cfg.seed, workers=True)
 
-    # --- 1. Load the "Single Source of Truth" ---
+    # --- 1. Load the "Single Source of Truth" Lightning Module ---
     lightning_module = load_lightning_module_from_checkpoint(cfg.checkpoint_path, device)
     model: UHP_Orchestrator = lightning_module.model
     
-    # --- 2. Unpack All Components ---
+    # --- 2. Unpack All Components from the Loaded Module ---
     action_normalizer = lightning_module.action_normalizer
     proprio_normalizer = lightning_module.proprio_normalizer
     joint_limits_low = lightning_module.joint_limits_low
     joint_limits_high = lightning_module.joint_limits_high
     noise_scheduler = lightning_module.noise_scheduler
+    
+    # Use config parameters from the *checkpoint* for maximum reproducibility.
     train_cfg = lightning_module.cfg
     obs_horizon = train_cfg.model.executor_cfg.obs_horizon
-    action_dim = train_cfg.model.executor_cfg.action_dim
-    action_horizon = train_cfg.model.executor_cfg.action_horizon
     
     env = PandaEnv(xml_path=train_cfg.env.xml_path, control_mode="delta")
     
@@ -206,45 +171,13 @@ def evaluate(cfg: DictConfig):
     transform_controller_primary = transforms.Compose([transforms.Resize((224, 224), antialias=True), transforms.ToTensor()])
     transform_controller_wrist = transforms.Compose([transforms.Resize((128, 128), antialias=True), transforms.ToTensor()])
     
-    # --- 4. Setup Video & CSV Recording ---
-    video_writer = None
-    if cfg.logging.enable_video:
-        video_path = Path(cfg.output_video)
-        video_path.parent.mkdir(parents=True, exist_ok=True)
-        frame_test = env.render()
-        H, W, _ = frame_test.shape
-        video_writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*'mp4v'), 30.0, (W, H))
-        log.info(f"Recording video to: {video_path}")
-
-    csv_file = None
-    csv_writer = None
-    if cfg.logging.enable_csv_logging:
-        csv_path = Path(cfg.logging.csv_output_path)
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        csv_file = open(csv_path, 'w', newline='')
-        csv_writer = csv.writer(csv_file)
-        
-            # --- SOTA PATCH: Dynamically generate the header ---
-        header = ['episode_idx', 'step', 'oracle_task_phase']
-        
-        # Explicitly label the 7 DoF for the end-effector pose.
-        ee_pos_labels = ['pos_x', 'pos_y', 'pos_z', 'quat_x', 'quat_y', 'quat_z', 'quat_w']
-        header += [f'gt_ee_{label}' for label in ee_pos_labels]
-        
-        header += ['gt_is_grasped']
-        header += [f'gt_object_pos_{ax}' for ax in ['x', 'y', 'z']] # Also make this one explicit
-        
-        header += ['planner_subgoal_emb_norm', 'planner_heatmap_max_val']
-
-        
-        header += [f'action_executed_{i}' for i in range(action_dim)]
-        for t in range(action_horizon):
-            header += [f'action_pred_h{t}_d{i}' for i in range(action_dim)]
-        # --- [END OF DEFINITIVE HEADER PATCH] ---
-        
-        csv_writer.writerow(header)
-        log.info(f"Logging diagnostic data to: {csv_path}")
-
+    # --- 4. Setup Video Recording ---
+    video_path = Path(cfg.output_video)
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    frame_test = env.render()
+    H, W, _ = frame_test.shape
+    video_writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*'mp4v'), 30.0, (W, H))
+    
     # --- 5. Run Hierarchical Evaluation Loop ---
     for ep_idx in tqdm(range(cfg.num_episodes), desc="Evaluating Episodes"):
         obs, _ = env.reset(seed=cfg.seed + ep_idx)
@@ -255,69 +188,70 @@ def evaluate(cfg: DictConfig):
         for _ in range(obs_horizon): obs_history.append(obs)
             
         current_phase = -1
-        subgoal_embedding = None
-        episode_csv_data = []
+        subgoal_embedding = None # Force re-planning on the first step.
+        heatmap = torch.zeros((1, 1, 56, 56), device=device)
 
         step_iterator = tqdm(range(env.max_episode_steps), desc=f"Episode {ep_idx+1}", leave=False)
         for step_count in step_iterator:
             
+            # --- 5a. Hierarchical Planning Step ("The Sequencer") ---
             new_phase = get_current_task_phase(obs)
             if new_phase != current_phase or subgoal_embedding is None:
+                log.info(f"Phase change at step {step_count}: {current_phase} -> {new_phase}. Re-planning...")
                 current_phase = new_phase
+                
                 current_image_tensor = transform_planner_img(Image.fromarray(obs['image_primary'])).to(device).unsqueeze(0)
                 task_phase_tensor = torch.tensor([current_phase], dtype=torch.long, device=device)
-                subgoal_embedding = model.plan(current_image_tensor, goal_image_tensor, task_phase_tensor)
+                
+                # The UHP `plan` method returns the command and the viz heatmap.
+                subgoal_embedding, heatmap = model.plan(
+                    current_image=current_image_tensor,
+                    goal_image=goal_image_tensor,
+                    task_phase=task_phase_tensor
+                )
             
-            # Prepare Executor inputs
+            # --- 5b. Prepare Executor Batch (Controller Inputs) ---
             proprio_hist = torch.from_numpy(np.stack([h['proprio'] for h in obs_history])).float().to(device)
             primary_hist = torch.stack([transform_controller_primary(Image.fromarray(h['image_primary'])) for h in obs_history]).to(device)
             wrist_hist = torch.stack([transform_controller_wrist(Image.fromarray(h['image_wrist'])) for h in obs_history]).to(device)
-            controller_obs_hist = {'image_primary': primary_hist.unsqueeze(0), 'image_wrist': wrist_hist.unsqueeze(0), 'proprio': proprio_hist.unsqueeze(0)}
             
+            controller_obs_hist = {
+                'image_primary': primary_hist.unsqueeze(0),
+                'image_wrist': wrist_hist.unsqueeze(0),
+                'proprio': proprio_hist.unsqueeze(0)
+            }
+            
+            # --- 5c. Get Action from Executor ("The Controller") ---
             action_chunk_raw = model.act(
-                controller_obs_hist, subgoal_embedding, noise_scheduler,
-                cfg.inference.inference_steps, action_normalizer, proprio_normalizer,
-                joint_limits_low, joint_limits_high
+                observation_history=controller_obs_hist,
+                subgoal_embedding=subgoal_embedding,
+                noise_scheduler=noise_scheduler,
+                num_inference_steps=cfg.inference.inference_steps,
+                action_normalizer=action_normalizer,
+                proprio_normalizer=proprio_normalizer,
+                joint_limits_low=joint_limits_low,
+                joint_limits_high=joint_limits_high
             )
             action = action_chunk_raw[0, 0, :].cpu().numpy()
             
-            # --- [SOTA PATCH: Data Logging] ---
-            if cfg.logging.enable_csv_logging:
-        
-                log_row = (
-                    _prepare_for_csv(ep_idx) +
-                    _prepare_for_csv(step_count) +
-                    _prepare_for_csv(current_phase) +
-                    _prepare_for_csv(obs['ee_pose_world']) +
-                    _prepare_for_csv(obs['is_grasped']) +
-                    _prepare_for_csv(obs['object_pos_world']) +
-                    _prepare_for_csv(torch.linalg.norm(subgoal_embedding)) + # uv
-                    _prepare_for_csv(action) +
-                    _prepare_for_csv(action_chunk_raw)
-                )
-                episode_csv_data.append(log_row)
-
+            # --- 5d. Step Environment & Record ---
             obs, reward, terminated, truncated, info = env.step(action)
             obs_history.append(obs)
             
-            if cfg.logging.enable_video:
-                frame_rgb = env.render()
-                video_writer.write(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
+            frame_rgb = env.render()
+            heatmap_resized = cv2.resize(heatmap[0, 0].cpu().numpy(), (W, H))
+            heatmap_colored = cv2.applyColorMap((heatmap_resized * 255).astype(np.uint8), cv2.COLORMAP_JET)
+            overlay_frame = cv2.addWeighted(frame_rgb, 0.6, heatmap_colored, 0.4, 0)
+            video_writer.write(cv2.cvtColor(overlay_frame, cv2.COLOR_RGB2BGR))
             
             if terminated or truncated:
                 log.info(f"Episode finished after {step_count + 1} steps.")
                 break
-        
-        # --- [SOTA PATCH: Buffered Write to CSV] ---
-        if cfg.logging.enable_csv_logging and csv_writer is not None:
-            csv_writer.writerows(episode_csv_data)
-            log.info(f"Wrote {len(episode_csv_data)} rows to CSV for episode {ep_idx}.")
 
     # --- 6. Cleanup ---
-    if video_writer is not None: video_writer.release()
-    if csv_file is not None: csv_file.close()
+    video_writer.release()
     env.close()
-    log.info("--- Evaluation Complete. ---")
+    log.info(f"--- Evaluation Complete. Video saved to: {video_path.resolve()} ---")
 
 if __name__ == "__main__":
     evaluate()

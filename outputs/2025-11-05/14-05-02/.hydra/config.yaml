@@ -1,0 +1,6 @@
+checkpoint_path: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\backup_epoch_31.ckpt
+output_video: evaluation_uhp.mp4
+seed: 43
+num_episodes: 1
+inference:
+  inference_steps: 20

@@ -1,0 +1,31 @@
+[2025-11-15 02:17:00,263][__main__][INFO] - --- UHP v2.0 Hierarchical Visual Evaluation ---
+[2025-11-15 02:17:00,264][__main__][INFO] - Full evaluation config:
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_31.ckpt
+output_video: evaluation_uhp.mp4
+seed: 43
+num_episodes: 1
+inference:
+  inference_steps: 20
+logging:
+  enable_video: true
+  video_output_path: evaluation_uhp.mp4
+  enable_csv_logging: true
+  csv_output_path: evaluation_diagnostics.csv
+
+[2025-11-15 02:17:00,278][__main__][INFO] - Loading Lightning checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_31.ckpt
+[2025-11-15 02:17:04,529][models.uhp][INFO] - Initializing the UHP Orchestrator...
+[2025-11-15 02:17:04,530][models.uhp][INFO] - Initializing Sequencer with backbone: google/siglip-base-patch16-224
+[2025-11-15 02:17:05,453][models.uhp][INFO] - Determined vision model hidden dimension: 768
+[2025-11-15 02:17:05,570][models.uhp][INFO] - Initializing Executor with hidden_dim: 512
+[2025-11-15 02:17:06,324][models.uhp][INFO] - UHP Orchestrator initialized successfully.
+[2025-11-15 02:17:08,160][train.train_uhp][INFO] - UHPLightningModule initialized successfully.
+[2025-11-15 02:17:08,257][train.train_uhp][INFO] - Successfully loaded EMA weights from checkpoint.
+[2025-11-15 02:17:08,257][train.train_uhp][INFO] - Successfully loaded normalizers from checkpoint into LightningModule.
+[2025-11-15 02:17:08,258][train.train_uhp][INFO] - Successfully loaded kinematic limits from checkpoint.
+[2025-11-15 02:17:08,653][__main__][INFO] - EMA weights successfully applied for inference.
+[2025-11-15 02:17:08,657][__main__][INFO] - LightningModule loaded successfully and set to eval mode.
+[2025-11-15 02:17:11,536][__main__][INFO] - Recording video to: evaluation_uhp.mp4
+[2025-11-15 02:17:11,537][__main__][INFO] - Logging diagnostic data to: evaluation_diagnostics.csv
+[2025-11-15 02:22:26,777][__main__][INFO] - Episode finished after 100 steps.
+[2025-11-15 02:22:26,794][__main__][INFO] - Wrote 100 rows to CSV for episode 0.
+[2025-11-15 02:22:26,896][__main__][INFO] - --- Evaluation Complete. ---

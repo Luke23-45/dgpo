@@ -312,22 +312,6 @@ class Sequencer(nn.Module):
             nn.Linear(self.vision_dim // 2, subgoal_dim)
         )
 
-        # 2.4.2. Auxiliary Head (produces a heatmap for training supervision)
-        self.heatmap_head = nn.Sequential(
-            # Input: [B, vision_dim, 14, 14]
-            nn.ConvTranspose2d(self.vision_dim, 256, kernel_size=2, stride=2),
-            nn.GELU(),
-            # SOTA PATCH: Replace LayerNorm with GroupNorm for better stability in a
-            # convolutional architecture. 32 groups is a strong, standard default.
-            nn.GroupNorm(num_groups=32, num_channels=256),
-            # State: [B, 256, 28, 28]
-            nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2),
-            nn.GELU(),
-            nn.GroupNorm(num_groups=32, num_channels=128),
-            # State: [B, 128, 56, 56]
-            nn.Conv2d(128, 1, kernel_size=1)
-            # Output: [B, 1, 56, 56] (logits)
-        )
 
 
 
@@ -335,7 +319,7 @@ class Sequencer(nn.Module):
                 current_image: torch.Tensor,
                 goal_image: torch.Tensor,
                 task_phase: torch.Tensor
-                ) -> Tuple[torch.Tensor, torch.Tensor]:
+                ) -> torch.Tensor:
         """
         Performs the full, end-to-end planning pass.
 
@@ -347,7 +331,6 @@ class Sequencer(nn.Module):
         Returns:
             A tuple containing:
             - subgoal_embedding (torch.Tensor): The dense command vector [B, D_subgoal].
-            - predicted_heatmap_logits (torch.Tensor): The spatial heatmap logits [B, 1, 56, 56].
         """
         B = current_image.shape[0]
         device = current_image.device
@@ -389,12 +372,7 @@ class Sequencer(nn.Module):
         cls_token_output = fused_sequence[:, 0, :]
         subgoal_embedding = self.subgoal_head(cls_token_output)
 
-        # 4.2. Auxiliary Path: Generate the `predicted_heatmap`.
-        contextualized_patch_tokens = fused_sequence[:, 1:197, :]
-        patch_grid = contextualized_patch_tokens.permute(0, 2, 1).reshape(B, self.vision_dim, 14, 14)
-        predicted_heatmap_logits = self.heatmap_head(patch_grid)
-
-        return subgoal_embedding, predicted_heatmap_logits
+        return subgoal_embedding
     
 
 class Executor(nn.Module):
@@ -425,6 +403,7 @@ class Executor(nn.Module):
         logger.info(f"Initializing Executor with hidden_dim: {pilot_hidden_dim}")
         self.action_horizon = action_horizon
         self.obs_horizon = obs_horizon
+        self.action_dim = action_dim
 
         # --- 3.1. Tactical Observation Encoders ---
         self.primary_obs_encoder = ResNetEncoder(out_features=resnet_feature_dim)
@@ -572,7 +551,7 @@ class UHP_Orchestrator(nn.Module):
                                      required for the hybrid loss calculation.
         """
         # --- 1. Sequencer Forward Pass (High-Level Planning) ---
-        subgoal_embedding, predicted_heatmap_logits = self.sequencer(
+        subgoal_embedding = self.sequencer(
             current_image=batch['planner_current_image'],
             goal_image=batch['planner_goal_image'],
             task_phase=batch['planner_task_phase']
@@ -590,8 +569,7 @@ class UHP_Orchestrator(nn.Module):
 
         # --- 3. Return All Predictions for Loss Calculation ---
         return {
-            "predicted_noise": predicted_noise,
-            "predicted_heatmap_logits": predicted_heatmap_logits
+            "predicted_noise": predicted_noise
         }
 
     @torch.no_grad()
@@ -599,7 +577,7 @@ class UHP_Orchestrator(nn.Module):
              current_image: torch.Tensor,
              goal_image: torch.Tensor,
              task_phase: torch.Tensor
-             ) -> Tuple[torch.Tensor, torch.Tensor]:
+             ) -> torch.Tensor:
         """
         Inference-only method to run the Sequencer and generate a plan.
 
@@ -617,12 +595,11 @@ class UHP_Orchestrator(nn.Module):
             - sigmoid_heatmap (torch.Tensor): The heatmap probabilities [B, 1, 56, 56].
         """
         self.eval()
-        subgoal_embedding, predicted_heatmap_logits = self.sequencer(
+        subgoal_embedding = self.sequencer(
             current_image, goal_image, task_phase
         )
-        # Apply sigmoid to convert logits to probabilities for visualization.
-        sigmoid_heatmap = torch.sigmoid(predicted_heatmap_logits)
-        return subgoal_embedding, sigmoid_heatmap
+
+        return subgoal_embedding
 
     @torch.no_grad()
     def act(self,
