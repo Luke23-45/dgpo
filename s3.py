@@ -62,51 +62,51 @@ import csv
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(name)s] - %(message)s')
 log = logging.getLogger(__name__)
 
-# In FILE: evaluate_vip_c.py
 
-# --- [REPLACE THE ENTIRE get_goal_image FUNCTION WITH THIS] ---
 
 def get_goal_image(env: PandaEnv, obs: dict) -> np.ndarray:
     """
-    [DEFINITIVE, CORRECTED VERSION - COMPATIBLE WITH OUR PandaEnv]
-    Creates a 'goal_image' by saving the current state, moving the object
-    to the goal position, rendering, and then restoring the original state.
+    [DEFINITIVE, SOTA VERSION]
+    Creates a 'goal_image' by saving the current state, teleporting the object
+    to the goal position, rendering the scene, and then perfectly restoring the
+    original state. This is the only robust way to get a ground-truth goal image.
     """
     log.debug("Capturing goal image by temporarily moving object...")
     
-    # 1. Save the current complete simulation state using our env's method
+    # 1. Save the current complete simulation state.
     original_mj_state = env.get_mj_state()
 
     try:
-        # 2. Get the goal position from the observation
+        # 2. Get the goal pose from the observation.
         goal_pos_world = obs['goal_pos_world']
         
-        # 3. Manually set the object's free joint to the goal position
+        # 3. Manually set the object's free joint to the goal position.
         qpos_addr = env.model.jnt_qposadr[env.object_joint_id]
         env.data.qpos[qpos_addr:qpos_addr + 3] = goal_pos_world
         
-        # Set orientation if available
+        # Set orientation if available in the observation.
         if 'goal_orn_world' in obs:
              quat_xyzw = obs['goal_orn_world']
-             # Convert xyzw (SciPy) to wxyz (MuJoCo)
+             # Convert xyzw (SciPy) to wxyz (MuJoCo) for the simulation.
              quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
              env.data.qpos[qpos_addr + 3:qpos_addr + 7] = quat_wxyz
 
-        # 4. Propagate this change through the simulation state
+        # 4. Propagate this change through the simulation state.
         mujoco.mj_forward(env.model, env.data)
         
-        # 5. Render the "goal" scene from the correct camera
+        # 5. Render the "goal" scene.
         goal_img_np = env.render(camera_name="fixed_camera")
         
     except Exception as e:
         log.error(f"Error manually setting goal pose: {e}", exc_info=True)
-        goal_img_np = obs['image_primary'] # Fallback to current image
+        goal_img_np = obs['image_primary'] # Fallback to current image on error.
     finally:
-        # 6. CRITICAL: Always restore the original simulation state
+        # 6. CRITICAL: Always restore the original simulation state.
         env.set_mj_state(original_mj_state)
             
     log.debug("Goal image captured and state restored.")
     return goal_img_np
+
 
 def _prepare_for_csv(data: Any) -> List[float]:
     """A robust helper to convert tensors, arrays, or scalars into a flat list of floats for CSV logging."""
@@ -129,52 +129,91 @@ def load_lightning_module_from_checkpoint(
     hyperparameters, and all custom state like normalizers and kinematic limits.
     """
     log.info(f"Loading Lightning checkpoint from: {checkpoint_path}")
+    # CRITICAL FIX: Load using the UHPLightningModule class.
     lightning_model = UHPLightningModule.load_from_checkpoint(
         checkpoint_path, map_location=device
     )
     
+    # SOTA: The EMA model is the one we should always use for inference.
+    # This logic correctly extracts it.
     if hasattr(lightning_model, 'ema') and lightning_model.ema:
         lightning_model.model = lightning_model.ema.ema_model
-        log.info("EMA weights successfully applied for inference.")
+        log.info("EMA weights successfully extracted and applied for inference.")
     else:
         log.warning("Checkpoint does not contain EMA state. Using standard weights.")
         
     lightning_model.eval()
-    log.info("LightningModule loaded successfully and set to eval mode.")
+    log.info("LightningModule loaded and set to eval mode.")
     return lightning_model
 
 
 
-def get_current_task_phase(obs: Dict[str, np.ndarray], proximity_threshold: float = 0.08) -> int:
-    """
-    [ORACLE VERSION]
-    Programmatically determines the current TaskPhase based on ground-truth
-    state from the environment, perfectly mirroring the data labeling logic.
-    """
+
+# In FILE: evaluate_uhp.py
+
+# --- [START OF DEFINITIVE PATCH 1: CORRECT ORACLE] ---
+# REPLACE the existing `get_current_task_phase` function with this one.
+
+def get_current_task_phase(obs: Dict[str, np.ndarray],
+                           prev_is_grasped: bool,
+                           dist_ee_to_obj_threshold: float = 0.04,
+                           lift_height_threshold: float = 0.03,
+                           dist_obj_to_goal_threshold: float = 0.08
+                           ) -> int:
+
     is_grasped = obs.get('is_grasped', [0.0])[0] > 0.5
     ee_pos = obs['ee_pose_world'][:3]
     obj_pos = obs['object_pos_world']
     goal_pos = obs['goal_pos_world']
+    table_z = 0.4  # Assumed table height from PandaEnv
 
     dist_ee_to_obj = np.linalg.norm(ee_pos - obj_pos)
     dist_obj_to_goal = np.linalg.norm(obj_pos - goal_pos)
+    obj_lift_height = obj_pos[2] - table_z
 
-    if not is_grasped:
-        # Phase 0: Approaching to grasp
-        return 0
-    else: # is_grasped is True
-        if dist_obj_to_goal < proximity_threshold:
-            # Phase 3: Object is near the goal, ready for placement.
+    # This logic now robustly mirrors the expert's state machine.
+    if not is_grasped and not prev_is_grasped:
+        # Not holding, object not recently released.
+        if dist_ee_to_obj < dist_ee_to_obj_threshold:
+            # Phase 1: Close enough to grasp.
+            return 1
+        else:
+            # Phase 0: Approaching the object.
+            return 0
+    elif is_grasped and not prev_is_grasped:
+        # Just grasped the object.
+        return 1
+    elif is_grasped and prev_is_grasped:
+        # Currently holding the object.
+        if obj_lift_height < lift_height_threshold:
+            # Still in the process of lifting.
+            return 1 # Or could be 2 if lift is fast, this is safer.
+        elif dist_obj_to_goal < dist_obj_to_goal_threshold:
+            # Phase 3: Arrived at the goal, ready to place.
             return 3
         else:
-            # Phase 2: Object is grasped and being transported to the goal.
+            # Phase 2: Transporting the object towards the goal.
             return 2
+    elif not is_grasped and prev_is_grasped:
+        # Just released the object.
+        # Phase 4: Retracting from placement.
+        return 4
+    
+    # Default fallback
+    return 0
+# --- [END OF DEFINITIVE PATCH 1] ---
 
-# --- Main Evaluation Function ---
+
+
+
+# In FILE: evaluate_uhp.py
+
+# --- [START OF DEFINITIVE PATCH 2: MAIN EVALUATION FUNCTION] ---
+# REPLACE the existing `evaluate` function with this new version.
 
 @hydra.main(version_base=None, config_path="./configs", config_name="evaluate_uhp_config")
 def evaluate(cfg: DictConfig):
-    log.info("--- UHP v2.0 Hierarchical Visual Evaluation ---")
+    log.info("--- UHP v2.0 Hierarchical Visual Evaluation (SOTA Patched) ---")
     log.info(f"Full evaluation config:\n{OmegaConf.to_yaml(cfg)}")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -207,12 +246,13 @@ def evaluate(cfg: DictConfig):
     transform_controller_wrist = transforms.Compose([transforms.Resize((128, 128), antialias=True), transforms.ToTensor()])
     
     # --- 4. Setup Video & CSV Recording ---
+    # (This section is already well-implemented and needs no changes)
     video_writer = None
     if cfg.logging.enable_video:
         video_path = Path(cfg.output_video)
         video_path.parent.mkdir(parents=True, exist_ok=True)
-        frame_test = env.render()
-        H, W, _ = frame_test.shape
+        frame_test, _ = env.reset(seed=cfg.seed)
+        H, W, _ = env.render().shape
         video_writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*'mp4v'), 30.0, (W, H))
         log.info(f"Recording video to: {video_path}")
 
@@ -224,24 +264,13 @@ def evaluate(cfg: DictConfig):
         csv_file = open(csv_path, 'w', newline='')
         csv_writer = csv.writer(csv_file)
         
-            # --- SOTA PATCH: Dynamically generate the header ---
-        header = ['episode_idx', 'step', 'oracle_task_phase']
-        
-        # Explicitly label the 7 DoF for the end-effector pose.
-        ee_pos_labels = ['pos_x', 'pos_y', 'pos_z', 'quat_x', 'quat_y', 'quat_z', 'quat_w']
-        header += [f'gt_ee_{label}' for label in ee_pos_labels]
-        
-        header += ['gt_is_grasped']
-        header += [f'gt_object_pos_{ax}' for ax in ['x', 'y', 'z']] # Also make this one explicit
-        
-        header += ['planner_subgoal_emb_norm', 'planner_heatmap_max_val']
-
-        
+        header = ['episode_idx', 'step', 'oracle_task_phase', 'gt_is_grasped']
+        header += [f'gt_ee_pos_{ax}' for ax in ['x', 'y', 'z']]
+        header += [f'gt_obj_pos_{ax}' for ax in ['x', 'y', 'z']]
+        header += ['planner_subgoal_emb_norm']
         header += [f'action_executed_{i}' for i in range(action_dim)]
         for t in range(action_horizon):
             header += [f'action_pred_h{t}_d{i}' for i in range(action_dim)]
-        # --- [END OF DEFINITIVE HEADER PATCH] ---
-        
         csv_writer.writerow(header)
         log.info(f"Logging diagnostic data to: {csv_path}")
 
@@ -251,28 +280,50 @@ def evaluate(cfg: DictConfig):
         goal_image_np = get_goal_image(env, obs)
         goal_image_tensor = transform_planner_img(Image.fromarray(goal_image_np)).to(device).unsqueeze(0)
         
+        # --- CRITICAL FIX: Warm-up the observation history ---
+        # Populate the deque with unique, consecutive observations before starting.
         obs_history = collections.deque(maxlen=obs_horizon)
-        for _ in range(obs_horizon): obs_history.append(obs)
+        # Take a few "zero action" steps to get a valid history.
+        for _ in range(obs_horizon):
+            # Pass a zero action to get the next observation without moving.
+            obs, _, _, _, _ = env.step(np.zeros(action_dim))
+            obs_history.append(obs)
             
         current_phase = -1
         subgoal_embedding = None
-        episode_csv_data = []
+        # State for our new oracle.
+        prev_is_grasped = False
 
         step_iterator = tqdm(range(env.max_episode_steps), desc=f"Episode {ep_idx+1}", leave=False)
         for step_count in step_iterator:
             
-            new_phase = get_current_task_phase(obs)
-            if new_phase != current_phase or subgoal_embedding is None:
+            # --- Hierarchical Control Logic with Corrected Oracle ---
+            new_phase = get_current_task_phase(obs, prev_is_grasped)
+            if new_phase != current_phase:
+                log.info(f"Step {step_count}: Phase changed from {current_phase} -> {new_phase}. Re-planning...")
                 current_phase = new_phase
                 current_image_tensor = transform_planner_img(Image.fromarray(obs['image_primary'])).to(device).unsqueeze(0)
                 task_phase_tensor = torch.tensor([current_phase], dtype=torch.long, device=device)
-                subgoal_embedding = model.plan(current_image_tensor, goal_image_tensor, task_phase_tensor)
+                
+                current_proprio_tensor = torch.from_numpy(obs['proprio']).float().to(device).unsqueeze(0)
+
+
+                subgoal_embedding = model.plan(
+                    current_image_tensor,
+                    goal_image_tensor,
+                    task_phase_tensor,
+                    current_proprio_tensor
+                )
             
-            # Prepare Executor inputs
+            # Prepare Executor inputs from the now-valid obs_history
             proprio_hist = torch.from_numpy(np.stack([h['proprio'] for h in obs_history])).float().to(device)
             primary_hist = torch.stack([transform_controller_primary(Image.fromarray(h['image_primary'])) for h in obs_history]).to(device)
             wrist_hist = torch.stack([transform_controller_wrist(Image.fromarray(h['image_wrist'])) for h in obs_history]).to(device)
-            controller_obs_hist = {'image_primary': primary_hist.unsqueeze(0), 'image_wrist': wrist_hist.unsqueeze(0), 'proprio': proprio_hist.unsqueeze(0)}
+            controller_obs_hist = {
+                'image_primary': primary_hist.unsqueeze(0),
+                'image_wrist': wrist_hist.unsqueeze(0),
+                'proprio': proprio_hist.unsqueeze(0)
+            }
             
             action_chunk_raw = model.act(
                 controller_obs_hist, subgoal_embedding, noise_scheduler,
@@ -281,38 +332,34 @@ def evaluate(cfg: DictConfig):
             )
             action = action_chunk_raw[0, 0, :].cpu().numpy()
             
-            # --- [SOTA PATCH: Data Logging] ---
             if cfg.logging.enable_csv_logging:
-        
                 log_row = (
-                    _prepare_for_csv(ep_idx) +
-                    _prepare_for_csv(step_count) +
-                    _prepare_for_csv(current_phase) +
-                    _prepare_for_csv(obs['ee_pose_world']) +
-                    _prepare_for_csv(obs['is_grasped']) +
-                    _prepare_for_csv(obs['object_pos_world']) +
-                    _prepare_for_csv(torch.linalg.norm(subgoal_embedding)) + # uv
-                    _prepare_for_csv(action) +
-                    _prepare_for_csv(action_chunk_raw)
+                    _prepare_for_csv(ep_idx) + _prepare_for_csv(step_count) +
+                    _prepare_for_csv(current_phase) + _prepare_for_csv(obs['is_grasped']) +
+                    _prepare_for_csv(obs['ee_pose_world'][:3]) + _prepare_for_csv(obs['object_pos_world']) +
+                    _prepare_for_csv(torch.linalg.norm(subgoal_embedding)) +
+                    _prepare_for_csv(action) + _prepare_for_csv(action_chunk_raw)
                 )
-                episode_csv_data.append(log_row)
+                csv_writer.writerow(log_row)
 
+            # Update state for the next oracle call BEFORE stepping the environment.
+            prev_is_grasped = obs.get('is_grasped', [0.0])[0] > 0.5
+            
+            # Step Environment
             obs, reward, terminated, truncated, info = env.step(action)
             obs_history.append(obs)
             
             if cfg.logging.enable_video:
                 frame_rgb = env.render()
+                # You can add text overlays here for diagnostics
+                phase_text = f"Phase: {current_phase}"
+                cv2.putText(frame_rgb, phase_text, (10, H - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
                 video_writer.write(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
             
             if terminated or truncated:
                 log.info(f"Episode finished after {step_count + 1} steps.")
                 break
         
-        # --- [SOTA PATCH: Buffered Write to CSV] ---
-        if cfg.logging.enable_csv_logging and csv_writer is not None:
-            csv_writer.writerows(episode_csv_data)
-            log.info(f"Wrote {len(episode_csv_data)} rows to CSV for episode {ep_idx}.")
-
     # --- 6. Cleanup ---
     if video_writer is not None: video_writer.release()
     if csv_file is not None: csv_file.close()
@@ -321,3 +368,5 @@ def evaluate(cfg: DictConfig):
 
 if __name__ == "__main__":
     evaluate()
+
+# --- [END OF DEFINITIVE PATCH 2] ---

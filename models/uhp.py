@@ -264,9 +264,11 @@ class Sequencer(nn.Module):
     """
 
     def __init__(self,
+                 proprio_dim: int,
                  vision_backbone_model: str = "google/siglip-base-patch16-224",
                  num_task_phases: int = 5,
                  fusion_transformer_layers: int = 4,
+                 
                  fusion_transformer_heads: int = 8,
                  subgoal_dim: int = 768
                  ):
@@ -283,10 +285,15 @@ class Sequencer(nn.Module):
         self.vision_dim = getattr(config, 'hidden_size', 768)
         logger.info(f"Determined vision model hidden dimension: {self.vision_dim}")
 
-        # --- 2.2. Learnable Embeddings ---
+        self.proprio_encoder = nn.Sequential(
+            nn.Linear(proprio_dim, 256),
+            nn.GELU(),
+            nn.Linear(256, self.vision_dim)
+        )
         self.task_phase_embedding = nn.Embedding(num_task_phases, self.vision_dim)
-        # 0: current_image tokens, 1: goal_image tokens, 2: task_phase token
-        self.token_type_embeddings = nn.Embedding(3, self.vision_dim)
+        # Token types are now: 0=current, 1=goal, 2=phase, 3=proprio
+        self.token_type_embeddings = nn.Embedding(4, self.vision_dim)
+        
 
         # --- 2.3. Fusion Transformer (Trainable) ---
         # Using a Pre-LN (norm_first=True) architecture for improved stability.
@@ -318,7 +325,8 @@ class Sequencer(nn.Module):
     def forward(self,
                 current_image: torch.Tensor,
                 goal_image: torch.Tensor,
-                task_phase: torch.Tensor
+                task_phase: torch.Tensor,
+                proprioception: torch.Tensor
                 ) -> torch.Tensor:
         """
         Performs the full, end-to-end planning pass.
@@ -351,6 +359,7 @@ class Sequencer(nn.Module):
         # --- Step 2: Prepare Tokens for Fusion ---
         # Embed the task phase. Shape: [B, 1, D_vision].
         phase_token = self.task_phase_embedding(task_phase).unsqueeze(1)
+        proprio_token = self.proprio_encoder(proprioception).unsqueeze(1)
         
         # --- [START OF FINAL PATCH] ---
         # Add token type embeddings for differentiation. This is CRITICAL for the
@@ -358,10 +367,13 @@ class Sequencer(nn.Module):
         current_tokens += self.token_type_embeddings(torch.zeros(1, 1, dtype=torch.long, device=device))
         goal_tokens += self.token_type_embeddings(torch.ones(1, 1, dtype=torch.long, device=device))
         phase_token += self.token_type_embeddings(torch.full((1, 1), 2, dtype=torch.long, device=device))
-        # --- [END OF FINAL PATCH] ---
+        # --- [START OF UHP v3.0 PATCH] ---
+        proprio_token += self.token_type_embeddings(torch.full((1, 1), 3, dtype=torch.long, device=device))
+        # --- [END OF UHP v3.0 PATCH] ---
 
         # --- Step 3: Fuse Information in the Transformer ---
-        full_sequence = torch.cat([current_tokens, goal_tokens, phase_token], dim=1)
+        # Concatenate all tokens into a single long sequence.
+        full_sequence = torch.cat([current_tokens, goal_tokens, phase_token, proprio_token], dim=1)
 
         # SOTA PATCH: Ensure absolute type consistency before the transformer.
         target_dtype = self.fusion_transformer.layers[0].linear1.weight.dtype
@@ -551,10 +563,12 @@ class UHP_Orchestrator(nn.Module):
                                      required for the hybrid loss calculation.
         """
         # --- 1. Sequencer Forward Pass (High-Level Planning) ---
+        current_proprio = batch['controller_observation_history']['proprio'][:, -1, :]
         subgoal_embedding = self.sequencer(
             current_image=batch['planner_current_image'],
             goal_image=batch['planner_goal_image'],
-            task_phase=batch['planner_task_phase']
+            task_phase=batch['planner_task_phase'],
+            proprioception=current_proprio
         )
 
         # --- 2. Executor Forward Pass (Low-Level Action Generation) ---
@@ -576,7 +590,8 @@ class UHP_Orchestrator(nn.Module):
     def plan(self,
              current_image: torch.Tensor,
              goal_image: torch.Tensor,
-             task_phase: torch.Tensor
+             task_phase: torch.Tensor,
+             proprioception: torch.Tensor
              ) -> torch.Tensor:
         """
         Inference-only method to run the Sequencer and generate a plan.
@@ -596,7 +611,7 @@ class UHP_Orchestrator(nn.Module):
         """
         self.eval()
         subgoal_embedding = self.sequencer(
-            current_image, goal_image, task_phase
+            current_image, goal_image, task_phase, proprioception
         )
 
         return subgoal_embedding

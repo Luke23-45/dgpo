@@ -124,7 +124,7 @@ logging:
 trainer:
   accelerator: "auto"
   devices: "auto"
-  check_val_every_n_epoch: 30
+  check_val_every_n_epoch: 40
   max_epochs: 500
   # Use 16-bit mixed precision for faster training and lower memory usage.
   precision: "16-mixed"

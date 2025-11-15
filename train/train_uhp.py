@@ -372,6 +372,72 @@ class UHPLightningModule(pl.LightningModule):
     def on_before_optimizer_step(self, optimizer) -> None:
         """Hook to update EMA weights before the optimizer step."""
         self.ema.update(self.model)
+# In FILE: train/train_uhp.py
+# In CLASS: UHPLightningModule
+
+    def validation_step(self, batch: Dict[str, Any], batch_idx: int):
+        # ... (fast path logic remains the same) ...
+
+        # --- Slow Path: Qualitative Visual Validation (runs periodically) ---
+        run_qual_freq = self.cfg.validation.run_qualitative_every_n_epoch
+        run_qualitative_val = (self.trainer.current_epoch + 1) % run_qual_freq == 0
+        
+        if batch_idx == 0 and self.trainer.is_global_zero and run_qualitative_val:
+            # --- [START OF DEFINITIVE PATCH] ---
+            # The original call to _log_qualitative_validation was missing the
+            # proprioception data needed by the new plan method. The method
+            # itself also needs to be replaced.
+            self._log_qualitative_validation(batch)
+            # --- [END OF DEFINITIVE PATCH] ---
+
+    # --- [START OF DEFINITIVE PATCH] ---
+    # REPLACE the entire old `_log_qualitative_validation` method with this new one.
+    def _log_qualitative_validation(self, batch: Dict[str, Any]):
+        """
+        [SOTA, UHP v3.0 VERSION]
+        Helper function to run the full plan-act pipeline on a validation sample
+        and log key diagnostic metrics.
+        """
+        try:
+            logger.info(f"Epoch {self.trainer.current_epoch}: Running full qualitative validation.")
+            with torch.no_grad():
+                # 1. Prepare inputs for the state-aware Sequencer (`plan`).
+                current_proprio = batch['controller_observation_history']['proprio'][:, -1, :]
+                
+                # 2. Plan using the EMA model to get the subgoal embedding.
+                subgoal_embedding = self.ema.ema_model.plan(
+                    current_image=batch['planner_current_image'],
+                    goal_image=batch['planner_goal_image'],
+                    task_phase=batch['planner_task_phase'],
+                    proprioception=current_proprio
+                )
+
+                # 3. Act using the EMA model to generate the action sequence.
+                predicted_actions = self.ema.ema_model.act(
+                    observation_history=batch['controller_observation_history'],
+                    subgoal_embedding=subgoal_embedding,
+                    noise_scheduler=self.noise_scheduler,
+                    num_inference_steps=self.cfg.validation.num_inference_steps,
+                    action_normalizer=self.action_normalizer,
+                    proprio_normalizer=self.proprio_normalizer,
+                    joint_limits_low=self.joint_limits_low,
+                    joint_limits_high=self.joint_limits_high
+                )
+
+                # 4. Calculate and log critical diagnostic metrics.
+                action_mse = F.mse_loss(predicted_actions, batch['ground_truth_action_chunk'])
+                subgoal_norm = torch.linalg.norm(subgoal_embedding, dim=-1).mean()
+                
+                self.log_dict({
+                    'val/action_mse': action_mse,
+                    'val/subgoal_embedding_norm': subgoal_norm
+                }, on_epoch=True, sync_dist=True)
+                
+                logger.info(f"Qualitative validation complete. Action MSE: {action_mse.item():.4f}, Subgoal Norm: {subgoal_norm.item():.4f}")
+
+        except Exception as e:
+            logger.error(f"Failed to log qualitative validation: {e}", exc_info=True)
+    # --- [END OF DEFINITIVE PATCH] ---
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         """The multi-tiered diagnostic validation loop."""
@@ -405,31 +471,7 @@ class UHPLightningModule(pl.LightningModule):
         run_qualitative_val = (self.trainer.current_epoch + 1) % run_qual_freq == 0
         
         if batch_idx == 0 and self.trainer.is_global_zero and run_qualitative_val:
-            # --- [START OF PATCH 2] ---
-            logger.info(f"Epoch {self.trainer.current_epoch}: Running full validation.")
-            
-            # 1. Plan using the EMA model to get the subgoal embedding.
-            subgoal_embedding = self.ema.ema_model.plan(
-                current_image=batch['planner_current_image'],
-                goal_image=batch['planner_goal_image'],
-                task_phase=batch['planner_task_phase']
-            )
-
-            # 2. Act using the EMA model to generate the action sequence.
-            predicted_actions = self.ema.ema_model.act(
-                observation_history=batch['controller_observation_history'],
-                subgoal_embedding=subgoal_embedding,
-                noise_scheduler=self.noise_scheduler,
-                num_inference_steps=self.cfg.validation.num_inference_steps,
-                action_normalizer=self.action_normalizer,
-                proprio_normalizer=self.proprio_normalizer,
-                joint_limits_low=self.joint_limits_low,
-                joint_limits_high=self.joint_limits_high
-            )
-
-            # 3. Calculate and log the true end-to-end action MSE.
-            action_mse = F.mse_loss(predicted_actions, gt_actions)
-            self.log('val/action_mse', action_mse, on_epoch=True, sync_dist=True)
+          self._log_qualitative_validation(batch)
 
 
 
