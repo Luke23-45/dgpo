@@ -51,9 +51,9 @@ scheduler:
 dataset:
   # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"      
   # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"   
-  train_path: "/content/drive/MyDrive/pda/data/training/training_data.lmdb"
+  train_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
 
-  val_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+  val_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
   #C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
   num_workers: 1            
   use_aug: false
@@ -76,7 +76,7 @@ training:
   use_swa: false             # Set to true to enable SWA towards the end of training.
   swa_lrs: 1e-5              # Learning rate for the SWA phase.
 
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/Models/backup_epoch_74.ckpt" # Path to a .ckpt file to resume training from. e.g., "/path/to/last.ckpt"
+  resume_from_checkpoint: null # Path to a .ckpt file to resume training from. e.g., "/path/to/last.ckpt"
 
 # --- Validation & Inference Configuration ---
 validation:
@@ -103,6 +103,8 @@ optimizer:
   warmup_steps: 0.05         # Percentage of total training steps to use for linear warmup (e.g., 0.05 = 5%). Can also be an integer.
   
   gradient_clip_val: 1.0     # Maximum norm for gradient clipping to prevent exploding gradients. 1.0 is a standard, safe value.
+
+  warmup_percentage: 0.05
 
 # --- PyTorch Lightning Trainer Configuration ---
 trainer:

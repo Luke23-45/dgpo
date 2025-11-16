@@ -1,0 +1,86 @@
+[2025-11-16 19:26:53,717][__main__][INFO] - seed: 42
+model:
+  action_dim: 8
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+  p_plan_drop: 0.1
+  p_obs_drop: 0.1
+scheduler:
+  timesteps: 100
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+dataset:
+  train_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+  num_workers: 1
+  use_aug: false
+training:
+  batch_size: 32
+  val_batch_size: 32
+  ema_decay: 0.999
+  use_activation_checkpointing: true
+  use_swa: false
+  swa_lrs: 1.0e-05
+  resume_from_checkpoint: null
+validation:
+  run_full_validation_every_n_epoch: 120
+  sampling_steps: 30
+  guidance_scale_plan: 7.5
+  guidance_scale_obs: 1.5
+optimizer:
+  lr: 0.0001
+  weight_decay: 1.0e-06
+  warmup_steps: 0.05
+  gradient_clip_val: 1.0
+  warmup_percentage: 0.05
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 1000
+  check_val_every_n_epoch: 120
+  accumulate_grad_batches: 2
+logging:
+  use_wandb: true
+  wandb_project: ego_planner_v4
+  wandb_run_name: null
+  log_every_n_steps: 50
+  wandb_mode: offline
+
+[2025-11-16 19:26:53,730][__main__][INFO] - W&B mode explicitly set to: 'offline'
+[2025-11-16 19:26:53,738][models.ego_planner][INFO] - [Strategist] Initializing ViT backbone: google/siglip-base-patch16-224
+[2025-11-16 19:26:54,604][models.ego_planner][INFO] - [Strategist] Derived configuration: image_size=224, patch_size=16, num_patches=196.
+[2025-11-16 19:26:54,675][models.ego_planner][INFO] - [Pilot] Activation Checkpointing: Enabled
+[2025-11-16 19:26:57,836][models.ego_planner][INFO] - EgoPlanner v5 (Definitive & Audited) model initialized.
+[2025-11-16 19:26:58,140][__main__][INFO] - EMA enabled with decay rate: 0.999
+[2025-11-16 19:26:58,142][__main__][INFO] - Definitive SOTA EgoPlannerLightningModule (v2) initialized.
+[2025-11-16 19:26:59,186][__main__][INFO] - Loading TRAINING dataset from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+[2025-11-16 19:26:59,187][utils.ego_planner_dataset][INFO] - Initializing EgoPlannerDataset (Definitive Patched Version, use_aug=False)
+[2025-11-16 19:26:59,188][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validation\validation_dataset_index.json...
+[2025-11-16 19:26:59,190][utils.expert_dataset][INFO] - Loaded 10 episodes, 2580 total valid chunks (Virtually Indexed).
+[2025-11-16 19:26:59,191][utils.ego_planner_dataset][INFO] - Building explicit sample index map for robust indexing...
+[2025-11-16 19:26:59,192][utils.ego_planner_dataset][INFO] - Successfully initialized. Found 2580 valid samples across 10 episodes.
+[2025-11-16 19:26:59,193][__main__][INFO] - Loading VALIDATION dataset from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+[2025-11-16 19:26:59,195][utils.ego_planner_dataset][INFO] - Initializing EgoPlannerDataset (Definitive Patched Version, use_aug=False)
+[2025-11-16 19:26:59,197][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\validation\validation_dataset_index.json...
+[2025-11-16 19:26:59,198][utils.expert_dataset][INFO] - Loaded 10 episodes, 2580 total valid chunks (Virtually Indexed).
+[2025-11-16 19:26:59,199][utils.ego_planner_dataset][INFO] - Building explicit sample index map for robust indexing...
+[2025-11-16 19:26:59,203][utils.ego_planner_dataset][INFO] - Successfully initialized. Found 2580 valid samples across 10 episodes.
+[2025-11-16 19:26:59,205][__main__][INFO] - Moving noise scheduler to device: cpu
+[2025-11-16 19:26:59,207][__main__][INFO] - Moving EMA model to device: cpu
+[2025-11-16 19:26:59,223][__main__][INFO] - Found 0 trainable backbone parameters.
+[2025-11-16 19:26:59,224][__main__][INFO] - Found 260 other trainable parameters (strategist head, pilot, etc.).
+[2025-11-16 19:26:59,225][__main__][INFO] - Using differential LR: Backbone LR = 0.0001, Other Params LR = 0.0001
+[2025-11-16 19:26:59,227][utils.samplers][INFO] - Building episode-to-index map for sampler...
+[2025-11-16 19:26:59,235][utils.samplers][INFO] - Map building complete.
+[2025-11-16 19:26:59,237][__main__][INFO] - Using EpisodeAwareSampler for training to optimize I/O.
