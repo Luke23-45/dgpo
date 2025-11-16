@@ -15,12 +15,13 @@
 # It MUST be provided, typically via the command line. The '???' is a
 # Hydra placeholder that will raise an error if it's not overridden.
 checkpoint_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_39.ckpt"
+eval_static_scene: true
 
 # The path where the output evaluation video will be saved.
 output_video: "evaluation_uhp12.mp4"
 
 # The master seed for the evaluation run to ensure reproducibility.
-seed: 43
+seed: 45
 
 # The number of evaluation episodes to run and record.
 num_episodes: 1

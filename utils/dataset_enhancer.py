@@ -300,7 +300,7 @@ def main(args):
 
     worker_args = [{"episode_idx": i, "source_db_path": str(dest_path), "heatmap_config": {"height": 56, "width": 56, "sigma": args.sigma}} for i in range(num_episodes)]
 
-    dest_env = lmdb.open(str(dest_path), map_size=int(2 * 1024**3), subdir=False, readonly=False, lock=True)
+    dest_env = lmdb.open(str(dest_path), map_size=int(7.8 * 1024**3), subdir=False, readonly=False, lock=True)
 
     try:
         if args.num_workers > 0:

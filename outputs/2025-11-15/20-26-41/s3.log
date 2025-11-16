@@ -1,0 +1,31 @@
+[2025-11-15 20:26:42,018][__main__][INFO] - --- UHP v2.0 Hierarchical Visual Evaluation (SOTA Patched) ---
+[2025-11-15 20:26:42,020][__main__][INFO] - Full evaluation config:
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_47.ckpt
+output_video: evaluation_uhp12.mp4
+seed: 43
+num_episodes: 1
+inference:
+  inference_steps: 20
+logging:
+  enable_video: true
+  video_output_path: evaluation_uhp.mp4
+  enable_csv_logging: true
+  csv_output_path: evaluation_diagnostics.csv
+
+[2025-11-15 20:26:42,030][__main__][INFO] - Loading Lightning checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_47.ckpt
+[2025-11-15 20:26:43,322][models.uhp][INFO] - Initializing the UHP Orchestrator...
+[2025-11-15 20:26:43,327][models.uhp][INFO] - Initializing Sequencer with backbone: google/siglip-base-patch16-224
+[2025-11-15 20:26:44,521][models.uhp][INFO] - Determined vision model hidden dimension: 768
+[2025-11-15 20:26:44,623][models.uhp][INFO] - Initializing Executor with hidden_dim: 512
+[2025-11-15 20:26:45,257][models.uhp][INFO] - UHP Orchestrator initialized successfully.
+[2025-11-15 20:26:45,605][train.train_uhp][INFO] - UHPLightningModule initialized successfully.
+[2025-11-15 20:26:45,707][train.train_uhp][INFO] - Successfully loaded EMA weights from checkpoint.
+[2025-11-15 20:26:45,707][train.train_uhp][INFO] - Successfully loaded normalizers from checkpoint into LightningModule.
+[2025-11-15 20:26:45,708][train.train_uhp][INFO] - Successfully loaded kinematic limits from checkpoint.
+[2025-11-15 20:26:46,121][__main__][INFO] - EMA weights successfully extracted and applied for inference.
+[2025-11-15 20:26:46,125][__main__][INFO] - LightningModule loaded and set to eval mode.
+[2025-11-15 20:26:49,035][__main__][INFO] - Recording video to: evaluation_uhp12.mp4
+[2025-11-15 20:26:49,036][__main__][INFO] - Logging diagnostic data to: evaluation_diagnostics.csv
+[2025-11-15 20:26:50,080][__main__][INFO] - Step 0: Phase changed from -1 -> 0. Re-planning...
+[2025-11-15 20:31:56,519][__main__][INFO] - Episode finished after 98 steps.
+[2025-11-15 20:31:56,629][__main__][INFO] - --- Evaluation Complete. ---

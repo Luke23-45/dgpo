@@ -1,0 +1,15 @@
+[2025-11-15 19:35:10,196][__main__][INFO] - --- UHP v2.0 Hierarchical Visual Evaluation (SOTA Patched) ---
+[2025-11-15 19:35:10,197][__main__][INFO] - Full evaluation config:
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_3a.ckpt
+output_video: evaluation_uhp12.mp4
+seed: 43
+num_episodes: 1
+inference:
+  inference_steps: 20
+logging:
+  enable_video: true
+  video_output_path: evaluation_uhp.mp4
+  enable_csv_logging: true
+  csv_output_path: evaluation_diagnostics.csv
+
+[2025-11-15 19:35:10,203][__main__][INFO] - Loading Lightning checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_3a.ckpt

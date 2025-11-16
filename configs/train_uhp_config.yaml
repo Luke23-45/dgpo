@@ -24,6 +24,7 @@ model:
     fusion_transformer_layers: 4
     fusion_transformer_heads: 8
     subgoal_dim: 768  # The dimension of the dense command vector.
+    proprio_dim: ${model.executor_cfg.proprio_dim}
 
   # Configuration for the Executor (low-level diffusion policy).
   executor_cfg:
@@ -44,8 +45,8 @@ model:
 # ==============================================================================
 dataset:
   # !!! IMPORTANT: You MUST replace these with the correct paths to your datasets. !!!
-  train_path: "/content/drive/MyDrive/pda/data/validation/validation_dataset.lmdb"
-  val_path: "/content/drive/MyDrive/pda/data/validation/validation_dataset.lmdb"
+  train_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
+  val_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
   num_workers: 1 # Adjust based on the number of CPU cores available.
 
 # ==============================================================================
@@ -60,11 +61,11 @@ training:
   # The metric to monitor for saving the best checkpoints.
   # 'val/loss_action_raw' is the primary indicator of policy performance.
   checkpoint_monitor: "val/loss_action_raw"
-  backup_every_n_epochs: 8
+  backup_every_n_epochs: 5
   save_top_k: 3 # Save the top 3 best models.
 
   # Path to a checkpoint to resume training from. `null` for a fresh run.
-  resume_from_checkpoint: null
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backup_epoch_5.ckpt"
 
   # SOTA Technique: Use Stochastic Weight Averaging for potentially better generalization.
   use_swa: false

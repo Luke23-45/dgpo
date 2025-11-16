@@ -27,10 +27,6 @@ Key SOTA Features:
     heatmap directly onto the recorded video, providing invaluable insight into
     the model's high-level decision-making process in real-time.
 
-Usage:
-    python evaluate_vip_c.py \
-        checkpoint_path=/path/to/your/vip_c.ckpt \
-        output_video=vip_c_evaluation.mp4
 
 python -m s2 checkpoint_path=/notes/checkpoints/backup_epoch_31.ckpt output_video=vip_c_evaluation.mp4
 """
