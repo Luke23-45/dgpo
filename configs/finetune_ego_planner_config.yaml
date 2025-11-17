@@ -1,0 +1,134 @@
+# FILE: configs/finetune_ego_planner_config.yaml
+# (State-of-the-Art, Definitive V3 Synthesis for Ego-Planner RL Fine-Tuning)
+
+# ==============================================================================
+# This is the definitive Hydra configuration file for the RL fine-tuning stage
+# of the Ego-Planner model. It is designed to be used with the
+# `train/finetune_ego_planner_rl.py` script.
+#
+# Every parameter is chosen based on SOTA best practices for "Guided Refinement":
+# using a stable RL algorithm (PPO) with a low learning rate to gently nudge the
+# pre-trained imitation policy towards reward-maximizing behavior without
+# catastrophic forgetting.
+# ==============================================================================
+
+# Seed for reproducibility of the entire fine-tuning run.
+seed: 42
+env:
+  xml_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/envs/panda_pick_place.xml"
+# --- [CRITICAL] Path to the pre-trained model from the imitation learning stage.
+# This is the "warm-start" checkpoint.
+il_checkpoint_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_5.ckpt"
+
+# --- Total training duration for the RL fine-tuning stage.
+# A good starting point is between 500k and 1M steps.
+total_timesteps: 1_000_000
+
+# --- Environment Configuration ---
+n_envs: 1 # Number of parallel environments to run for data collection.
+           # Should be a multiple of your CPU cores for best performance.
+
+model:
+  action_dim: 8
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: "google/siglip-base-patch16-224"
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+
+scheduler:
+  timesteps: 100
+  schedule: "cosine"
+  beta_start: 1e-4
+  beta_end: 0.02
+
+
+inference:
+  sampling_steps: 30
+  guidance_scale_plan: 7.5
+  guidance_scale_obs: 1.5
+
+# --- [CRITICAL] Reward Wrapper Configuration ---
+# These parameters directly control the learning curriculum. They are tuned to be
+# architecturally consistent with the Ego-Planner's bi-modal nature.
+reward_wrapper:
+  # Potential Coefficients (k-values)
+  k_reach_xy: 5.0
+  k_reach_z_hover: 4.0
+  k_orient: 3.0
+  k_lift: 6.0
+  k_move_xy: 7.0
+  k_move_z: 4.0
+
+  # Sparse Event Bonuses
+  grasp_bonus: 15.0
+  success_bonus: 200.0
+
+  # Physics-Based Penalties
+  action_penalty: 0.002
+  velocity_penalty: 0.001
+  contact_penalty: 2.0
+  drop_penalty: 30.0
+
+  # PBRS Gamma (MUST match ppo.gamma)
+  gamma: 0.99
+
+  # Physical Thresholds
+  hover_height: 0.08
+  lift_height_thresh: 0.05
+  goal_pos_thresh: 0.03
+  stable_velocity_thresh: 0.02
+
+# --- PPO Algorithm Hyperparameters (Tuned for STABILITY) ---
+# These values are chosen to be conservative, honoring the "Guided Refinement" philosophy.
+ppo:
+  # [CRITICAL] A very low learning rate is essential to prevent the RL updates
+  # from destroying the pre-trained weights.
+  learning_rate: 1.0e-5
+
+  # Number of steps to collect from each parallel environment before an update.
+  # n_envs * n_steps = total batch size for one PPO update.
+  n_steps: 1024
+
+  # Number of samples in a minibatch during the PPO update phase.
+  # Should be a divisor of (n_envs * n_steps).
+  batch_size: 64
+
+  # Number of times to iterate over the collected data during one PPO update.
+  n_epochs: 10
+
+  # PPO-specific parameters, standard values from SB3 documentation are robust.
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0         # Entropy coefficient. Set to 0 for fine-tuning a deterministic-output policy.
+  vf_coef: 0.5          # Value function coefficient in the loss.
+  max_grad_norm: 0.5    # Gradient clipping to prevent exploding gradients.
+
+# --- Callback Configuration (Automation Engine) ---
+callbacks:
+  # Frequency to save a full RL checkpoint (for resuming the RL run).
+  checkpoint_freq: 40000
+
+  # Frequency to run the evaluation callback.
+  eval_freq: 20000
+
+  # Number of deterministic episodes to run during each evaluation.
+  n_eval_episodes: 10
+
+# --- Logging Configuration ---
+logging:
+  use_wandb: true
+  wandb_project: "ego_planner_rl_finetuning"
+  wandb_run_name: null # If null, will default to the Hydra output directory name.  
+  # How often to log gradients to W&B (if enabled). Can be performance-intensive.
+  gradient_save_freq: 10000
+  wandb_mode: "offline" 
+
+

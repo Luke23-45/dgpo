@@ -1,0 +1,8 @@
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_39.ckpt
+dataset_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training/training_dataset.lmdb
+seed: 42
+num_episodes: 3
+output_video: uhp_live_evaluation.mp4
+video_fps: 30
+inference:
+  inference_steps: 20

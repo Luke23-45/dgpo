@@ -203,20 +203,23 @@ class PandaEnv(gym.Env):
         # 2. Initialize Renderer and Configs
         self.render_mode = render_mode
         try:
-            self.renderer = mujoco.Renderer(self.model, height=256, width=256)
+            self.renderer = mujoco.Renderer(self.model, height=224, width=224)
+            #self.renderer = mujoco.Renderer(self.model, height=256, width=256)
         except Exception:
             warnings.warn("mujoco.Renderer not available — running headless.")
             self.renderer = None
         self.post = post_config or RenderPostConfig()
         
         # 3. Initialize Episode Bookkeeping and RNG
-        self.max_episode_steps = 100
+        self.max_episode_steps = 150
         self.timestep = 0
         self.np_random, _ = seeding.np_random(None)
         self.enable_domain_randomization = enable_domain_randomization
         self.dr_config = dr_config or DomainRandomizationConfig()
         self.ACTION_SCALING_FACTOR = action_scaling_factor
         self.proprio_dim = 7 + 7 + 2 + 6 
+        self._initial_image: Optional[np.ndarray] = None
+        self._goal_image: Optional[np.ndarray] = None
 
         # 4. Consolidated Block: Cache all MuJoCo IDs and initialize state
         #    This block runs AFTER the model is loaded and BEFORE spaces are defined.
@@ -272,6 +275,24 @@ class PandaEnv(gym.Env):
         self.grasp_mode = grasp_mode
         self._define_spaces()
 
+
+    def _render_goal_image(self) -> np.ndarray:
+        """Saves the current state, moves object to goal, renders, and restores state."""
+        original_state = self.get_mj_state()
+
+        goal_pos = self.get_goal_pos_expert()
+        goal_orn_xyzw = self.get_goal_orientation_expert()
+        goal_orn_wxyz = self._scipy_xyzw_to_mujoco_wxyz(goal_orn_xyzw)
+
+        qpos_addr = self.model.jnt_qposadr[self.object_joint_id]
+        self.data.qpos[qpos_addr : qpos_addr + 3] = goal_pos
+        self.data.qpos[qpos_addr + 3 : qpos_addr + 7] = goal_orn_wxyz
+        mujoco.mj_forward(self.model, self.data)
+        
+        goal_img = self.render(camera_name="fixed_camera")
+
+        self.set_mj_state(original_state)
+        return goal_img
 
     def _has_geom_contact(self, group1_geoms: np.ndarray, group2_geoms: np.ndarray) -> bool:
         """Checks if any geom in group1 is in contact with any geom in group2."""
@@ -725,9 +746,14 @@ class PandaEnv(gym.Env):
         
         self.observation_space = spaces.Dict({
             # --- Core Visual Modalities (HWC format) ---
-            "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
+            # "image_primary": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
+            # "image_wrist":   spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
+            # "initial_image": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
+            # "goal_image": spaces.Box(low=0, high=255, shape=(256, 256, 3), dtype=np.uint8),
+            "image_primary": spaces.Box(low=0, high=255, shape=(224, 224, 3), dtype=np.uint8),
             "image_wrist":   spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
-            
+            "initial_image": spaces.Box(low=0, high=255, shape=(224, 224, 3), dtype=np.uint8),
+            "goal_image": spaces.Box(low=0, high=255, shape=(224, 224, 3), dtype=np.uint8),
             # --- Proprioceptive State (Used by Policy) ---
             "proprio": FLOAT_BOX((proprio_dim,)),
             "is_grasped": FLOAT_BOX((1,)),
@@ -1008,7 +1034,8 @@ class PandaEnv(gym.Env):
         obs["ee_pose_world"] = self.get_ee_pose()
         obs["object_pos_world"] = self.get_object_pos_expert()
         obs["goal_pos_world"] = self.get_goal_pos_expert()
-        
+        obs['initial_image'] = self._initial_image
+        obs['goal_image'] = self._goal_image
         # Add the redundant proprio key required by the IKSolver.
         # This isolates the redundancy to the expert pipeline, which is a good design.
         obs["internal_full_proprio"] = obs["proprio"].copy()
@@ -1195,7 +1222,8 @@ class PandaEnv(gym.Env):
         
         # Final forward pass to settle the scene before returning the first observation
         mujoco.mj_forward(self.model, self.data)
-
+        self._initial_image = self.render(camera_name="fixed_camera")
+        self._goal_image = self._render_goal_image()
         return self.get_expert_obs(), {}
 
 

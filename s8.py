@@ -1,246 +1,338 @@
-# FILE: transform_legacy_dataset.py
-# (State-of-the-Art, Multiprocess, Memory-Managed Legacy-to-SOTA Dataset Converter)
+#!/usr/bin/env python3
+
+"""
+EGO-Planner Visual Evaluation Script
+
+This script loads a trained EGO-Planner model and its corresponding Hydra
+configuration to run a visual evaluation in the PandaEnv. It records a
+video of the policy's performance.
+
+Key Steps:
+1.  Loads the Hydra config to build the model architecture.
+2.  Loads the .ckpt file and extracts the EMA (Exponential Moving Average)
+    weights, which are required for stable inference.
+3.  Initializes the PandaEnv.
+4.  For each episode:
+    a.  Resets the environment and captures the 'initial_image'.
+    b.  Manually moves the object to the goal position to render a 'goal_image'.
+    c.  Resets the environment again to start the episode.
+    d.  Maintains a history (deque) of observations, matching the
+        `obs_horizon` the model was trained on.
+    e.  At each step, passes the full batch (initial_img, goal_img, obs_history)
+        to the model's `.sample()` method.
+    f.  Executes the first action from the returned action plan.
+    g.  Records the visual output to an MP4 video file.
+
+Usage:
+1.  Make sure you have an environment with all required packages
+    (pytorch, hydra-core, omegaconf, opencv-python, torchvision, etc.).
+2.  Place this script in a directory where it can import the project modules
+    (like `envs.panda_env`, `models.ego_planner`, etc.).
+3.  Run from the command line, pointing to your config and checkpoint:
+
+    python evaluate_ego_planner.py \
+        --config-path /path/to/your/configs \
+        --config-name train_ego_planner_config.yaml \
+        hydra.run.dir=. \
+        output_video=ego_planner_eval.mp4 \
+        checkpoint_path=/path/to/your/model/best.ckpt
 
 
+python -m s7 --config-path "./configs" --config-name "evaluate_ego_planner_config.yaml" hydra.run.dir=. output_video=ego_planner_eval.mp4 checkpoint_path="C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\v1\backup_epoch_39.ckpt"
 
-import argparse
+"""
+
 import logging
-import pickle
-import time
-import json
+import os
+import collections
 from pathlib import Path
-from typing import List, Dict, Any
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import pytorch_lightning as pl
+import cv2
+import hydra
+import numpy as np
+import torch
+import mujoco
+from omegaconf import DictConfig, OmegaConf
+from PIL import Image
+from torchvision import transforms
+from tqdm.auto import tqdm 
+# --- Import Project Modules ---
+# Ensure this script is run from a location where these modules are importable
+from envs.panda_env import PandaEnv, DomainRandomizationConfig
+from models.ego_planner import EgoPlanner
+from train.train_ego_planner import EgoPlannerLightningModule
+from models.ego_planner import NoiseScheduler, NoiseSchedulerConfig
 
-from tqdm import tqdm
+# Set up a logger
+log = logging.getLogger(__name__)
 
-# local project utils (must exist in PYTHONPATH)
-from utils.expert_dataset import ExpertDatasetWriter
-from utils.lmdb_utils import open_lmdb_env, close_lmdb_env
+# --- Helper Functions ---
+# In your evaluation script (evaluate_ego_planner.py)
+# REPLACE the entire function with this one.
 
-# --- Logging setup ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("transform_legacy_dataset")
-
-
-def read_legacy_episode_chunk(keys_chunk: List[bytes], db_path: str) -> List[Dict[str, Any]]:
+def load_model_from_checkpoint(cfg: DictConfig, checkpoint_path: str, device: torch.device) -> EgoPlanner:
     """
-    Worker function to read and unpickle a list of keys from the legacy LMDB.
-
-    Each worker opens its own read-only LMDB environment (safe for multiprocessing).
-    Returns a list of episode dicts (the same structure as in the legacy dataset).
+    Loads the EGO-Planner model from a Lightning checkpoint.
+    
+    [DEFINITIVE VERSION] This function is robustly patched to:
+    1.  Load the original training hyperparameters directly from the checkpoint file,
+        preventing config mismatches during evaluation.
+    2.  Correctly extract and load the EMA (Exponential Moving Average) weights,
+        which are essential for stable inference.
     """
-    episodes = []
-    env = None
+    log.info(f"Loading checkpoint from: {checkpoint_path}")
+    
+    # Load the full checkpoint on CPU first to inspect its contents
+    ckpt = torch.load(checkpoint_path, map_location='cpu')
+    
+    # --- START OF THE FIX ---
+    # 1. Load the hyperparameters that were used during training
+    if 'hyper_parameters' not in ckpt:
+        raise KeyError(
+            "Checkpoint is missing 'hyper_parameters'. It may be from an older version "
+            "of PyTorch Lightning or was saved improperly."
+        )
+    
+    # 2. Create the original training config from the stored hyperparameters
+    #    This ensures the model architecture is built exactly as it was during training.
+    original_train_cfg = OmegaConf.create(ckpt['hyper_parameters'])
+    log.info("Successfully loaded original training config from checkpoint.")
+    # --- END OF THE FIX ---
+
+    # Check if 'ema_state_dict' exists. This is crucial.
+    if 'ema_state_dict' not in ckpt:
+        raise KeyError(
+            "Checkpoint does not contain 'ema_state_dict'. "
+            "This script requires the EMA weights for evaluation."
+        )
+        
+    log.info("Found 'ema_state_dict'. Initializing model from original config...")
+    
+    # 3. Initialize the LightningModule with the ORIGINAL training config
+    lightning_model = EgoPlannerLightningModule(original_train_cfg)
+    
+    # 4. Load the EMA state dict into the model's EMA object
+    lightning_model.ema.load_state_dict(ckpt['ema_state_dict'])
+    
+    # 5. Get the *actual* model from the EMA wrapper
+    model = lightning_model.ema.ema_model
+    
+    # 6. Move to the target device and set to evaluation mode
+    model.to(device)
+    model.eval()
+    
+    log.info("Model loaded successfully using EMA weights and set to eval mode.")
+    return model
+
+
+def get_goal_image(env: PandaEnv, obs: dict) -> np.ndarray:
+    """
+    Creates a 'goal_image' by saving the current state, moving the object
+    to the goal position, rendering, and then restoring the original state.
+    """
+    log.debug("Capturing goal image...")
+    
+    # 1. Save the current complete simulation state
     try:
-        env = open_lmdb_env(db_path, readonly=True, lock=False, readahead=False, subdir=False)
-        with env.begin(write=False) as txn:
-            for key in keys_chunk:
-                try:
-                    blob = txn.get(key)
-                    if not blob:
-                        logger.debug("Missing blob for key: %s", key)
-                        continue
-                    # The legacy DB stored pickled episode dictionaries
-                    ep = pickle.loads(blob)
-                    episodes.append(ep)
-                except pickle.UnpicklingError:
-                    logger.warning("Could not unpickle data for key: %s (skipping)", key)
-                except Exception as e:
-                    logger.error("Error reading key %s: %s", key, e)
+        state = env.get_mj_state()
     except Exception as e:
-        logger.exception("Worker failed to open or read LMDB: %s", e)
+        log.error(f"Error getting MuJoCo state: {e}")
+        return obs['image_primary'] # Fallback
+
+    # 2. Get the goal position from the observation
+    goal_pos_world = obs['goal_pos_world']
+    
+    # 3. Manually set the object's free joint to the goal position
+    try:
+        qpos_addr = env.model.jnt_qposadr[env.object_joint_id]
+        env.data.qpos[qpos_addr:qpos_addr + 3] = goal_pos_world
+        
+        # We also need to set the orientation if available
+        if 'goal_orn_world' in obs:
+             # Convert xyzw (SciPy) to wxyz (MuJoCo)
+             quat_xyzw = obs['goal_orn_world']
+             quat_wxyz = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]
+             env.data.qpos[qpos_addr + 3:qpos_addr + 7] = quat_wxyz
+
+        # 4. Propagate this change through the simulation
+        mujoco.mj_forward(env.model, env.data)
+        
+        # 5. Render the "goal" scene
+        goal_img_np = env.render(camera_name="fixed_camera")
+        
+    except Exception as e:
+        log.error(f"Error manually setting goal pose: {e}")
+        goal_img_np = obs['image_primary'] # Fallback
     finally:
-        if env:
-            try:
-                close_lmdb_env(env)
-            except Exception:
-                logger.debug("Error closing LMDB env in worker", exc_info=True)
-    return episodes
+        # 6. Restore the original simulation state
+        try:
+            env.set_mj_state(state)
+        except Exception as e:
+            log.error(f"Error restoring MuJoCo state: {e}")
+            
+    log.debug("Goal image captured and state restored.")
+    return goal_img_np
 
 
-def _discover_existing_index(output_dir: Path):
+def preprocess_image(img_np: np.ndarray, transform: transforms.Compose) -> torch.Tensor:
     """
-    Look for existing index JSON files created by previous runs.
-    Returns the most recently modified index file path or None.
+    Converts a NumPy image (H, W, C) to a preprocessed PyTorch tensor (C, H, W).
     """
-    idx_files = list(output_dir.glob("*_index.json"))
-    if not idx_files:
-        return None
-    # pick the most recently modified index file
-    idx_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return idx_files[0]
+    img_pil = Image.fromarray(img_np)
+    return transform(img_pil)
 
 
-def _init_writer_episode_counter_from_index(writer: ExpertDatasetWriter, index_path: Path):
-    """
-    Inspect an existing index JSON and set writer._episode_id_counter to
-    (max_existing_index + 1) so new episodes append safely.
-    If the index file format differs, we fallback to leaving the counter unchanged.
-    """
-    try:
-        with open(index_path, "r") as f:
-            idx = json.load(f)
-        episodes = idx.get("episodes") if isinstance(idx, dict) else None
-        if not episodes:
-            logger.warning("Index file %s contains no 'episodes' list; cannot infer counter.", index_path)
-            return
-        # episodes expected to be list of meta objects containing "episode_id" like "ep_000123"
-        max_idx = -1
-        for meta in episodes:
-            epid = meta.get("episode_id") or meta.get("id") or ""
-            if isinstance(epid, str) and epid.startswith("ep_"):
-                try:
-                    n = int(epid.split("_")[1])
-                    if n > max_idx:
-                        max_idx = n
-                except Exception:
-                    continue
-        if max_idx >= 0:
-            next_idx = max_idx + 1
-            logger.info("Initializing writer._episode_id_counter = %d (based on index %s)", next_idx, index_path.name)
-            try:
-                setattr(writer, "_episode_id_counter", next_idx)
-            except Exception:
-                logger.warning("Writer does not support setting _episode_id_counter; continuing without init.")
-    except Exception as e:
-        logger.exception("Failed to read/parse existing index file %s: %s", index_path, e)
+# --- Main Evaluation Function ---
 
+@hydra.main(version_base=None, config_path="../configs", config_name="evaluate_uhp_config")
+def evaluate(cfg: DictConfig):
+    log.info("--- UHP v2.0 Hierarchical Visual Evaluation (SOTA Patched) ---")
+    log.info(f"Full evaluation config:\n{OmegaConf.to_yaml(cfg)}")
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    pl.seed_everything(cfg.seed, workers=True)
 
-def main(args):
-    legacy_db_path = Path(args.input_path)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if not legacy_db_path.exists():
-        logger.error("Input legacy LMDB not found: %s", legacy_db_path)
-        return
-
-    logger.info("Legacy DB: %s", legacy_db_path)
-    logger.info("Output dir: %s", output_dir)
-
-    # --- scan legacy database keys ---
-    logger.info("Scanning legacy database for keys...")
-    env_legacy = None
-    all_keys = []
-    try:
-        env_legacy = open_lmdb_env(str(legacy_db_path), readonly=True, lock=False, subdir=False)
-        with env_legacy.begin(write=False) as txn:
-            cursor = txn.cursor()
-            for key, _ in cursor:
-                all_keys.append(key)
-    except Exception as e:
-        logger.exception("Failed to scan legacy DB: %s", e)
-        return
-    finally:
-        if env_legacy:
-            try:
-                close_lmdb_env(env_legacy)
-            except Exception:
-                logger.debug("Error closing legacy env", exc_info=True)
-
-    if args.limit:
-        all_keys = all_keys[: args.limit]
-        logger.info("Processing limited subset: %d keys", len(all_keys))
-
-    if not all_keys:
-        logger.error("No keys found in legacy DB.")
-        return
-
-    total_episodes = len(all_keys)
-    logger.info("Found %d keys to process.", total_episodes)
-
-    # --- initialize writer ---
-    run_name = args.run_name or legacy_db_path.stem.replace("expert_", "")
-    writer = ExpertDatasetWriter(
-        out_dir=str(output_dir),
-        run_name=run_name,
-        image_compression="jpeg",
-        jpeg_quality=args.jpeg_quality
+    # --- 1. Load the "Single Source of Truth" ---
+    lightning_module = load_lightning_module_from_checkpoint(cfg.checkpoint_path, device)
+    
+    # --- 2. Unpack All Components from the Single Source of Truth ---
+    model: UHP_Orchestrator = lightning_module.model
+    action_normalizer = lightning_module.action_normalizer
+    proprio_normalizer = lightning_module.proprio_normalizer
+    joint_limits_low = lightning_module.joint_limits_low
+    joint_limits_high = lightning_module.joint_limits_high
+    noise_scheduler = lightning_module.noise_scheduler
+    train_cfg = lightning_module.cfg # The original, correct training config
+    
+    # Get horizons and dimensions from the original training config for robustness
+    obs_horizon = train_cfg.model.executor_cfg.obs_horizon
+    action_dim = train_cfg.model.executor_cfg.action_dim
+    action_horizon = train_cfg.model.executor_cfg.action_horizon
+    
+    # --- 3. Initialize Environment ---
+    env = PandaEnv(
+        xml_path=train_cfg.env.xml_path,
+        control_mode="delta",
+        enable_domain_randomization=False # Explicitly disable for consistency
     )
-    logger.info("Initialized ExpertDatasetWriter (run_name=%s)", run_name)
+    
+    # --- 4. Setup Image Transforms ---
+    transform_planner_img = transforms.Compose([
+        transforms.Resize((224, 224), antialias=True),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    transform_controller_primary = transforms.Compose([transforms.Resize((224, 224), antialias=True), transforms.ToTensor()])
+    transform_controller_wrist = transforms.Compose([transforms.Resize((128, 128), antialias=True), transforms.ToTensor()])
+    
+    # --- 5. Setup Video & CSV Recording ---
+    video_writer = None
+    if cfg.logging.enable_video:
+        video_path = Path(cfg.output_video)
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        frame_test, _ = env.reset(seed=cfg.seed)
+        H, W, _ = env.render().shape
+        video_writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*'mp4v'), 30.0, (W, H))
+        log.info(f"Recording video to: {video_path}")
 
-    # If append requested, try to discover existing index and initialize writer counter
-    if args.append:
-        idx_path = _discover_existing_index(output_dir)
-        if idx_path:
-            logger.info("Append requested; discovered existing index: %s", idx_path.name)
-            _init_writer_episode_counter_from_index(writer, idx_path)
-        else:
-            logger.info("Append requested but no existing index file found; starting fresh.")
+    # (Optional: Add CSV writer setup here if needed, mirroring Ego-Planner's)
+    
+    # --- 6. Run Hierarchical Evaluation Loop ---
+    for ep_idx in tqdm(range(cfg.num_episodes), desc="Evaluating Episodes"):
+        episode_seed = cfg.seed if cfg.eval_static_scene else cfg.seed + ep_idx
+        obs, _ = env.reset(seed=episode_seed)
+        
+        goal_image_np = get_goal_image(env, obs)
+        goal_image_tensor = transform_planner_img(Image.fromarray(goal_image_np)).to(device).unsqueeze(0)
+        
+        # [SOTA WARM-UP] Populate the history with unique, consecutive observations.
+        obs_history = collections.deque(maxlen=obs_horizon)
+        log.info(f"Warming up observation history for {obs_horizon} steps...")
+        for _ in range(obs_horizon):
+            obs, _, _, _, _ = env.step(np.zeros(action_dim))
+            obs_history.append(obs)
+        log.info("Warm-up complete. Starting policy.")
+            
+        current_phase = -1
+        subgoal_embedding = None
+        prev_is_grasped = False
 
-    # --- process in batches using a process pool ---
-    batch_size = args.batch_size
-    num_workers = max(1, args.num_workers)
-    logger.info("Starting transformation: batch_size=%d num_workers=%d", batch_size, num_workers)
+        step_iterator = tqdm(range(env.max_episode_steps), desc=f"Episode {ep_idx+1}", leave=False)
+        for step_count in step_iterator:
+            
+            # --- Hierarchical Control Logic with Corrected Oracle ---
+            new_phase = get_current_task_phase(obs, prev_is_grasped)
+            if new_phase != current_phase:
+                log.info(f"Step {step_count}: Phase changed from {current_phase} -> {new_phase}. Re-planning...")
+                current_phase = new_phase
+                current_image_tensor = transform_planner_img(Image.fromarray(obs['image_primary'])).to(device).unsqueeze(0)
+                task_phase_tensor = torch.tensor([current_phase], dtype=torch.long, device=device)
+                
+                # The `plan` method returns (subgoal_embedding, heatmap)
+                subgoal_embedding, heatmap_viz = model.plan(
+                    current_image_tensor,
+                    goal_image_tensor,
+                    task_phase_tensor
+                )
+            
+            # --- Prepare Executor Inputs from the Warmed-Up History ---
+            proprio_hist = torch.from_numpy(np.stack([h['proprio'] for h in obs_history])).float().to(device)
+            primary_hist = torch.stack([transform_controller_primary(Image.fromarray(h['image_primary'])) for h in obs_history]).to(device)
+            wrist_hist = torch.stack([transform_controller_wrist(Image.fromarray(h['image_wrist'])) for h in obs_history]).to(device)
+            controller_obs_hist = {
+                'image_primary': primary_hist.unsqueeze(0),
+                'image_wrist': wrist_hist.unsqueeze(0),
+                'proprio': proprio_hist.unsqueeze(0)
+            }
+            
+            # --- Get Action from Policy ---
+            action_chunk_raw = model.act(
+                controller_obs_hist, subgoal_embedding, noise_scheduler,
+                cfg.inference.inference_steps, action_normalizer, proprio_normalizer,
+                joint_limits_low, joint_limits_high
+            )
+            action = action_chunk_raw[0, 0, :].cpu().numpy()
+            
+            # (Optional: Add CSV logging for the current step here)
 
-    try:
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            # iterate over batches
-            for batch_idx, start in enumerate(range(0, total_episodes, batch_size), start=1):
-                end = min(start + batch_size, total_episodes)
-                batch_keys = all_keys[start:end]
-                logger.info("Batch %d: keys %d..%d (count=%d)", batch_idx, start, end - 1, len(batch_keys))
-
-                # split batch among workers in balanced fashion
-                # make sure chunks are contiguous-ish to improve IO locality
-                chunk_size = max(1, (len(batch_keys) + num_workers - 1) // num_workers)
-                key_chunks = [batch_keys[i : i + chunk_size] for i in range(0, len(batch_keys), chunk_size)]
-
-                # submit worker jobs
-                futures = [executor.submit(read_legacy_episode_chunk, chunk, str(legacy_db_path)) for chunk in key_chunks]
-
-                batch_episodes: List[Dict[str, Any]] = []
-                # collect results as they finish
-                for fut in tqdm(as_completed(futures), total=len(futures), desc=f"  - Reading batch {batch_idx}", leave=False):
-                    try:
-                        res = fut.result()
-                        if res:
-                            batch_episodes.extend(res)
-                    except Exception as e:
-                        logger.exception("A worker failed while processing a chunk: %s", e)
-
-                logger.info("Batch %d: gathered %d episodes (will save now)", batch_idx, len(batch_episodes))
-
-                if not batch_episodes:
-                    logger.warning("Batch %d produced no episodes; skipping save.", batch_idx)
-                    continue
-
-                # Save this batch with the writer's streaming API
-                save_start = time.time()
-                try:
-                    writer.save_batch(batch_episodes)
-                    save_dur = time.time() - save_start
-                    logger.info("Batch %d saved: %d episodes (%.2fs)", batch_idx, len(batch_episodes), save_dur)
-                except Exception as e:
-                    logger.exception("Failed to save batch %d: %s", batch_idx, e)
-                    # depending on policy, we can either abort or continue; here we abort to avoid data inconsistency
-                    logger.error("Aborting transformation due to save failure on batch %d.", batch_idx)
-                    return
-
-    except KeyboardInterrupt:
-        logger.warning("Interrupted by user (KeyboardInterrupt). Exiting early.")
-        return
-    except Exception as e:
-        logger.exception("Unexpected error during transformation: %s", e)
-        return
-
-    logger.info("All batches processed and saved.")
-    logger.info("Transformation finished successfully.")
-
+            # Update state for the next oracle call BEFORE stepping the environment.
+            prev_is_grasped = obs.get('is_grasped', [0.0])[0] > 0.5
+            
+            # --- Step Environment and Update History ---
+            obs, reward, terminated, truncated, info = env.step(action)
+            obs_history.append(obs)
+            
+            # --- Record Frame with Diagnostic Overlay ---
+            if cfg.logging.enable_video:
+                frame_rgb = env.render()
+                
+                # Add heatmap overlay for diagnostics
+                heatmap_np = heatmap_viz[0, 0].cpu().numpy()
+                heatmap_resized = cv2.resize(heatmap_np, (W, H))
+                heatmap_colored = cv2.applyColorMap((heatmap_resized * 255).astype(np.uint8), cv2.COLORMAP_JET)
+                
+                # Blend the heatmap with the frame
+                overlay_frame = cv2.addWeighted(frame_rgb, 0.6, heatmap_colored, 0.4, 0)
+                
+                # Add text overlay
+                phase_text = f"Phase: {current_phase}"
+                cv2.putText(overlay_frame, phase_text, (10, H - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                
+                video_writer.write(cv2.cvtColor(overlay_frame, cv2.COLOR_RGB2BGR))
+            
+            if terminated or truncated:
+                log.info(f"Episode finished after {step_count + 1} steps.")
+                break
+        
+    # --- 7. Cleanup ---
+    if video_writer is not None: video_writer.release()
+    env.close()
+    log.info("--- Evaluation Complete. ---")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Transform a legacy expert dataset to the new SOTA format.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(name)s - %(message)s'
     )
-    parser.add_argument("input_path", type=str, help="Path to legacy LMDB file (pickled episodes).")
-    parser.add_argument("output_dir", type=str, help="Output directory for converted dataset.")
-    parser.add_argument("--run-name", type=str, default=None, help="Optional run name for output files.")
-    parser.add_argument("--num-workers", type=int, default=4, help="Number of worker processes for reading.")
-    parser.add_argument("--batch-size", type=int, default=256, help="Episodes per overall batch saved in one save_batch() call.")
-    parser.add_argument("--jpeg-quality", type=int, default=90, help="JPEG quality (1-100) for compressed images.")
-    parser.add_argument("--append", action="store_true", help="If set, attempt to append to any existing converted dataset in output_dir.")
-    parser.add_argument("--limit", type=int, default=None, help="Limit number of episodes processed (for tests).")
-    args = parser.parse_args()
-    main(args)
+    evaluate()

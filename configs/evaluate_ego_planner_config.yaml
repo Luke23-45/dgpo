@@ -2,18 +2,18 @@
 # SOTA Hydra Configuration for the Ego-Planner Evaluation Script
 
 # --- Top-Level Settings ---
-seed: 43
+seed: 42
 # The .ckpt file from your training run. MUST be provided, e.g., via command line:
 # `python scripts/evaluate_ego_planner.py checkpoint_path=/path/to/your/model.ckpt`
-checkpoint_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_80.ckpt"
+checkpoint_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_14.ckpt"
 
 device: "cpu"
 
 
-output_video: "video/ego/evaluation_video.mp4"
+output_video: "video/ego/evaluation_videossss.mp4"
 
 # Number of episodes to run for the evaluation.
-num_episodes: 1
+num_episodes: 4
 
 # --- Evaluation Mode ---
 # The primary mode of operation.
@@ -25,7 +25,7 @@ video_fps: 15
 # --- Dataset Configuration ---
 dataset:
   # Path to the .lmdb file for evaluation
-  path: "PATH/TO/YOUR/validation_dataset.lmdb"
+  path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb"
 
 # --- SOTA: Model, Scheduler, and Env Configs ---
 # These sections explicitly define the architecture, ensuring the script can

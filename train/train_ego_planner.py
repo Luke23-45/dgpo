@@ -480,6 +480,36 @@ def main(cfg: DictConfig):
     datamodule = EgoPlannerDataModule(cfg)
     model = EgoPlannerLightningModule(cfg)
 
+
+    if cfg.training.resume_from_checkpoint:
+        log.info(f"PERFORMING MANUAL WARM-START from: {cfg.training.resume_from_checkpoint}")
+        
+        checkpoint = torch.load(cfg.training.resume_from_checkpoint, map_location='cpu')
+        
+        # --- [CRITICAL FIX: REMOVE THE 'model.' PREFIX] ---
+        # 1. Get the original state dict.
+        original_state_dict = checkpoint['state_dict']
+        
+        # 2. Create a new state dict, stripping the unwanted prefix from each key.
+        #    Example: 'model.strategist.xyz' becomes 'strategist.xyz'
+        new_state_dict = {key.replace("model.", ""): value 
+                          for key, value in original_state_dict.items()}
+        
+        # 3. Load the *corrected* state dict into the model.
+        incompatible_keys = model.model.load_state_dict(new_state_dict, strict=False)
+        # --- [END CRITICAL FIX] ---
+
+        log.warning(f"Manual Load - Missing Keys: {incompatible_keys.missing_keys}")
+        log.warning(f"Manual Load - Unexpected Keys: {incompatible_keys.unexpected_keys}")
+
+        # Load EMA weights (EMA state dicts usually don't have this prefix issue)
+        if 'ema_state_dict' in checkpoint:
+            model.ema.load_state_dict(checkpoint['ema_state_dict'], strict=False)
+            log.info("Manual Load - EMA weights restored.")
+        else:
+            model.ema = EMA(model.model, decay=model.cfg.training.ema_decay)
+            log.warning("Manual Load - No EMA state found. Re-initializing EMA from loaded model.")
+
     loggers = [TensorBoardLogger(str(output_dir), name="", version="tb_logs")]
     if cfg.logging.use_wandb:
         wandb_logger = WandbLogger(project=cfg.logging.wandb_project, name=output_dir.name, save_dir=str(output_dir))
@@ -505,7 +535,7 @@ def main(cfg: DictConfig):
 
     try:
         # The trainer.fit call now seamlessly handles advanced resumption
-        trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.training.resume_from_checkpoint)
+        trainer.fit(model, datamodule=datamodule, ckpt_path=None)
     except (Exception, KeyboardInterrupt) as e:
         log.warning(f"Training interrupted or failed: {e}")
         log.info("Attempting to save a final 'interrupted.ckpt'...")

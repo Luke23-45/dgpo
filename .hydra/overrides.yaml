@@ -1,2 +1,2 @@
-- output_video=ego_planner_eval1.mp4
-- checkpoint_path=./notes/checkpoints/backup_epoch_80.ckpt
+- output_video=ego_planner_eval123.mp4
+- checkpoint_path=C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\v1\backup_epoch_5.ckpt

@@ -1,0 +1,42 @@
+seed: 42
+il_checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_5.ckpt
+total_timesteps: 1000000
+n_envs: 4
+reward_wrapper:
+  k_reach_xy: 5.0
+  k_reach_z_hover: 4.0
+  k_orient: 3.0
+  k_lift: 6.0
+  k_move_xy: 7.0
+  k_move_z: 4.0
+  grasp_bonus: 15.0
+  success_bonus: 200.0
+  action_penalty: 0.002
+  velocity_penalty: 0.001
+  contact_penalty: 2.0
+  drop_penalty: 30.0
+  gamma: 0.99
+  hover_height: 0.08
+  lift_height_thresh: 0.05
+  goal_pos_thresh: 0.03
+  stable_velocity_thresh: 0.02
+ppo:
+  learning_rate: 1.0e-05
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+callbacks:
+  checkpoint_freq: 50000
+  eval_freq: 20000
+  n_eval_episodes: 10
+logging:
+  use_wandb: true
+  wandb_project: ego_planner_rl_finetuning
+  wandb_run_name: null
+  gradient_save_freq: 10000

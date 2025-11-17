@@ -1,0 +1,22 @@
+# @package _global_
+
+# --- Paths ---
+# Path to the SOTA checkpoint file (.ckpt)
+checkpoint_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_39.ckpt"
+
+# Path to the validation dataset (e.g., expert_run_2025_episodes.lmdb)
+# This is ONLY used to get goal images and seeds
+dataset_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training/training_dataset.lmdb"
+
+# --- Evaluation Parameters ---
+seed: 42
+num_episodes: 3 # How many episodes to run
+
+# --- Video Logging ---
+# Set to null (e.g., output_video: null) to disable video
+output_video: "uhp_live_evaluation.mp4"
+video_fps: 30
+
+# --- Inference Parameters ---
+inference:
+  inference_steps: 20 # Number of DDPM inference steps

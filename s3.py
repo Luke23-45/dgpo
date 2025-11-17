@@ -293,23 +293,22 @@ def evaluate(cfg: DictConfig):
         step_iterator = tqdm(range(env.max_episode_steps), desc=f"Episode {ep_idx+1}", leave=False)
         for step_count in step_iterator:
             
-            # --- Hierarchical Control Logic with Corrected Oracle ---
             new_phase = get_current_task_phase(obs, prev_is_grasped)
             if new_phase != current_phase:
-                log.info(f"Step {step_count}: Phase changed from {current_phase} -> {new_phase}. Re-planning...")
-                current_phase = new_phase
-                current_image_tensor = transform_planner_img(Image.fromarray(obs['image_primary'])).to(device).unsqueeze(0)
-                task_phase_tensor = torch.tensor([current_phase], dtype=torch.long, device=device)
-                
-                current_proprio_tensor = torch.from_numpy(obs['proprio']).float().to(device).unsqueeze(0)
+                 log.info(f"Step {step_count}: Oracle phase changed to {new_phase}.")
+            current_phase = new_phase # Update the phase for logging
 
+            current_image_tensor = transform_planner_img(Image.fromarray(obs['image_primary'])).to(device).unsqueeze(0)
+            task_phase_tensor = torch.tensor([current_phase], dtype=torch.long, device=device)
+            current_proprio_tensor = torch.from_numpy(obs['proprio']).float().to(device).unsqueeze(0)
 
-                subgoal_embedding = model.plan(
-                    current_image_tensor,
-                    goal_image_tensor,
-                    task_phase_tensor,
-                    current_proprio_tensor
-                )
+            # The `plan` method is now called at EVERY step.
+            subgoal_embedding = model.plan(
+                current_image_tensor,
+                goal_image_tensor,
+                task_phase_tensor,
+                current_proprio_tensor
+            )
             
             # Prepare Executor inputs from the now-valid obs_history
             proprio_hist = torch.from_numpy(np.stack([h['proprio'] for h in obs_history])).float().to(device)

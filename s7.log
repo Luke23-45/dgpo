@@ -476,3 +476,418 @@ eval_static_scene: true
 [2025-11-03 11:35:42,556][__main__][INFO] - Episode finished after 500 steps. (Terminated: False, Truncated: True)
 [2025-11-03 11:35:42,684][__main__][INFO] - --- Evaluation Complete ---
 [2025-11-03 11:35:42,685][__main__][INFO] - Video saved to: C:\Users\Hellx\Documents\Programming\python\Project\redhot\ego_planner_eval1.mp4
+[2025-11-17 11:55:25,541][__main__][INFO] - --- EGO-Planner Visual Evaluation ---
+[2025-11-17 11:55:25,545][__main__][INFO] - Config overrides:
+seed: 43
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_14.ckpt
+device: cpu
+output_video: ego_planner_evala.mp4
+num_episodes: 1
+evaluation_mode: closed_loop
+video_fps: 15
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+model:
+  action_dim: 7
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+scheduler:
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+  timesteps: 100
+env:
+  xml_path: envs/panda_pick_place.xml
+inference:
+  sampling_steps: 20
+  guidance_scale_plan: 2.5
+  guidance_scale_obs: 2.5
+rollout:
+  episode_indices: []
+  max_episodes_to_eval: 5
+  max_steps: 400
+eval_static_scene: true
+
+[2025-11-17 11:55:25,548][__main__][INFO] - Using device: cpu
+[2025-11-17 11:55:25,565][__main__][INFO] - Loading checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_14.ckpt
+[2025-11-17 11:55:26,701][__main__][INFO] - Successfully loaded original training config from checkpoint.
+[2025-11-17 11:55:26,702][__main__][INFO] - Found 'ema_state_dict'. Initializing model from original config...
+[2025-11-17 11:55:26,710][models.ego_planner][INFO] - [Strategist] Initializing ViT backbone: google/siglip-base-patch16-224
+[2025-11-17 11:55:27,769][models.ego_planner][INFO] - [Strategist] Derived configuration: image_size=224, patch_size=16, num_patches=196.
+[2025-11-17 11:55:27,854][models.ego_planner][INFO] - [Pilot] Activation Checkpointing: Enabled
+[2025-11-17 11:55:32,060][models.ego_planner][INFO] - EgoPlanner v5 (Definitive & Audited) model initialized.
+[2025-11-17 11:55:32,384][train.train_ego_planner][INFO] - EMA enabled with decay rate: 0.999
+[2025-11-17 11:55:32,401][train.train_ego_planner][INFO] - Definitive SOTA EgoPlannerLightningModule (v2) initialized.
+[2025-11-17 11:55:32,531][__main__][INFO] - Model loaded successfully using EMA weights and set to eval mode.
+[2025-11-17 11:55:32,577][__main__][INFO] - Initializing PandaEnv (Domain Randomization DISABLED for eval)...
+[2025-11-17 11:55:35,724][__main__][INFO] - Recording video to: ego_planner_evala.mp4 (256x256 @ 30fps)
+[2025-11-17 11:55:35,729][__main__][INFO] - --- Starting Evaluation Episode 1 / 1 ---
+[2025-11-17 11:55:35,730][__main__][INFO] - Using STATIC scene evaluation with fixed seed: 43
+[2025-11-17 12:01:37,292][__main__][INFO] - Episode finished after 100 steps. (Terminated: False, Truncated: True)
+[2025-11-17 12:01:37,406][__main__][INFO] - --- Evaluation Complete ---
+[2025-11-17 12:01:37,407][__main__][INFO] - Video saved to: C:\Users\Hellx\Documents\Programming\python\Project\redhot\ego_planner_evala.mp4
+[2025-11-17 12:08:38,011][__main__][INFO] - --- EGO-Planner Visual Evaluation ---
+[2025-11-17 12:08:38,015][__main__][INFO] - Config overrides:
+seed: 10514
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_14.ckpt
+device: cpu
+output_video: ego_planner_evala.mp4
+num_episodes: 1
+evaluation_mode: closed_loop
+video_fps: 15
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+model:
+  action_dim: 7
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+scheduler:
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+  timesteps: 100
+env:
+  xml_path: envs/panda_pick_place.xml
+inference:
+  sampling_steps: 20
+  guidance_scale_plan: 2.5
+  guidance_scale_obs: 2.5
+rollout:
+  episode_indices: []
+  max_episodes_to_eval: 5
+  max_steps: 400
+eval_static_scene: true
+
+[2025-11-17 12:08:38,020][__main__][INFO] - Using device: cpu
+[2025-11-17 12:08:38,027][__main__][INFO] - Loading checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_14.ckpt
+[2025-11-17 12:08:39,148][__main__][INFO] - Successfully loaded original training config from checkpoint.
+[2025-11-17 12:08:39,149][__main__][INFO] - Found 'ema_state_dict'. Initializing model from original config...
+[2025-11-17 12:08:39,157][models.ego_planner][INFO] - [Strategist] Initializing ViT backbone: google/siglip-base-patch16-224
+[2025-11-17 12:08:40,041][models.ego_planner][INFO] - [Strategist] Derived configuration: image_size=224, patch_size=16, num_patches=196.
+[2025-11-17 12:08:40,110][models.ego_planner][INFO] - [Pilot] Activation Checkpointing: Enabled
+[2025-11-17 12:08:43,253][models.ego_planner][INFO] - EgoPlanner v5 (Definitive & Audited) model initialized.
+[2025-11-17 12:08:43,473][train.train_ego_planner][INFO] - EMA enabled with decay rate: 0.999
+[2025-11-17 12:08:43,475][train.train_ego_planner][INFO] - Definitive SOTA EgoPlannerLightningModule (v2) initialized.
+[2025-11-17 12:08:43,601][__main__][INFO] - Model loaded successfully using EMA weights and set to eval mode.
+[2025-11-17 12:08:43,655][__main__][INFO] - Initializing PandaEnv (Domain Randomization DISABLED for eval)...
+[2025-11-17 12:08:46,409][__main__][INFO] - Recording video to: ego_planner_evala.mp4 (256x256 @ 30fps)
+[2025-11-17 12:08:46,411][__main__][INFO] - --- Starting Evaluation Episode 1 / 1 ---
+[2025-11-17 12:08:46,411][__main__][INFO] - Using STATIC scene evaluation with fixed seed: 10514
+[2025-11-17 12:14:48,582][__main__][INFO] - Episode finished after 100 steps. (Terminated: False, Truncated: True)
+[2025-11-17 12:14:48,698][__main__][INFO] - --- Evaluation Complete ---
+[2025-11-17 12:14:48,698][__main__][INFO] - Video saved to: C:\Users\Hellx\Documents\Programming\python\Project\redhot\ego_planner_evala.mp4
+[2025-11-17 12:18:43,420][__main__][INFO] - --- EGO-Planner Visual Evaluation ---
+[2025-11-17 12:18:43,423][__main__][INFO] - Config overrides:
+seed: 10514
+checkpoint_path: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\backup_epoch_80.ckpt
+device: cpu
+output_video: ego_planner_eval.mp4
+num_episodes: 1
+evaluation_mode: closed_loop
+video_fps: 15
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+model:
+  action_dim: 7
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+scheduler:
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+  timesteps: 100
+env:
+  xml_path: envs/panda_pick_place.xml
+inference:
+  sampling_steps: 20
+  guidance_scale_plan: 2.5
+  guidance_scale_obs: 2.5
+rollout:
+  episode_indices: []
+  max_episodes_to_eval: 5
+  max_steps: 400
+eval_static_scene: true
+
+[2025-11-17 12:18:43,427][__main__][INFO] - Using device: cpu
+[2025-11-17 12:18:43,433][__main__][INFO] - Loading checkpoint from: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\backup_epoch_80.ckpt
+[2025-11-17 12:18:47,180][__main__][INFO] - Successfully loaded original training config from checkpoint.
+[2025-11-17 12:18:47,180][__main__][INFO] - Found 'ema_state_dict'. Initializing model from original config...
+[2025-11-17 12:18:47,187][models.ego_planner][INFO] - [Strategist] Initializing ViT backbone: google/siglip-base-patch16-224
+[2025-11-17 12:18:48,069][models.ego_planner][INFO] - [Strategist] Derived configuration: image_size=224, patch_size=16, num_patches=196.
+[2025-11-17 12:18:48,142][models.ego_planner][INFO] - [Pilot] Activation Checkpointing: Enabled
+[2025-11-17 12:18:51,303][models.ego_planner][INFO] - EgoPlanner v5 (Definitive & Audited) model initialized.
+[2025-11-17 12:18:51,585][train.train_ego_planner][INFO] - EMA enabled with decay rate: 0.999
+[2025-11-17 12:18:51,588][train.train_ego_planner][INFO] - Definitive SOTA EgoPlannerLightningModule (v2) initialized.
+[2025-11-17 12:18:51,713][__main__][INFO] - Model loaded successfully using EMA weights and set to eval mode.
+[2025-11-17 12:18:51,768][__main__][INFO] - Initializing PandaEnv (Domain Randomization DISABLED for eval)...
+[2025-11-17 12:18:54,563][__main__][INFO] - Recording video to: ego_planner_eval.mp4 (256x256 @ 30fps)
+[2025-11-17 12:18:54,566][__main__][INFO] - --- Starting Evaluation Episode 1 / 1 ---
+[2025-11-17 12:18:54,566][__main__][INFO] - Using STATIC scene evaluation with fixed seed: 10514
+[2025-11-17 12:25:00,914][__main__][INFO] - Episode finished after 100 steps. (Terminated: False, Truncated: True)
+[2025-11-17 12:25:01,037][__main__][INFO] - --- Evaluation Complete ---
+[2025-11-17 12:25:01,038][__main__][INFO] - Video saved to: C:\Users\Hellx\Documents\Programming\python\Project\redhot\ego_planner_eval.mp4
+[2025-11-17 12:31:25,522][__main__][INFO] - --- EGO-Planner Visual Evaluation ---
+[2025-11-17 12:31:25,530][__main__][INFO] - Config overrides:
+seed: 10514
+checkpoint_path: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\v1\backup_epoch_39.ckpt
+device: cpu
+output_video: ego_planner_eval.mp4
+num_episodes: 1
+evaluation_mode: closed_loop
+video_fps: 15
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+model:
+  action_dim: 7
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+scheduler:
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+  timesteps: 100
+env:
+  xml_path: envs/panda_pick_place.xml
+inference:
+  sampling_steps: 20
+  guidance_scale_plan: 2.5
+  guidance_scale_obs: 2.5
+rollout:
+  episode_indices: []
+  max_episodes_to_eval: 5
+  max_steps: 400
+eval_static_scene: true
+
+[2025-11-17 12:31:25,534][__main__][INFO] - Using device: cpu
+[2025-11-17 12:31:25,544][__main__][INFO] - Loading checkpoint from: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\v1\backup_epoch_39.ckpt
+[2025-11-17 16:16:26,075][__main__][INFO] - --- EGO-Planner Visual Evaluation ---
+[2025-11-17 16:16:26,078][__main__][INFO] - Config overrides:
+seed: 10514
+checkpoint_path: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\backup_epoch_80.ckpt
+device: cpu
+output_video: ego_planner_eval.mp4
+num_episodes: 4
+evaluation_mode: closed_loop
+video_fps: 15
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+model:
+  action_dim: 7
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+scheduler:
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+  timesteps: 100
+env:
+  xml_path: envs/panda_pick_place.xml
+inference:
+  sampling_steps: 20
+  guidance_scale_plan: 2.5
+  guidance_scale_obs: 2.5
+rollout:
+  episode_indices: []
+  max_episodes_to_eval: 5
+  max_steps: 400
+eval_static_scene: true
+
+[2025-11-17 16:16:26,083][__main__][INFO] - Using device: cpu
+[2025-11-17 16:16:26,088][__main__][INFO] - Loading checkpoint from: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\backup_epoch_80.ckpt
+[2025-11-17 16:16:29,658][__main__][INFO] - Successfully loaded original training config from checkpoint.
+[2025-11-17 16:16:29,658][__main__][INFO] - Found 'ema_state_dict'. Initializing model from original config...
+[2025-11-17 16:16:29,665][models.ego_planner][INFO] - [Strategist] Initializing ViT backbone: google/siglip-base-patch16-224
+[2025-11-17 16:16:30,767][models.ego_planner][INFO] - [Strategist] Derived configuration: image_size=224, patch_size=16, num_patches=196.
+[2025-11-17 16:16:30,844][models.ego_planner][INFO] - [Pilot] Activation Checkpointing: Enabled
+[2025-11-17 16:16:33,999][models.ego_planner][INFO] - EgoPlanner v5 (Definitive & Audited) model initialized.
+[2025-11-17 16:16:34,299][train.train_ego_planner][INFO] - EMA enabled with decay rate: 0.999
+[2025-11-17 16:16:34,309][train.train_ego_planner][INFO] - Definitive SOTA EgoPlannerLightningModule (v2) initialized.
+[2025-11-17 16:16:34,423][__main__][INFO] - Model loaded successfully using EMA weights and set to eval mode.
+[2025-11-17 16:16:34,478][__main__][INFO] - Initializing PandaEnv (Domain Randomization DISABLED for eval)...
+[2025-11-17 16:16:37,352][__main__][INFO] - Recording video to: ego_planner_eval.mp4 (256x256 @ 30fps)
+[2025-11-17 16:16:37,354][__main__][INFO] - --- Starting Evaluation Episode 1 / 4 ---
+[2025-11-17 16:16:37,354][__main__][INFO] - Using STATIC scene evaluation with fixed seed: 10514
+[2025-11-17 16:22:49,497][__main__][INFO] - Episode finished after 100 steps. (Terminated: False, Truncated: True)
+[2025-11-17 16:22:49,499][__main__][INFO] - --- Starting Evaluation Episode 2 / 4 ---
+[2025-11-17 16:31:36,633][__main__][INFO] - Episode finished after 100 steps. (Terminated: False, Truncated: True)
+[2025-11-17 16:31:36,634][__main__][INFO] - --- Starting Evaluation Episode 3 / 4 ---
+[2025-11-17 16:39:55,108][__main__][INFO] - Episode finished after 100 steps. (Terminated: False, Truncated: True)
+[2025-11-17 16:39:55,111][__main__][INFO] - --- Starting Evaluation Episode 4 / 4 ---
+[2025-11-17 16:47:50,343][__main__][INFO] - Episode finished after 100 steps. (Terminated: False, Truncated: True)
+[2025-11-17 16:47:50,491][__main__][INFO] - --- Evaluation Complete ---
+[2025-11-17 16:47:50,491][__main__][INFO] - Video saved to: C:\Users\Hellx\Documents\Programming\python\Project\redhot\ego_planner_eval.mp4
+[2025-11-17 20:59:27,913][__main__][INFO] - --- EGO-Planner Visual Evaluation ---
+[2025-11-17 20:59:27,916][__main__][INFO] - Config overrides:
+seed: 10514
+checkpoint_path: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\v1\backup_epoch_5.ckpt
+device: cpu
+output_video: ego_planner_eval123.mp4
+num_episodes: 4
+evaluation_mode: closed_loop
+video_fps: 15
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+model:
+  action_dim: 7
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+scheduler:
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+  timesteps: 100
+env:
+  xml_path: envs/panda_pick_place.xml
+inference:
+  sampling_steps: 20
+  guidance_scale_plan: 2.5
+  guidance_scale_obs: 2.5
+rollout:
+  episode_indices: []
+  max_episodes_to_eval: 5
+  max_steps: 400
+eval_static_scene: true
+
+[2025-11-17 20:59:27,919][__main__][INFO] - Using device: cpu
+[2025-11-17 20:59:27,931][__main__][INFO] - Loading checkpoint from: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\v1\backup_epoch_5.ckpt
+[2025-11-17 20:59:29,104][__main__][INFO] - Successfully loaded original training config from checkpoint.
+[2025-11-17 20:59:29,104][__main__][INFO] - Found 'ema_state_dict'. Initializing model from original config...
+[2025-11-17 20:59:29,112][models.ego_planner][INFO] - [Strategist] Initializing ViT backbone: google/siglip-base-patch16-224
+[2025-11-17 20:59:30,142][models.ego_planner][INFO] - [Strategist] Derived configuration: image_size=224, patch_size=16, num_patches=196.
+[2025-11-17 20:59:30,224][models.ego_planner][INFO] - [Pilot] Activation Checkpointing: Enabled
+[2025-11-17 20:59:34,462][models.ego_planner][INFO] - EgoPlanner v5 (Definitive & Audited) model initialized.
+[2025-11-17 20:59:34,790][train.train_ego_planner][INFO] - EMA enabled with decay rate: 0.999
+[2025-11-17 20:59:34,811][train.train_ego_planner][INFO] - Definitive SOTA EgoPlannerLightningModule (v2) initialized.
+[2025-11-17 20:59:34,934][__main__][INFO] - Model loaded successfully using EMA weights and set to eval mode.
+[2025-11-17 20:59:34,986][__main__][INFO] - Initializing PandaEnv (Domain Randomization DISABLED for eval)...
+[2025-11-17 20:59:38,295][__main__][INFO] - Recording video to: ego_planner_eval123.mp4 (256x256 @ 30fps)
+[2025-11-17 20:59:38,298][__main__][INFO] - --- Starting Evaluation Episode 1 / 4 ---
+[2025-11-17 20:59:38,298][__main__][INFO] - Using STATIC scene evaluation with fixed seed: 10514
+[2025-11-17 21:07:44,655][__main__][INFO] - Episode finished after 100 steps. (Terminated: False, Truncated: True)
+[2025-11-17 21:07:44,657][__main__][INFO] - --- Starting Evaluation Episode 2 / 4 ---
+[2025-11-17 21:15:35,318][__main__][INFO] - Episode finished after 100 steps. (Terminated: False, Truncated: True)
+[2025-11-17 21:15:35,319][__main__][INFO] - --- Starting Evaluation Episode 3 / 4 ---
+[2025-11-17 21:23:07,680][__main__][INFO] - Episode finished after 100 steps. (Terminated: False, Truncated: True)
+[2025-11-17 21:23:07,682][__main__][INFO] - --- Starting Evaluation Episode 4 / 4 ---
+[2025-11-17 21:30:24,799][__main__][INFO] - Episode finished after 100 steps. (Terminated: False, Truncated: True)
+[2025-11-17 21:30:24,969][__main__][INFO] - --- Evaluation Complete ---
+[2025-11-17 21:30:24,970][__main__][INFO] - Video saved to: C:\Users\Hellx\Documents\Programming\python\Project\redhot\ego_planner_eval123.mp4
+[2025-11-17 21:55:32,604][__main__][INFO] - --- EGO-Planner Visual Evaluation ---
+[2025-11-17 21:55:32,608][__main__][INFO] - Config overrides:
+seed: 42
+checkpoint_path: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\v1\backup_epoch_5.ckpt
+device: cpu
+output_video: ego_planner_eval123.mp4
+num_episodes: 4
+evaluation_mode: closed_loop
+video_fps: 15
+dataset:
+  path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+model:
+  action_dim: 7
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+scheduler:
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+  timesteps: 100
+env:
+  xml_path: envs/panda_pick_place.xml
+inference:
+  sampling_steps: 20
+  guidance_scale_plan: 2.5
+  guidance_scale_obs: 2.5
+rollout:
+  episode_indices: []
+  max_episodes_to_eval: 5
+  max_steps: 400
+eval_static_scene: true
+
+[2025-11-17 21:55:32,619][__main__][INFO] - Using device: cpu
+[2025-11-17 21:55:32,630][__main__][INFO] - Loading checkpoint from: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\v1\backup_epoch_5.ckpt
+[2025-11-17 21:55:33,966][__main__][INFO] - Successfully loaded original training config from checkpoint.
+[2025-11-17 21:55:33,966][__main__][INFO] - Found 'ema_state_dict'. Initializing model from original config...
+[2025-11-17 21:55:33,974][models.ego_planner][INFO] - [Strategist] Initializing ViT backbone: google/siglip-base-patch16-224
+[2025-11-17 21:55:34,800][models.ego_planner][INFO] - [Strategist] Derived configuration: image_size=224, patch_size=16, num_patches=196.
+[2025-11-17 21:55:34,885][models.ego_planner][INFO] - [Pilot] Activation Checkpointing: Enabled
+[2025-11-17 21:55:38,468][models.ego_planner][INFO] - EgoPlanner v5 (Definitive & Audited) model initialized.
+[2025-11-17 21:55:39,007][train.train_ego_planner][INFO] - EMA enabled with decay rate: 0.999
+[2025-11-17 21:55:39,013][train.train_ego_planner][INFO] - Definitive SOTA EgoPlannerLightningModule (v2) initialized.
+[2025-11-17 21:55:39,188][__main__][INFO] - Model loaded successfully using EMA weights and set to eval mode.
+[2025-11-17 21:55:39,264][__main__][INFO] - Initializing PandaEnv (Domain Randomization DISABLED for eval)...
+[2025-11-17 21:55:42,833][__main__][INFO] - Recording video to: ego_planner_eval123.mp4 (256x256 @ 30fps)
+[2025-11-17 21:55:42,836][__main__][INFO] - --- Starting Evaluation Episode 1 / 4 ---
+[2025-11-17 21:55:42,837][__main__][INFO] - Using STATIC scene evaluation with fixed seed: 42
+[2025-11-17 22:07:56,654][__main__][INFO] - Episode finished after 150 steps. (Terminated: False, Truncated: True)
+[2025-11-17 22:07:56,658][__main__][INFO] - --- Starting Evaluation Episode 2 / 4 ---
+[2025-11-17 22:21:10,913][__main__][INFO] - Episode finished after 150 steps. (Terminated: False, Truncated: True)
+[2025-11-17 22:21:10,915][__main__][INFO] - --- Starting Evaluation Episode 3 / 4 ---
+[2025-11-17 22:34:17,626][__main__][INFO] - Episode finished after 150 steps. (Terminated: False, Truncated: True)
+[2025-11-17 22:34:17,628][__main__][INFO] - --- Starting Evaluation Episode 4 / 4 ---
+[2025-11-17 22:46:20,346][__main__][INFO] - Episode finished after 150 steps. (Terminated: False, Truncated: True)
+[2025-11-17 22:46:20,556][__main__][INFO] - --- Evaluation Complete ---
+[2025-11-17 22:46:20,557][__main__][INFO] - Video saved to: C:\Users\Hellx\Documents\Programming\python\Project\redhot\ego_planner_eval123.mp4

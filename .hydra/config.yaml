@@ -1,12 +1,12 @@
-seed: 43
-checkpoint_path: ./notes/checkpoints/backup_epoch_80.ckpt
+seed: 42
+checkpoint_path: C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\v1\backup_epoch_5.ckpt
 device: cpu
-output_video: ego_planner_eval1.mp4
-num_episodes: 1
+output_video: ego_planner_eval123.mp4
+num_episodes: 4
 evaluation_mode: closed_loop
 video_fps: 15
 dataset:
-  path: PATH/TO/YOUR/validation_dataset.lmdb
+  path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
 model:
   action_dim: 7
   proprio_dim: 22

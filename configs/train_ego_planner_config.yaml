@@ -52,7 +52,6 @@ dataset:
   # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"      
   # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"   
   train_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
-
   val_path: "/content/drive/MyDrive/pda/data/training/training_dataset.lmdb"
   #C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/training/sota_dataset/expert_training_run_99914b93.lmdb
   num_workers: 1            
@@ -76,8 +75,7 @@ training:
   use_swa: false             # Set to true to enable SWA towards the end of training.
   swa_lrs: 1e-5              # Learning rate for the SWA phase.
 
-  resume_from_checkpoint: null # Path to a .ckpt file to resume training from. e.g., "/path/to/last.ckpt"
-
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backup_epoch_80.ckpt"
 # --- Validation & Inference Configuration ---
 validation:
   # The 'Slow Path' for expensive diagnostics will run every N epochs.

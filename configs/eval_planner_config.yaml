@@ -7,15 +7,17 @@ hydra:
   job:
     chdir: true
 
+
+
 seed: 42 # Use the same seed as training for train/val split consistency
 
 # --- Paths ---
 # REQUIRED: Path to the PyTorch Lightning checkpoint (.ckpt) from your training run.
-planner_ckpt_path: "/content/drive/MyDrive/pda/Models/backup_epoch_7.ckpt" # <-- EXAMPLE, CHANGE THIS
+planner_ckpt_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb" # <-- EXAMPLE, CHANGE THIS
 
 # REQUIRED: Path to the dataset used for training. The script will derive the
 # validation split from this file using the same seed and split percentage.
-dataset_path: "/content/drive/MyDrive/pda/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb"
+dataset_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb"
 
 # --- Data Preprocessing (MUST BE IDENTICAL TO TRAINING) ---
 # These values are used to denormalize images for visualization.
@@ -32,7 +34,7 @@ dataset:
 # --- Inference Parameters ---
 inference:
   # Change this to "cuda" if you have a GPU available for evaluation.
-  device: "cuda"
+  device: "cpu"
   # This should match the number of steps used during the "full validation" in training.
   planner_inference_steps: 20
   # Keep these optimizations enabled.

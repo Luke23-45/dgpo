@@ -1,0 +1,55 @@
+[2025-11-16 20:42:38,314][__main__][INFO] - --- UHP Visual Checkpoint Debugger ---
+[2025-11-16 20:42:38,319][__main__][INFO] - Full debug configuration:
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_39.ckpt
+episode_id_to_test: ep_000015
+inference_steps: 20
+seed: 42
+env:
+  xml_path: envs/panda_pick_place.xml
+dataset:
+  train_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+  num_workers: 1
+model:
+  sequencer_cfg:
+    vision_backbone_model: google/siglip-base-patch16-224
+    num_task_phases: 5
+    fusion_transformer_layers: 4
+    fusion_transformer_heads: 8
+    subgoal_dim: 768
+    proprio_dim: ${model.executor_cfg.proprio_dim}
+  executor_cfg:
+    proprio_dim: 22
+    action_dim: 8
+    action_horizon: 8
+    obs_horizon: 2
+    subgoal_dim: 768
+    pilot_hidden_dim: 512
+    resnet_feature_dim: 256
+    denoiser_layers: 6
+    denoiser_heads: 8
+
+[2025-11-16 20:42:38,326][__main__][INFO] - Loading checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_39.ckpt
+[2025-11-16 20:42:39,433][models.uhp][INFO] - Initializing the UHP Orchestrator...
+[2025-11-16 20:42:39,434][models.uhp][INFO] - Initializing Sequencer with backbone: google/siglip-base-patch16-224
+[2025-11-16 20:42:40,280][models.uhp][INFO] - Determined vision model hidden dimension: 768
+[2025-11-16 20:42:40,380][models.uhp][INFO] - Initializing Executor with hidden_dim: 512
+[2025-11-16 20:42:41,187][models.uhp][INFO] - UHP Orchestrator initialized successfully.
+[2025-11-16 20:42:41,501][train.train_uhp][INFO] - UHPLightningModule initialized successfully.
+[2025-11-16 20:42:41,610][train.train_uhp][INFO] - Successfully loaded EMA weights from checkpoint.
+[2025-11-16 20:42:41,611][train.train_uhp][INFO] - Successfully loaded normalizers from checkpoint into LightningModule.
+[2025-11-16 20:42:41,612][train.train_uhp][INFO] - Successfully loaded kinematic limits from checkpoint.
+[2025-11-16 20:42:41,956][__main__][INFO] - Loading episode 'ep_000015' from C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb...
+[2025-11-16 20:42:41,957][__main__][ERROR] - Failed to load episode data: path exists but is not a directory: %r
+Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\s4.py", line 54, in get_episode_data
+    root = zarr.open(Path(dataset_path).resolve().as_posix(), 'r')
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\zarr\convenience.py", line 109, in open
+    _store: BaseStore = normalize_store_arg(
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\zarr\storage.py", line 201, in normalize_store_arg
+    return normalize_store(store, storage_options, mode)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\zarr\storage.py", line 181, in _normalize_store_arg_v2
+    return DirectoryStore(store)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\lib\site-packages\zarr\storage.py", line 1069, in __init__
+    raise FSPathExistNotDir(path)
+zarr.errors.FSPathExistNotDir: path exists but is not a directory: %r

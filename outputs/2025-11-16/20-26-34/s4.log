@@ -1,0 +1,70 @@
+[2025-11-16 20:26:34,503][__main__][INFO] - --- UHP Visual Checkpoint Debugger ---
+[2025-11-16 20:26:34,508][__main__][INFO] - Full debug configuration:
+seed: 42
+env:
+  xml_path: envs/panda_pick_place.xml
+model:
+  sequencer_cfg:
+    vision_backbone_model: google/siglip-base-patch16-224
+    num_task_phases: 5
+    fusion_transformer_layers: 4
+    fusion_transformer_heads: 8
+    subgoal_dim: 768
+    proprio_dim: ${model.executor_cfg.proprio_dim}
+  executor_cfg:
+    proprio_dim: 22
+    action_dim: 8
+    action_horizon: 8
+    obs_horizon: 2
+    subgoal_dim: 768
+    pilot_hidden_dim: 512
+    resnet_feature_dim: 256
+    denoiser_layers: 6
+    denoiser_heads: 8
+dataset:
+  train_path: /content/drive/MyDrive/pda/data/training/training_dataset.lmdb
+  val_path: /content/drive/MyDrive/pda/data/training/training_dataset.lmdb
+  num_workers: 1
+training:
+  batch_size: 32
+  val_batch_size: 16
+  ema_decay: 0.999
+  checkpoint_monitor: val/loss_action_raw
+  backup_every_n_epochs: 5
+  save_top_k: 3
+  resume_from_checkpoint: /content/drive/MyDrive/pda/models/v1/backup_epoch_5.ckpt
+  use_swa: false
+  swa_lrs: 0.0001
+  loss_weights:
+    lambda_heatmap: 0.1
+optimizer:
+  lr: 0.0001
+  weight_decay: 1.0e-06
+  warmup_percentage: 0.1
+scheduler:
+  timesteps: 100
+  beta_schedule: squaredcos_cap_v2
+  beta_start: 0.0001
+  beta_end: 0.02
+validation:
+  run_qualitative_every_n_epoch: 60
+logging:
+  use_wandb: true
+  wandb_mode: offline
+  wandb_project: UHP_Panda_Project
+  wandb_run_name: null
+  log_grad_freq: 100
+  progress_bar_refresh_rate: 10
+trainer:
+  accelerator: auto
+  devices: auto
+  check_val_every_n_epoch: 40
+  max_epochs: 500
+  precision: 16-mixed
+  log_every_n_steps: 10
+  gradient_clip_val: 1.0
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_39.ckpt
+episode_id_to_test: ep_000015
+inference_steps: 20
+
+[2025-11-16 20:26:34,518][__main__][INFO] - Loading checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_39.ckpt

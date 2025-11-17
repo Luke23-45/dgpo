@@ -1,0 +1,29 @@
+[2025-11-17 13:12:49,863][__main__][INFO] - --- UHP v3.0 SOTA Live Evaluation ---
+[2025-11-17 13:12:49,865][__main__][INFO] - Full evaluation config:
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_39.ckpt
+dataset_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training/training_dataset.lmdb
+seed: 42
+num_episodes: 10
+output_video: uhp_live_evaluation.mp4
+video_fps: 30
+inference:
+  inference_steps: 20
+
+[2025-11-17 13:12:49,870][__main__][INFO] - Loading Lightning checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_39.ckpt
+[2025-11-17 13:12:51,259][models.uhp][INFO] - Initializing the UHP Orchestrator...
+[2025-11-17 13:12:51,262][models.uhp][INFO] - Initializing Sequencer with backbone: google/siglip-base-patch16-224
+[2025-11-17 13:12:52,107][models.uhp][INFO] - Determined vision model hidden dimension: 768
+[2025-11-17 13:12:52,213][models.uhp][INFO] - Initializing Executor with hidden_dim: 512
+[2025-11-17 13:12:52,955][models.uhp][INFO] - UHP Orchestrator initialized successfully.
+[2025-11-17 13:12:53,321][train.train_uhp][INFO] - UHPLightningModule initialized successfully.
+[2025-11-17 13:12:53,435][train.train_uhp][INFO] - Successfully loaded EMA weights from checkpoint.
+[2025-11-17 13:12:53,436][train.train_uhp][INFO] - Successfully loaded normalizers from checkpoint into LightningModule.
+[2025-11-17 13:12:53,436][train.train_uhp][INFO] - Successfully loaded kinematic limits from checkpoint.
+[2025-11-17 13:12:53,919][__main__][INFO] - EMA weights successfully extracted and applied for inference.
+[2025-11-17 13:12:53,923][__main__][INFO] - LightningModule loaded and set to eval mode.
+[2025-11-17 13:12:56,297][__main__][INFO] - Loading dataset index from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training/training_dataset.lmdb
+[2025-11-17 13:12:56,298][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\training\training_dataset_index.json...
+[2025-11-17 13:12:56,306][utils.expert_dataset][INFO] - Loaded 80 episodes, 20452 total valid chunks (Virtually Indexed).
+[2025-11-17 13:12:56,307][__main__][INFO] - Found 80 episodes in dataset index.
+[2025-11-17 13:12:56,313][__main__][INFO] - Recording video to: uhp_live_evaluation.mp4
+[2025-11-17 13:12:56,313][__main__][INFO] - Running evaluation for 10 episodes...

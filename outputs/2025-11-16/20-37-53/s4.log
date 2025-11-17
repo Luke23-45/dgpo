@@ -1,0 +1,32 @@
+[2025-11-16 20:37:53,678][__main__][INFO] - --- UHP Visual Checkpoint Debugger ---
+[2025-11-16 20:37:53,682][__main__][INFO] - Full debug configuration:
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_39.ckpt
+episode_id_to_test: ep_000015
+inference_steps: 20
+seed: 42
+env:
+  xml_path: envs/panda_pick_place.xml
+dataset:
+  train_path: /content/drive/MyDrive/pda/data/training/training_dataset.lmdb
+  val_path: /content/drive/MyDrive/pda/data/training/training_dataset.lmdb
+  num_workers: 1
+model:
+  sequencer_cfg:
+    vision_backbone_model: google/siglip-base-patch16-224
+    num_task_phases: 5
+    fusion_transformer_layers: 4
+    fusion_transformer_heads: 8
+    subgoal_dim: 768
+    proprio_dim: ${model.executor_cfg.proprio_dim}
+  executor_cfg:
+    proprio_dim: 22
+    action_dim: 8
+    action_horizon: 8
+    obs_horizon: 2
+    subgoal_dim: 768
+    pilot_hidden_dim: 512
+    resnet_feature_dim: 256
+    denoiser_layers: 6
+    denoiser_heads: 8
+
+[2025-11-16 20:37:53,684][__main__][INFO] - Loading checkpoint from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_39.ckpt

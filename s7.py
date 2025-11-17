@@ -38,7 +38,7 @@ Usage:
         checkpoint_path=/path/to/your/model/best.ckpt
 
 
-python -m s7 --config-path "./configs" --config-name "evaluate_ego_planner_config.yaml" hydra.run.dir=. output_video=ego_planner_eval.mp4 checkpoint_path="./notes/checkpoints/backup_epoch_74.ckpt"
+python -m s7 --config-path "./configs" --config-name "evaluate_ego_planner_config.yaml" hydra.run.dir=. output_video=ego_planner_eval.mp4 checkpoint_path="C:\Users\Hellx\Documents\Programming\python\Project\redhot\notes\checkpoints\v1\backup_epoch_5.ckpt"
 
 """
 
@@ -270,7 +270,6 @@ def evaluate(cfg: DictConfig):
     log.info(f"Recording video to: {video_path} ({W}x{H} @ 30fps)")
 
     # --- 5. Run Evaluation Loop ---
-    
     for ep_idx in tqdm(range(cfg.num_episodes), desc="Evaluating Episodes"):
         log.info(f"--- Starting Evaluation Episode {ep_idx + 1} / {cfg.num_episodes} ---")
         
@@ -377,8 +376,6 @@ def evaluate(cfg: DictConfig):
             
         if not episode_terminated:
             log.info(f"Episode timed out after {env.max_episode_steps} steps.")
-
-
 
     # --- 6. Cleanup ---
     video_writer.release()
