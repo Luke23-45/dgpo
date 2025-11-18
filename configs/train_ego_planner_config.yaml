@@ -82,11 +82,11 @@ training:
 
   # Option 1: To RESUME a failed/paused run of this model architecture.
   # The trainer restores everything (model, optimizers, epoch, etc.).
-  resume_from_checkpoint: null # Example: /path/to/outputs/last.ckpt
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backup_epoch_5.ckpt" # Example: /path/to/outputs/last.ckpt
 
   # Option 2: To WARM-START a new run by MIGRATING weights from an OLDER architecture.
   # The trainer starts a FRESH run (epoch 0) with the migrated weights.
-  warm_start_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backup_epoch_80.ckpt" # Example: /path/to/old_model_version/best.ckpt
+  warm_start_from_checkpoint: null # Example: /path/to/old_model_version/best.ckpt
 # --- Validation & Inference Configuration ---
 validation:
   # The 'Slow Path' for expensive diagnostics will run every N epochs.

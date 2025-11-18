@@ -98,13 +98,9 @@ class EgoPlannerDataset(Dataset):
             initial_image_np = all_primary_images[0]
             goal_image_np = all_primary_images[-1]
             all_task_phases = get_full_modality("task_phases")
-            current_task_phase = all_task_phases[timestep_t]
-            all_obj_pos = get_full_modality("object_pos_world") # Shape [T, 3]
-            all_goal_pos = get_full_modality("goal_pos_world")   # Shape [T, 3]
-            current_obj_pos = torch.from_numpy(all_obj_pos[timestep_t]).float()
-            current_goal_pos = torch.from_numpy(all_goal_pos[timestep_t]).float()
-            raw_proprio_chunk = torch.from_numpy(obs_history_chunk_np["proprio"].copy()).float()
 
+            current_task_phase = all_task_phases[timestep_t]
+            
             # --- 3. Preprocessing & SOTA Correlated Augmentation ---
             initial_image = self.transform_primary(Image.fromarray(initial_image_np))
             goal_image = self.transform_primary(Image.fromarray(goal_image_np))
@@ -133,29 +129,7 @@ class EgoPlannerDataset(Dataset):
                     observation_history[key] = torch.stack([transform_fn(img) for img in img_stack_pil])
                 else:
                     observation_history[key] = torch.from_numpy(val.copy()).float()
-
-            t_start_window = timestep_t - self.obs_horizon + 1
-            t_end_window = timestep_t + 1
             
-            # Robust slicing (in case of padding at start of episode)
-            # The ExpertDataset usually handles padding, but since we are accessing raw arrays:
-            chunk_obj_pos = []
-            chunk_goal_pos = []
-            
-            for t in range(t_start_window, t_end_window):
-                # Clamp to 0 for padding
-                t_safe = max(0, t)
-                chunk_obj_pos.append(all_obj_pos[t_safe])
-                chunk_goal_pos.append(all_goal_pos[t_safe])
-            
-            chunk_obj_pos = torch.tensor(np.array(chunk_obj_pos), dtype=torch.float32)   # [H_o, 3]
-            chunk_goal_pos = torch.tensor(np.array(chunk_goal_pos), dtype=torch.float32) # [H_o, 3]
-
-            # Concatenate: [Joints(22) | Object(3) | Goal(3)] -> New Proprio Dim: 28
-            hybrid_proprio = torch.cat([raw_proprio_chunk, chunk_obj_pos, chunk_goal_pos], dim=-1)
-            
-            observation_history['proprio'] = hybrid_proprio
-                
             action_chunk = torch.from_numpy(action_chunk_np.copy()).float()
             task_phase_tensor = torch.tensor(current_task_phase, dtype=torch.long)
             
