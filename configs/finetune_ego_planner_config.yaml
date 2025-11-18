@@ -14,11 +14,17 @@
 
 # Seed for reproducibility of the entire fine-tuning run.
 seed: 42
+
 env:
-  xml_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/envs/panda_pick_place.xml"
-# --- [CRITICAL] Path to the pre-trained model from the imitation learning stage.
-# This is the "warm-start" checkpoint.
-il_checkpoint_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_5.ckpt"
+  xml_path: "/content/dgpo/envs/panda_pick_place.xml"
+
+il_checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backup_epoch_5.ckpt"
+
+
+# env:
+#   xml_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/envs/panda_pick_place.xml"
+
+# il_checkpoint_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_5.ckpt"
 
 # --- Total training duration for the RL fine-tuning stage.
 # A good starting point is between 500k and 1M steps.
