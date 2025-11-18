@@ -403,7 +403,7 @@ class EgoPlannerLightningModule(pl.LightningModule):
         log.info(f"End of epoch {epoch}: Triggering periodic failsafe backup...")
 
 
-        self.backup_dir = "/content/drive/MyDrive/pda/models/v1"
+        self.backup_dir = Path("/content/drive/MyDrive/pda/models/v1")
         
         # --- [START OF DEFINITIVE PATCH 3] ---
         # The backup_dir is now an attribute of the module, initialized in __init__.
@@ -536,8 +536,8 @@ def main(cfg: DictConfig):
         os.environ["WANDB_MODE"] = wandb_mode
         log.info(f"W&B mode explicitly set to: '{wandb_mode}'")
 
-    output_dir = "/content/drive/MyDrive/pda/logs_ego/"
-    output_dir.mkdir(parents=True, exist_ok=True) 
+    output_dir = Path("/content/drive/MyDrive/pda/logs_ego/")
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     datamodule = EgoPlannerDataModule(cfg)
     model = EgoPlannerLightningModule(cfg)

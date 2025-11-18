@@ -68,6 +68,8 @@ class EgoPlannerConfig:
     denoiser_layers: int = 6
     denoiser_heads: int = 8
     diffusion_timesteps: int = 100
+    p_uncond_drop: float = 0.1
+    p_obs_drop: float = 0.1
     p_plan_drop: float = 0.1
     p_obs_drop: float = 0.1
     beta_schedule: str = "cosine"
@@ -314,6 +316,9 @@ class EgoPlannerBlock(nn.Module):
         
         return x
 
+
+
+
 class SinusoidalPosEmb(nn.Module):
     """Generates sinusoidal positional embeddings for diffusion timesteps."""
     def __init__(self, dim: int):
@@ -552,24 +557,53 @@ class EgoPlanner(nn.Module):
         self.apply(_init_weights)
         log.info("EgoPlanner v5 (Definitive & Audited) model initialized.")
 
+
     def forward(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """The main end-to-end training forward pass."""
+        """
+        [SOTA, PRINCIPLED DROPOUT VERSION]
+        The main end-to-end training forward pass. This version implements a
+        principled, cascaded conditioning dropout scheme. This forces the Pilot
+        to learn the meaning of the Strategist's plan by sometimes training
+        "blind" (with only the plan and no tactical observations).
+
+        The dropout cascade works as follows:
+        1. With probability `p_uncond_drop`: All conditioning is dropped.
+        2. Else, with probability `p_obs_drop`: Only tactical observations are dropped.
+        3. Else: All conditioning is used.
+        """
         B, device = batch['initial_image'].shape[0], batch['initial_image'].device
         
+        # 1. Get all conditional inputs from the sub-modules.
         plan_vector = self.strategist(
             batch['initial_image'], 
             batch['goal_image'],
-            batch['task_phase'] 
+            batch['task_phase']
         )
         vision_tokens, proprio_tokens = self.pilot.encode_tactics(batch['observation_history'])
 
+        # 2. Apply SOTA Principled Conditioning Dropout during training.
         if self.training:
-            plan_vector = torch.where(torch.rand(B, 1, device=device) < self.cfg.p_plan_drop, self.uncond_embeddings.plan, plan_vector)
-            if torch.rand(1).item() < self.cfg.p_obs_drop:
+            # Generate random numbers for the dropout cascade
+            rand_val = torch.rand(1, device=device).item()
+
+            if rand_val < self.cfg.p_uncond_drop:
+                # --- Scenario A: Unconditional Training (Drop everything) ---
+                # Replace plan and observations with learned unconditional embeddings.
+                plan_vector = self.uncond_embeddings.plan.expand(B, -1)
                 vision_tokens = self.uncond_embeddings.vision.expand(B, vision_tokens.shape[1], -1)
-            if torch.rand(1).item() < self.cfg.p_obs_drop:
                 proprio_tokens = self.uncond_embeddings.proprio.expand(B, proprio_tokens.shape[1], -1)
-        
+            
+            elif rand_val < (self.cfg.p_uncond_drop + self.cfg.p_obs_drop):
+                # --- Scenario B: Plan-Only Training (Drop observations) ---
+                # Keep the true plan_vector, but replace observations.
+                # This forces the model to learn the plan's meaning in isolation.
+                vision_tokens = self.uncond_embeddings.vision.expand(B, vision_tokens.shape[1], -1)
+                proprio_tokens = self.uncond_embeddings.proprio.expand(B, proprio_tokens.shape[1], -1)
+
+            # --- Scenario C: Full Conditional Training ---
+            # (Implicitly handled if neither of the above conditions are met)
+
+        # 3. Call the Pilot with the (potentially dropped-out) conditioning signals.
         predicted_noise = self.pilot(
             noisy_actions=batch['noisy_actions'],
             timesteps=batch['timesteps'],
