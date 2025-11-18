@@ -1,0 +1,9 @@
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_5.ckpt
+output_video: ego_planner_phase_aware_eval.mp4
+num_episodes: 5
+seed: 42
+eval_static_scene: true
+inference:
+  sampling_steps: 30
+  guidance_scale_plan: 7.5
+  guidance_scale_obs: 1.5

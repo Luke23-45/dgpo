@@ -19,7 +19,7 @@ seed: 42  # Seed for all random number generators for full reproducibility.
 model:
   # Data-dependent dimensions. These MUST match your dataset.
   action_dim: 8         # Dimension of the robot's action space.
-  proprio_dim: 22       # Dimension of the proprioceptive state vector.
+  proprio_dim: 28       # Dimension of the proprioceptive state vector.
   action_horizon: 8     # H_a: Number of future action steps to predict.
   obs_horizon: 2        # H_o: Number of past observation steps to use as context.
 

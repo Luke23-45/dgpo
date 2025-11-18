@@ -238,7 +238,13 @@ class EgoPlannerDataModule(pl.LightningDataModule):
 class EgoPlannerLightningModule(pl.LightningModule):
     def __init__(self, cfg: DictConfig):
         super().__init__()
-        self.save_hyperparameters(OmegaConf.to_container(cfg, resolve=True))
+        if isinstance(cfg, dict):
+            cfg = OmegaConf.create(cfg)
+        
+        # 2. Save the hyperparameters. Pytorch Lightning will handle conversion for storage.
+        self.save_hyperparameters(cfg)
+        
+        # 3. Store the (now guaranteed) OmegaConf object for use within the module.
         self.cfg = cfg
 
         # --- SOTA ENHANCEMENT: Allow configurable activation checkpointing ---
