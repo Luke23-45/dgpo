@@ -61,7 +61,7 @@ from transformers import get_scheduler
 
 # --- SOTA FEATURE: Import the specialized sampler ---
 from utils.samplers import EpisodeAwareSampler
-
+import torch.nn as nn
 # --- Project-Specific Imports ---
 from models.ego_planner import EgoPlanner, EgoPlannerConfig, NoiseScheduler, NoiseSchedulerConfig
 from models.diffusion_policy import  EMA
@@ -92,6 +92,81 @@ else:
 # -----------------------------------------------------------------------------
 # 1. The LightningDataModule (Upgraded with EpisodeAwareSampler)
 # -----------------------------------------------------------------------------
+
+def migrate_weights_phase_aware(new_model: nn.Module, 
+                                old_checkpoint: Dict[str, Any],
+                                device: torch.device
+                                ) -> nn.Module:
+    """
+    [SOTA, DEFINITIVE MIGRATION LOGIC]
+    Performs a robust "warm-start" by migrating weights from a previous,
+    non-phase-aware Ego-Planner checkpoint to the new, phase-aware model.
+
+    This function intelligently copies all matching weights and provides a
+    detailed report on which layers were migrated, which are newly initialized,
+    and which were obsolete.
+
+    Args:
+        new_model (nn.Module): An instance of the new, phase-aware EgoPlanner, initialized
+                               but without loaded weights.
+        old_checkpoint (Dict[str, Any]): The loaded checkpoint dictionary from the old model.
+        device (torch.device): The device to map the model to.
+
+    Returns:
+        nn.Module: The `new_model` with migrated weights, ready for training.
+    """
+    log.info("--- Starting SOTA Checkpoint Migration for Phase-Aware Ego-Planner ---")
+    
+    # 1. Get the state dictionaries
+    old_state_dict = old_checkpoint['state_dict']
+    new_state_dict = new_model.state_dict()
+    
+    # --- [CRITICAL KEY CORRECTION LOGIC] ---
+    # PyTorch Lightning saves checkpoints with a "model." prefix. The new `nn.Module`
+    # does not have this prefix. We must strip it for keys to match.
+    # Example: "model.strategist.fusion_transformer..." -> "strategist.fusion_transformer..."
+    old_state_dict_corrected = {
+        key.replace("model.", ""): value 
+        for key, value in old_state_dict.items()
+    }
+
+    # 2. Create a new dictionary to hold the weights we will actually load.
+    migrated_state_dict = new_state_dict.copy()
+    
+    migrated_keys = set()
+    obsolete_keys = set(old_state_dict_corrected.keys())
+    
+    log.info("Scanning for transferable layers...")
+    for key in new_state_dict:
+        if key in old_state_dict_corrected and new_state_dict[key].shape == old_state_dict_corrected[key].shape:
+            migrated_state_dict[key] = old_state_dict_corrected[key]
+            migrated_keys.add(key)
+            # Remove from obsolete set as we've now used it
+            if key in obsolete_keys:
+                obsolete_keys.remove(key)
+
+    # 3. Load the prepared state dictionary. `strict=False` is essential.
+    new_model.load_state_dict(migrated_state_dict, strict=False)
+    
+    # 4. Provide a comprehensive report for verification. This is critical.
+    newly_initialized_keys = set(new_state_dict.keys()) - migrated_keys
+
+    log.info("--- Migration Report ---")
+    log.info(f"Successfully migrated {len(migrated_keys)} layers.")
+    
+    if newly_initialized_keys:
+        log.warning("The following layers are NEW and were initialized from scratch:")
+        for key in sorted(list(newly_initialized_keys)):
+            log.warning(f"  - {key}")
+    
+    if obsolete_keys:
+        log.info("The following layers from the old checkpoint were OBSOLETE and ignored:")
+        for key in sorted(list(obsolete_keys)):
+            log.info(f"  - {key}")
+            
+    log.info("--- Migration Complete ---")
+
+    return new_model.to(device)
 
 class EgoPlannerDataModule(pl.LightningDataModule):
     def __init__(self, cfg: DictConfig):
@@ -134,7 +209,7 @@ class EgoPlannerDataModule(pl.LightningDataModule):
             self.train_dataset,
             batch_size=self.cfg.training.batch_size,
             sampler=sampler,
-            shuffle=False, # The sampler handles all shuffling logic
+            shuffle=False, 
             num_workers=self.cfg.dataset.num_workers,
             pin_memory=pin_memory_enabled,
             persistent_workers=(self.cfg.dataset.num_workers > 0),
@@ -300,51 +375,44 @@ class EgoPlannerLightningModule(pl.LightningModule):
 
         return val_loss
 
+
     def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int) -> None:
         """
-        SOTA Hook: Called after every training batch.
-        We use this to manually save a backup checkpoint on the very last batch of the epoch.
-        This is more robust than `on_train_epoch_end` because it happens before the
-        training progress bar is destroyed.
+        [SOTA, ROBUST VERSION]
+        SOTA Hook for Failsafe Backups on the last batch of an epoch.
         """
-        # Ensure this only runs on the main process in a multi-GPU setup
-        if not self.trainer.is_global_zero:
+        if not self.trainer.is_global_zero: return
+
+        is_last_batch = (batch_idx + 1) == self.trainer.num_training_batches
+        if not is_last_batch: return
+
+        epoch = self.trainer.current_epoch
+        backup_freq = self.cfg.training.get("backup_every_n_epochs", 0)
+        if backup_freq <= 0 or (epoch + 1) % backup_freq != 0:
             return
         
+        log.info(f"End of epoch {epoch}: Triggering periodic failsafe backup...")
+        
+        # --- [START OF DEFINITIVE PATCH 3] ---
+        # The backup_dir is now an attribute of the module, initialized in __init__.
+        self.backup_dir.mkdir(parents=True, exist_ok=True) 
+        backup_path = self.backup_dir / f"backup_epoch_{epoch}.ckpt"
+        
+        try:
+            # SOTA Logic: Delete the *previous* backup before saving the new one.
+            # The path to the last backup is stored in an instance variable.
+            if self.last_backup_path and self.last_backup_path.exists():
+                self.last_backup_path.unlink()
+                log.info(f"Deleted previous failsafe backup: {self.last_backup_path}")
 
-        if (self.trainer.current_epoch + 1) % 3 != 0:
-            return
-
-        # Check if this is the last batch of the training epoch.
-        # self.trainer.num_training_batches gives the total number of batches in the loader.
-        is_last_batch = (batch_idx + 1) == self.trainer.num_training_batches
-
-        if is_last_batch:
-            epoch = self.trainer.current_epoch
-            log.info(f"Last training batch of epoch {epoch} finished. Saving backup checkpoint...")
+            self.trainer.save_checkpoint(backup_path)
             
-            base_path = Path("/content/drive/MyDrive/pda/models/v1")
-            base_path.mkdir(parents=True, exist_ok=True) 
-            backup_path = base_path / f"backup_epoch_{epoch}.ckpt"
+            # Store the path of the backup we just created for the next cycle.
+            self.last_backup_path = backup_path
+            log.info(f"Failsafe backup for epoch {epoch} saved to {backup_path}.")
 
-            # backup_path = Path.cwd() / "checkpoints" / "backup"
-             
-            
-            # backup_path = backup_path / f"backup_epoch_{epoch}.ckpt"
-         
-            try:
-                self.trainer.save_checkpoint(backup_path)
-                
-                # Delete the previous epoch's backup to save space
-                if self.last_backup_path and self.last_backup_path.exists():
-                    self.last_backup_path.unlink()
-                    log.info(f"Deleted previous backup: {self.last_backup_path}")
-
-                self.last_backup_path = backup_path
-                log.info(f"Backup for epoch {epoch} saved successfully to {backup_path}.")
-            except Exception as e:
-                log.error(f"Failed to save per-epoch backup: {e}", exc_info=True)
-                
+        except Exception as e:
+            log.error(f"Failed to save per-epoch failsafe backup: {e}", exc_info=True)
 
     # Helper to construct checkpoint data
     def _create_full_checkpoint(self) -> Dict[str, Any]:
@@ -369,53 +437,41 @@ class EgoPlannerLightningModule(pl.LightningModule):
         }
 
 
+
     def configure_optimizers(self):
         """
         [DEFINITIVE, SOTA, CORRECTED VERSION]
         This version is patched to correctly reference the `strategist` attribute
         of the EgoPlanner model, resolving the AttributeError.
-
-        It correctly separates parameters into groups for differential learning
-        rates, which is a key technique for stable training of complex,
-        multi-component models.
         """
-        # --- START OF DEFINITIVE PATCH ---
+        # --- START OF DEFINITIVE PATCH 2 ---
+        log.info("Configuring optimizer with corrected parameter groups...")
 
-        # In our case, the backbone is fully frozen, so this list will be empty.
-        # This pattern is robust for future experiments (e.g., fine-tuning the backbone).
+        # The vision backbone is frozen, so this list will be empty, but the pattern is robust.
         backbone_params = [
-            # CRITICAL FIX: Use `self.model.strategist` instead of `self.model.planner`.
+            # CRITICAL FIX: The module is named `strategist`, not `planner`.
             p for p in self.model.strategist.vision_backbone.parameters() if p.requires_grad
         ]
         
-        # Gather all other trainable parameters (from the strategist's head and the entire pilot).
         backbone_param_ids = {id(p) for p in backbone_params}
         other_params = [
             p for p in self.parameters() if p.requires_grad and id(p) not in backbone_param_ids
         ]
 
-        log.info(f"Found {len(backbone_params)} trainable backbone parameters.")
-        log.info(f"Found {len(other_params)} other trainable parameters (strategist head, pilot, etc.).")
-        
-        # Use a differential learning rate for potentially more stable training.
-        main_lr = self.cfg.optimizer.lr
-        # Get head_lr from config, with a safe default.
-        head_lr = self.cfg.optimizer.get("head_lr", main_lr) # Default to same LR for simplicity
-        
         param_groups = [
-            {"params": backbone_params, "lr": main_lr},
-            {"params": other_params, "lr": head_lr}
+            {"params": backbone_params, "lr": self.cfg.optimizer.lr},
+            {"params": other_params, "lr": self.cfg.optimizer.head_lr}
         ]
 
-        log.info(f"Using differential LR: Backbone LR = {main_lr}, Other Params LR = {head_lr}")
+        log.info(f"Using differential LR: Backbone LR = {self.cfg.optimizer.lr}, Other Params LR = {self.cfg.optimizer.head_lr}")
 
         optimizer = torch.optim.AdamW(
             param_groups,
-            lr=main_lr,
+            lr=self.cfg.optimizer.lr, # Default LR
             weight_decay=self.cfg.optimizer.weight_decay
         )
         
-        # The scheduler logic remains correct.
+        # Scheduler logic remains correct.
         num_training_steps = self.trainer.estimated_stepping_batches
         num_warmup_steps = int(num_training_steps * self.cfg.optimizer.warmup_percentage)
 
@@ -426,15 +482,8 @@ class EgoPlannerLightningModule(pl.LightningModule):
             num_training_steps=num_training_steps,
         )
         
-        # --- END OF DEFINITIVE PATCH ---
-        
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step"
-            }
-        }
+        return { "optimizer": optimizer, "lr_scheduler": { "scheduler": scheduler, "interval": "step" } }
+
 
     def _log_action_trajectory_plot(self, pred_actions, gt_actions):
         try:
@@ -479,36 +528,33 @@ def main(cfg: DictConfig):
     
     datamodule = EgoPlannerDataModule(cfg)
     model = EgoPlannerLightningModule(cfg)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-    if cfg.training.resume_from_checkpoint:
-        log.info(f"PERFORMING MANUAL WARM-START from: {cfg.training.resume_from_checkpoint}")
+    ckpt_path_for_trainer = None
+    if cfg.training.warm_start_from_checkpoint:
+        log.info(f"PERFORMING WARM-START MIGRATION from: {cfg.training.warm_start_from_checkpoint}")
+        old_checkpoint = torch.load(cfg.training.warm_start_from_checkpoint, map_location='cpu')
         
-        checkpoint = torch.load(cfg.training.resume_from_checkpoint, map_location='cpu')
+        # Use our robust utility to migrate weights to the model inside the LightningModule.
+        model.model = migrate_weights_phase_aware(model.model, old_checkpoint, device)
         
-        # --- [CRITICAL FIX: REMOVE THE 'model.' PREFIX] ---
-        # 1. Get the original state dict.
-        original_state_dict = checkpoint['state_dict']
-        
-        # 2. Create a new state dict, stripping the unwanted prefix from each key.
-        #    Example: 'model.strategist.xyz' becomes 'strategist.xyz'
-        new_state_dict = {key.replace("model.", ""): value 
-                          for key, value in original_state_dict.items()}
-        
-        # 3. Load the *corrected* state dict into the model.
-        incompatible_keys = model.model.load_state_dict(new_state_dict, strict=False)
-        # --- [END CRITICAL FIX] ---
-
-        log.warning(f"Manual Load - Missing Keys: {incompatible_keys.missing_keys}")
-        log.warning(f"Manual Load - Unexpected Keys: {incompatible_keys.unexpected_keys}")
-
-        # Load EMA weights (EMA state dicts usually don't have this prefix issue)
-        if 'ema_state_dict' in checkpoint:
-            model.ema.load_state_dict(checkpoint['ema_state_dict'], strict=False)
-            log.info("Manual Load - EMA weights restored.")
-        else:
-            model.ema = EMA(model.model, decay=model.cfg.training.ema_decay)
-            log.warning("Manual Load - No EMA state found. Re-initializing EMA from loaded model.")
+        # Also attempt to load EMA weights if they exist, which accelerates convergence.
+        if 'ema_state_dict' in old_checkpoint:
+            log.info("Found EMA weights in warm-start checkpoint, attempting migration...")
+            # Create a temporary dict for EMA weights with corrected keys
+            ema_state_dict_corrected = {
+                key.replace("model.", ""): value 
+                for key, value in old_checkpoint['ema_state_dict'].items()
+            }
+            # Load into the LightningModule's EMA model
+            model.ema.ema_model.load_state_dict(ema_state_dict_corrected, strict=False)
+            log.info("Warm-start EMA weights restored.")
+            
+    elif cfg.training.resume_from_checkpoint:
+        log.info(f"RESUMING training from checkpoint: {cfg.training.resume_from_checkpoint}")
+        # If we are resuming, we pass the path directly to the trainer.
+        # The trainer will handle everything automatically.
+        ckpt_path_for_trainer = cfg.training.resume_from_checkpoint
 
     loggers = [TensorBoardLogger(str(output_dir), name="", version="tb_logs")]
     if cfg.logging.use_wandb:
@@ -535,7 +581,7 @@ def main(cfg: DictConfig):
 
     try:
         # The trainer.fit call now seamlessly handles advanced resumption
-        trainer.fit(model, datamodule=datamodule, ckpt_path=None)
+        trainer.fit(model, datamodule=datamodule, ckpt_path=ckpt_path_for_trainer)
     except (Exception, KeyboardInterrupt) as e:
         log.warning(f"Training interrupted or failed: {e}")
         log.info("Attempting to save a final 'interrupted.ckpt'...")

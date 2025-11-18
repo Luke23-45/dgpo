@@ -68,31 +68,38 @@ class EgoPlannerDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    # --- START OF DEFINITIVE PATCH ---
-    # REPLACE the existing __getitem__ method with this fully resilient version.
+
     def __getitem__(self, idx: int) -> Optional[Dict[str, torch.Tensor]]:
         """
-        [DEFINITIVE, ANTI-FRAGILE, FULLY PATCHED VERSION]
-        Orchestrates the retrieval of a complete, processed sample for the Ego-Planner.
-        This version robustly derives the goal image from the primary image sequence,
-        eliminating reliance on the optional 'goal_image_primary' modality.
+        [DEFINITIVE, SOTA, TASK-PHASE-AWARE, CORRECTED-KEY VERSION]
+        Orchestrates the retrieval of a complete, processed sample for the
+        enhanced Ego-Planner. This version includes the `task_phase` for
+        sequentially-guided planning with the corrected dictionary key.
         """
         if not (0 <= idx < len(self)):
             raise IndexError(f"Index {idx} out of range for dataset with {len(self)} samples.")
 
+        ep_idx, timestep_t = -1, -1
         try:
-            # --- 1. Get Data from Underlying Reader ---
+            # --- 1. Get Timestep Info and Chunked Data ---
+            ep_idx, timestep_t = self.samples[idx]
             obs_history_chunk_np, action_chunk_np = self.expert_reader[idx]
-            ep_idx, _ = self.samples[idx]
+            ep_meta = self.expert_reader.episode_metadata[ep_idx]
 
-            # --- 2. Get Strategic Images with Resilient Logic ---
-            initial_image_np = self._get_image_primary_at(ep_idx, 0)
+            def get_full_modality(modality_name: str):
+                meta = ep_meta["modalities"][modality_name]
+                return self.expert_reader._get_full_modality_array(
+                    key=meta["key"], compression=meta["compression"],
+                    dtype_str=meta["dtype"], shape_list=tuple(meta["shape"])
+                )
 
-            # [CRITICAL FIX] Derive the goal image from the last frame of the episode.
-            # This is robust and does not depend on the optional 'goal_image_primary' key.
-            ep_len = self.get_episode_length(ep_idx)
-            goal_image_np = self._get_image_primary_at(ep_idx, ep_len - 1)
-
+            # --- 2. Get All Required Data Modalities ---
+            all_primary_images = get_full_modality("image_primary")
+            initial_image_np = all_primary_images[0]
+            goal_image_np = all_primary_images[-1]
+            all_task_phases = get_full_modality("task_phases")
+            current_task_phase = all_task_phases[timestep_t]
+            
             # --- 3. Preprocessing & SOTA Correlated Augmentation ---
             initial_image = self.transform_primary(Image.fromarray(initial_image_np))
             goal_image = self.transform_primary(Image.fromarray(goal_image_np))
@@ -101,14 +108,12 @@ class EgoPlannerDataset(Dataset):
             for key, val in obs_history_chunk_np.items():
                 if 'image' in key:
                     img_stack_pil = [Image.fromarray(img) for img in val]
-                    
                     if self.use_aug:
                         if random.random() < self.aug_random_apply_p:
                             jitter_params = self.aug_color_jitter.get_params(
                                 self.aug_color_jitter.brightness, self.aug_color_jitter.contrast,
                                 self.aug_color_jitter.saturation, self.aug_color_jitter.hue
                             )
-                            # This helper function is not standard, let's use the functional API directly for robustness
                             fn_idx, brightness, contrast, saturation, hue = jitter_params
                             for i in range(len(img_stack_pil)):
                                 img = img_stack_pil[i]
@@ -117,28 +122,29 @@ class EgoPlannerDataset(Dataset):
                                 if 2 in fn_idx: img = TF.adjust_saturation(img, saturation)
                                 if 3 in fn_idx: img = TF.adjust_hue(img, hue)
                                 img_stack_pil[i] = img
-
                         if random.random() < self.aug_random_grayscale_p:
                             img_stack_pil = [TF.to_grayscale(img, num_output_channels=3) for img in img_stack_pil]
-
                     transform_fn = self.transform_wrist if 'wrist' in key else self.transform_primary
                     observation_history[key] = torch.stack([transform_fn(img) for img in img_stack_pil])
                 else:
                     observation_history[key] = torch.from_numpy(val.copy()).float()
             
             action_chunk = torch.from_numpy(action_chunk_np.copy()).float()
+            task_phase_tensor = torch.tensor(current_task_phase, dtype=torch.long)
             
+            # --- 4. Assemble the Final Output Dictionary ---
             return {
                 'initial_image': initial_image,
                 'goal_image': goal_image,
                 'observation_history': observation_history,
                 'action_chunk': action_chunk,
+                'task_phase': task_phase_tensor, 
             }
 
         except Exception as e:
-            log.error(f"Error loading data for sample index {idx} (ep: {ep_idx}). Error: {e}", exc_info=False)
+            log.error(f"Error loading data for sample index {idx} (ep: {ep_idx}, t: {timestep_t}). Error: {e}", exc_info=False)
             return None
-    # --- END OF DEFINITIVE PATCH ---
+
 
     def _get_image_primary_at(self, ep_idx: int, timestep_t: int) -> np.ndarray:
         """

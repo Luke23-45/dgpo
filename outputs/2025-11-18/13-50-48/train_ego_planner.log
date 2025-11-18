@@ -1,0 +1,528 @@
+[2025-11-18 13:50:48,190][__main__][INFO] - seed: 42
+model:
+  action_dim: 8
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+  p_plan_drop: 0.1
+  p_obs_drop: 0.1
+  num_task_phases: 5
+scheduler:
+  timesteps: 100
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+dataset:
+  train_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+  num_workers: 1
+  use_aug: false
+training:
+  batch_size: 32
+  val_batch_size: 32
+  ema_decay: 0.999
+  use_activation_checkpointing: true
+  use_swa: false
+  swa_lrs: 1.0e-05
+  backup_every_n_epochs: 3
+  resume_from_checkpoint: null
+  warm_start_from_checkpoint: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_80.ckpt
+validation:
+  run_full_validation_every_n_epoch: 120
+  sampling_steps: 30
+  guidance_scale_plan: 7.5
+  guidance_scale_obs: 1.5
+  num_inference_steps: 30
+optimizer:
+  lr: 0.0001
+  head_lr: 1.0e-05
+  weight_decay: 1.0e-06
+  warmup_steps: 0.05
+  gradient_clip_val: 1.0
+  warmup_percentage: 0.05
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 1000
+  check_val_every_n_epoch: 120
+  accumulate_grad_batches: 2
+logging:
+  use_wandb: true
+  wandb_project: ego_planner_v4
+  wandb_run_name: null
+  log_every_n_steps: 50
+  wandb_mode: offline
+
+[2025-11-18 13:50:48,204][__main__][INFO] - W&B mode explicitly set to: 'offline'
+[2025-11-18 13:50:48,215][models.ego_planner][INFO] - [Strategist] Initializing ViT backbone: google/siglip-base-patch16-224
+[2025-11-18 13:50:49,132][models.ego_planner][INFO] - [Strategist] Derived configuration: image_size=224, patch_size=16, num_patches=196.
+[2025-11-18 13:50:49,220][models.ego_planner][INFO] - [Pilot] Activation Checkpointing: Enabled
+[2025-11-18 13:50:53,557][models.ego_planner][INFO] - EgoPlanner v5 (Definitive & Audited) model initialized.
+[2025-11-18 13:50:53,782][__main__][INFO] - EMA enabled with decay rate: 0.999
+[2025-11-18 13:50:53,784][__main__][INFO] - Definitive SOTA EgoPlannerLightningModule (v2) initialized.
+[2025-11-18 13:50:53,785][__main__][INFO] - PERFORMING WARM-START MIGRATION from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_80.ckpt
+[2025-11-18 13:50:55,553][__main__][INFO] - --- Starting SOTA Checkpoint Migration for Phase-Aware Ego-Planner ---
+[2025-11-18 13:50:55,557][__main__][INFO] - Scanning for transferable layers...
+[2025-11-18 13:50:55,618][__main__][INFO] - --- Migration Report ---
+[2025-11-18 13:50:55,618][__main__][INFO] - Successfully migrated 352 layers.
+[2025-11-18 13:50:55,619][__main__][WARNING] - The following layers are NEW and were initialized from scratch:
+[2025-11-18 13:50:55,619][__main__][WARNING] -   - strategist.task_phase_embedding.weight
+[2025-11-18 13:50:55,619][__main__][WARNING] -   - strategist.token_type_embeddings.weight
+[2025-11-18 13:50:55,620][__main__][WARNING] -   - strategist.vision_backbone.vision_model.embeddings.patch_embedding.bias
+[2025-11-18 13:50:55,620][__main__][WARNING] -   - strategist.vision_backbone.vision_model.embeddings.patch_embedding.weight
+[2025-11-18 13:50:55,620][__main__][WARNING] -   - strategist.vision_backbone.vision_model.embeddings.position_embedding.weight
+[2025-11-18 13:50:55,621][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.layer_norm1.bias
+[2025-11-18 13:50:55,621][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.layer_norm1.weight
+[2025-11-18 13:50:55,621][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.layer_norm2.bias
+[2025-11-18 13:50:55,622][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.layer_norm2.weight
+[2025-11-18 13:50:55,622][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.mlp.fc1.bias
+[2025-11-18 13:50:55,622][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.mlp.fc1.weight
+[2025-11-18 13:50:55,623][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.mlp.fc2.bias
+[2025-11-18 13:50:55,623][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.mlp.fc2.weight
+[2025-11-18 13:50:55,624][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.self_attn.k_proj.bias
+[2025-11-18 13:50:55,624][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.self_attn.k_proj.weight
+[2025-11-18 13:50:55,625][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.self_attn.out_proj.bias
+[2025-11-18 13:50:55,625][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.self_attn.out_proj.weight
+[2025-11-18 13:50:55,626][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.self_attn.q_proj.bias
+[2025-11-18 13:50:55,626][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.self_attn.q_proj.weight
+[2025-11-18 13:50:55,626][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.self_attn.v_proj.bias
+[2025-11-18 13:50:55,627][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.0.self_attn.v_proj.weight
+[2025-11-18 13:50:55,627][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.layer_norm1.bias
+[2025-11-18 13:50:55,628][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.layer_norm1.weight
+[2025-11-18 13:50:55,628][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.layer_norm2.bias
+[2025-11-18 13:50:55,629][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.layer_norm2.weight
+[2025-11-18 13:50:55,630][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.mlp.fc1.bias
+[2025-11-18 13:50:55,631][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.mlp.fc1.weight
+[2025-11-18 13:50:55,632][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.mlp.fc2.bias
+[2025-11-18 13:50:55,632][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.mlp.fc2.weight
+[2025-11-18 13:50:55,632][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.self_attn.k_proj.bias
+[2025-11-18 13:50:55,633][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.self_attn.k_proj.weight
+[2025-11-18 13:50:55,633][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.self_attn.out_proj.bias
+[2025-11-18 13:50:55,634][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.self_attn.out_proj.weight
+[2025-11-18 13:50:55,634][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.self_attn.q_proj.bias
+[2025-11-18 13:50:55,635][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.self_attn.q_proj.weight
+[2025-11-18 13:50:55,635][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.self_attn.v_proj.bias
+[2025-11-18 13:50:55,635][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.1.self_attn.v_proj.weight
+[2025-11-18 13:50:55,636][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.layer_norm1.bias
+[2025-11-18 13:50:55,636][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.layer_norm1.weight
+[2025-11-18 13:50:55,636][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.layer_norm2.bias
+[2025-11-18 13:50:55,637][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.layer_norm2.weight
+[2025-11-18 13:50:55,637][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.mlp.fc1.bias
+[2025-11-18 13:50:55,637][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.mlp.fc1.weight
+[2025-11-18 13:50:55,638][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.mlp.fc2.bias
+[2025-11-18 13:50:55,638][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.mlp.fc2.weight
+[2025-11-18 13:50:55,639][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.self_attn.k_proj.bias
+[2025-11-18 13:50:55,639][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.self_attn.k_proj.weight
+[2025-11-18 13:50:55,640][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.self_attn.out_proj.bias
+[2025-11-18 13:50:55,640][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.self_attn.out_proj.weight
+[2025-11-18 13:50:55,641][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.self_attn.q_proj.bias
+[2025-11-18 13:50:55,641][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.self_attn.q_proj.weight
+[2025-11-18 13:50:55,641][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.self_attn.v_proj.bias
+[2025-11-18 13:50:55,642][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.10.self_attn.v_proj.weight
+[2025-11-18 13:50:55,642][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.layer_norm1.bias
+[2025-11-18 13:50:55,642][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.layer_norm1.weight
+[2025-11-18 13:50:55,643][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.layer_norm2.bias
+[2025-11-18 13:50:55,643][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.layer_norm2.weight
+[2025-11-18 13:50:55,644][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.mlp.fc1.bias
+[2025-11-18 13:50:55,644][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.mlp.fc1.weight
+[2025-11-18 13:50:55,644][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.mlp.fc2.bias
+[2025-11-18 13:50:55,645][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.mlp.fc2.weight
+[2025-11-18 13:50:55,645][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.self_attn.k_proj.bias
+[2025-11-18 13:50:55,645][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.self_attn.k_proj.weight
+[2025-11-18 13:50:55,646][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.self_attn.out_proj.bias
+[2025-11-18 13:50:55,646][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.self_attn.out_proj.weight
+[2025-11-18 13:50:55,647][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.self_attn.q_proj.bias
+[2025-11-18 13:50:55,647][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.self_attn.q_proj.weight
+[2025-11-18 13:50:55,647][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.self_attn.v_proj.bias
+[2025-11-18 13:50:55,648][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.11.self_attn.v_proj.weight
+[2025-11-18 13:50:55,648][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.layer_norm1.bias
+[2025-11-18 13:50:55,649][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.layer_norm1.weight
+[2025-11-18 13:50:55,649][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.layer_norm2.bias
+[2025-11-18 13:50:55,651][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.layer_norm2.weight
+[2025-11-18 13:50:55,652][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.mlp.fc1.bias
+[2025-11-18 13:50:55,652][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.mlp.fc1.weight
+[2025-11-18 13:50:55,652][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.mlp.fc2.bias
+[2025-11-18 13:50:55,653][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.mlp.fc2.weight
+[2025-11-18 13:50:55,654][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.self_attn.k_proj.bias
+[2025-11-18 13:50:55,654][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.self_attn.k_proj.weight
+[2025-11-18 13:50:55,656][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.self_attn.out_proj.bias
+[2025-11-18 13:50:55,657][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.self_attn.out_proj.weight
+[2025-11-18 13:50:55,658][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.self_attn.q_proj.bias
+[2025-11-18 13:50:55,658][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.self_attn.q_proj.weight
+[2025-11-18 13:50:55,659][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.self_attn.v_proj.bias
+[2025-11-18 13:50:55,659][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.2.self_attn.v_proj.weight
+[2025-11-18 13:50:55,660][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.layer_norm1.bias
+[2025-11-18 13:50:55,660][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.layer_norm1.weight
+[2025-11-18 13:50:55,661][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.layer_norm2.bias
+[2025-11-18 13:50:55,661][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.layer_norm2.weight
+[2025-11-18 13:50:55,661][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.mlp.fc1.bias
+[2025-11-18 13:50:55,662][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.mlp.fc1.weight
+[2025-11-18 13:50:55,662][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.mlp.fc2.bias
+[2025-11-18 13:50:55,662][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.mlp.fc2.weight
+[2025-11-18 13:50:55,663][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.self_attn.k_proj.bias
+[2025-11-18 13:50:55,663][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.self_attn.k_proj.weight
+[2025-11-18 13:50:55,664][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.self_attn.out_proj.bias
+[2025-11-18 13:50:55,664][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.self_attn.out_proj.weight
+[2025-11-18 13:50:55,665][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.self_attn.q_proj.bias
+[2025-11-18 13:50:55,665][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.self_attn.q_proj.weight
+[2025-11-18 13:50:55,665][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.self_attn.v_proj.bias
+[2025-11-18 13:50:55,666][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.3.self_attn.v_proj.weight
+[2025-11-18 13:50:55,666][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.layer_norm1.bias
+[2025-11-18 13:50:55,667][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.layer_norm1.weight
+[2025-11-18 13:50:55,667][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.layer_norm2.bias
+[2025-11-18 13:50:55,667][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.layer_norm2.weight
+[2025-11-18 13:50:55,668][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.mlp.fc1.bias
+[2025-11-18 13:50:55,668][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.mlp.fc1.weight
+[2025-11-18 13:50:55,669][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.mlp.fc2.bias
+[2025-11-18 13:50:55,669][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.mlp.fc2.weight
+[2025-11-18 13:50:55,670][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.self_attn.k_proj.bias
+[2025-11-18 13:50:55,671][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.self_attn.k_proj.weight
+[2025-11-18 13:50:55,672][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.self_attn.out_proj.bias
+[2025-11-18 13:50:55,672][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.self_attn.out_proj.weight
+[2025-11-18 13:50:55,673][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.self_attn.q_proj.bias
+[2025-11-18 13:50:55,674][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.self_attn.q_proj.weight
+[2025-11-18 13:50:55,675][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.self_attn.v_proj.bias
+[2025-11-18 13:50:55,676][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.4.self_attn.v_proj.weight
+[2025-11-18 13:50:55,677][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.layer_norm1.bias
+[2025-11-18 13:50:55,678][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.layer_norm1.weight
+[2025-11-18 13:50:55,678][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.layer_norm2.bias
+[2025-11-18 13:50:55,679][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.layer_norm2.weight
+[2025-11-18 13:50:55,679][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.mlp.fc1.bias
+[2025-11-18 13:50:55,680][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.mlp.fc1.weight
+[2025-11-18 13:50:55,680][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.mlp.fc2.bias
+[2025-11-18 13:50:55,680][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.mlp.fc2.weight
+[2025-11-18 13:50:55,681][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.self_attn.k_proj.bias
+[2025-11-18 13:50:55,681][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.self_attn.k_proj.weight
+[2025-11-18 13:50:55,681][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.self_attn.out_proj.bias
+[2025-11-18 13:50:55,682][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.self_attn.out_proj.weight
+[2025-11-18 13:50:55,683][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.self_attn.q_proj.bias
+[2025-11-18 13:50:55,683][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.self_attn.q_proj.weight
+[2025-11-18 13:50:55,684][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.self_attn.v_proj.bias
+[2025-11-18 13:50:55,684][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.5.self_attn.v_proj.weight
+[2025-11-18 13:50:55,685][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.layer_norm1.bias
+[2025-11-18 13:50:55,685][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.layer_norm1.weight
+[2025-11-18 13:50:55,685][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.layer_norm2.bias
+[2025-11-18 13:50:55,686][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.layer_norm2.weight
+[2025-11-18 13:50:55,686][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.mlp.fc1.bias
+[2025-11-18 13:50:55,686][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.mlp.fc1.weight
+[2025-11-18 13:50:55,687][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.mlp.fc2.bias
+[2025-11-18 13:50:55,687][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.mlp.fc2.weight
+[2025-11-18 13:50:55,687][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.self_attn.k_proj.bias
+[2025-11-18 13:50:55,688][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.self_attn.k_proj.weight
+[2025-11-18 13:50:55,688][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.self_attn.out_proj.bias
+[2025-11-18 13:50:55,689][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.self_attn.out_proj.weight
+[2025-11-18 13:50:55,690][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.self_attn.q_proj.bias
+[2025-11-18 13:50:55,690][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.self_attn.q_proj.weight
+[2025-11-18 13:50:55,691][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.self_attn.v_proj.bias
+[2025-11-18 13:50:55,692][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.6.self_attn.v_proj.weight
+[2025-11-18 13:50:55,693][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.layer_norm1.bias
+[2025-11-18 13:50:55,693][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.layer_norm1.weight
+[2025-11-18 13:50:55,694][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.layer_norm2.bias
+[2025-11-18 13:50:55,694][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.layer_norm2.weight
+[2025-11-18 13:50:55,695][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.mlp.fc1.bias
+[2025-11-18 13:50:55,695][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.mlp.fc1.weight
+[2025-11-18 13:50:55,696][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.mlp.fc2.bias
+[2025-11-18 13:50:55,697][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.mlp.fc2.weight
+[2025-11-18 13:50:55,697][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.self_attn.k_proj.bias
+[2025-11-18 13:50:55,698][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.self_attn.k_proj.weight
+[2025-11-18 13:50:55,698][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.self_attn.out_proj.bias
+[2025-11-18 13:50:55,699][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.self_attn.out_proj.weight
+[2025-11-18 13:50:55,699][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.self_attn.q_proj.bias
+[2025-11-18 13:50:55,700][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.self_attn.q_proj.weight
+[2025-11-18 13:50:55,700][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.self_attn.v_proj.bias
+[2025-11-18 13:50:55,700][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.7.self_attn.v_proj.weight
+[2025-11-18 13:50:55,701][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.layer_norm1.bias
+[2025-11-18 13:50:55,701][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.layer_norm1.weight
+[2025-11-18 13:50:55,701][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.layer_norm2.bias
+[2025-11-18 13:50:55,702][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.layer_norm2.weight
+[2025-11-18 13:50:55,702][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.mlp.fc1.bias
+[2025-11-18 13:50:55,703][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.mlp.fc1.weight
+[2025-11-18 13:50:55,703][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.mlp.fc2.bias
+[2025-11-18 13:50:55,704][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.mlp.fc2.weight
+[2025-11-18 13:50:55,704][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.self_attn.k_proj.bias
+[2025-11-18 13:50:55,704][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.self_attn.k_proj.weight
+[2025-11-18 13:50:55,705][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.self_attn.out_proj.bias
+[2025-11-18 13:50:55,705][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.self_attn.out_proj.weight
+[2025-11-18 13:50:55,706][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.self_attn.q_proj.bias
+[2025-11-18 13:50:55,706][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.self_attn.q_proj.weight
+[2025-11-18 13:50:55,707][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.self_attn.v_proj.bias
+[2025-11-18 13:50:55,707][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.8.self_attn.v_proj.weight
+[2025-11-18 13:50:55,707][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.layer_norm1.bias
+[2025-11-18 13:50:55,708][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.layer_norm1.weight
+[2025-11-18 13:50:55,708][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.layer_norm2.bias
+[2025-11-18 13:50:55,709][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.layer_norm2.weight
+[2025-11-18 13:50:55,709][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.mlp.fc1.bias
+[2025-11-18 13:50:55,710][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.mlp.fc1.weight
+[2025-11-18 13:50:55,710][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.mlp.fc2.bias
+[2025-11-18 13:50:55,711][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.mlp.fc2.weight
+[2025-11-18 13:50:55,711][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.self_attn.k_proj.bias
+[2025-11-18 13:50:55,711][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.self_attn.k_proj.weight
+[2025-11-18 13:50:55,713][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.self_attn.out_proj.bias
+[2025-11-18 13:50:55,713][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.self_attn.out_proj.weight
+[2025-11-18 13:50:55,714][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.self_attn.q_proj.bias
+[2025-11-18 13:50:55,715][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.self_attn.q_proj.weight
+[2025-11-18 13:50:55,715][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.self_attn.v_proj.bias
+[2025-11-18 13:50:55,716][__main__][WARNING] -   - strategist.vision_backbone.vision_model.encoder.layers.9.self_attn.v_proj.weight
+[2025-11-18 13:50:55,716][__main__][WARNING] -   - strategist.vision_backbone.vision_model.head.attention.in_proj_bias
+[2025-11-18 13:50:55,718][__main__][WARNING] -   - strategist.vision_backbone.vision_model.head.attention.in_proj_weight
+[2025-11-18 13:50:55,718][__main__][WARNING] -   - strategist.vision_backbone.vision_model.head.attention.out_proj.bias
+[2025-11-18 13:50:55,719][__main__][WARNING] -   - strategist.vision_backbone.vision_model.head.attention.out_proj.weight
+[2025-11-18 13:50:55,719][__main__][WARNING] -   - strategist.vision_backbone.vision_model.head.layernorm.bias
+[2025-11-18 13:50:55,720][__main__][WARNING] -   - strategist.vision_backbone.vision_model.head.layernorm.weight
+[2025-11-18 13:50:55,720][__main__][WARNING] -   - strategist.vision_backbone.vision_model.head.mlp.fc1.bias
+[2025-11-18 13:50:55,720][__main__][WARNING] -   - strategist.vision_backbone.vision_model.head.mlp.fc1.weight
+[2025-11-18 13:50:55,721][__main__][WARNING] -   - strategist.vision_backbone.vision_model.head.mlp.fc2.bias
+[2025-11-18 13:50:55,721][__main__][WARNING] -   - strategist.vision_backbone.vision_model.head.mlp.fc2.weight
+[2025-11-18 13:50:55,721][__main__][WARNING] -   - strategist.vision_backbone.vision_model.head.probe
+[2025-11-18 13:50:55,722][__main__][WARNING] -   - strategist.vision_backbone.vision_model.post_layernorm.bias
+[2025-11-18 13:50:55,722][__main__][WARNING] -   - strategist.vision_backbone.vision_model.post_layernorm.weight
+[2025-11-18 13:50:55,722][__main__][INFO] - The following layers from the old checkpoint were OBSOLETE and ignored:
+[2025-11-18 13:50:55,723][__main__][INFO] -   - scheduler.alphas
+[2025-11-18 13:50:55,723][__main__][INFO] -   - scheduler.alphas_cumprod
+[2025-11-18 13:50:55,724][__main__][INFO] -   - scheduler.betas
+[2025-11-18 13:50:55,724][__main__][INFO] -   - scheduler.sqrt_alphas_cumprod
+[2025-11-18 13:50:55,725][__main__][INFO] -   - scheduler.sqrt_one_minus_alphas_cumprod
+[2025-11-18 13:50:55,725][__main__][INFO] -   - strategist.goal_token_type
+[2025-11-18 13:50:55,725][__main__][INFO] -   - strategist.start_token_type
+[2025-11-18 13:50:55,726][__main__][INFO] -   - strategist.vision_backbone.vision_embeddings.patch_embedding.bias
+[2025-11-18 13:50:55,726][__main__][INFO] -   - strategist.vision_backbone.vision_embeddings.patch_embedding.weight
+[2025-11-18 13:50:55,726][__main__][INFO] -   - strategist.vision_backbone.vision_embeddings.position_embedding.weight
+[2025-11-18 13:50:55,727][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.layer_norm1.bias
+[2025-11-18 13:50:55,727][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.layer_norm1.weight
+[2025-11-18 13:50:55,727][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.layer_norm2.bias
+[2025-11-18 13:50:55,728][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.layer_norm2.weight
+[2025-11-18 13:50:55,728][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.mlp.fc1.bias
+[2025-11-18 13:50:55,728][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.mlp.fc1.weight
+[2025-11-18 13:50:55,729][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.mlp.fc2.bias
+[2025-11-18 13:50:55,729][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.mlp.fc2.weight
+[2025-11-18 13:50:55,730][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.self_attn.k_proj.bias
+[2025-11-18 13:50:55,730][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.self_attn.k_proj.weight
+[2025-11-18 13:50:55,731][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.self_attn.out_proj.bias
+[2025-11-18 13:50:55,731][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.self_attn.out_proj.weight
+[2025-11-18 13:50:55,731][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.self_attn.q_proj.bias
+[2025-11-18 13:50:55,732][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.self_attn.q_proj.weight
+[2025-11-18 13:50:55,732][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.self_attn.v_proj.bias
+[2025-11-18 13:50:55,732][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.0.self_attn.v_proj.weight
+[2025-11-18 13:50:55,734][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.layer_norm1.bias
+[2025-11-18 13:50:55,735][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.layer_norm1.weight
+[2025-11-18 13:50:55,735][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.layer_norm2.bias
+[2025-11-18 13:50:55,736][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.layer_norm2.weight
+[2025-11-18 13:50:55,736][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.mlp.fc1.bias
+[2025-11-18 13:50:55,737][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.mlp.fc1.weight
+[2025-11-18 13:50:55,737][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.mlp.fc2.bias
+[2025-11-18 13:50:55,737][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.mlp.fc2.weight
+[2025-11-18 13:50:55,738][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.self_attn.k_proj.bias
+[2025-11-18 13:50:55,738][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.self_attn.k_proj.weight
+[2025-11-18 13:50:55,738][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.self_attn.out_proj.bias
+[2025-11-18 13:50:55,738][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.self_attn.out_proj.weight
+[2025-11-18 13:50:55,739][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.self_attn.q_proj.bias
+[2025-11-18 13:50:55,740][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.self_attn.q_proj.weight
+[2025-11-18 13:50:55,740][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.self_attn.v_proj.bias
+[2025-11-18 13:50:55,740][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.1.self_attn.v_proj.weight
+[2025-11-18 13:50:55,741][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.layer_norm1.bias
+[2025-11-18 13:50:55,741][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.layer_norm1.weight
+[2025-11-18 13:50:55,741][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.layer_norm2.bias
+[2025-11-18 13:50:55,742][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.layer_norm2.weight
+[2025-11-18 13:50:55,742][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.mlp.fc1.bias
+[2025-11-18 13:50:55,743][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.mlp.fc1.weight
+[2025-11-18 13:50:55,743][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.mlp.fc2.bias
+[2025-11-18 13:50:55,743][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.mlp.fc2.weight
+[2025-11-18 13:50:55,744][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.self_attn.k_proj.bias
+[2025-11-18 13:50:55,744][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.self_attn.k_proj.weight
+[2025-11-18 13:50:55,744][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.self_attn.out_proj.bias
+[2025-11-18 13:50:55,745][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.self_attn.out_proj.weight
+[2025-11-18 13:50:55,745][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.self_attn.q_proj.bias
+[2025-11-18 13:50:55,746][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.self_attn.q_proj.weight
+[2025-11-18 13:50:55,746][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.self_attn.v_proj.bias
+[2025-11-18 13:50:55,746][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.10.self_attn.v_proj.weight
+[2025-11-18 13:50:55,747][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.layer_norm1.bias
+[2025-11-18 13:50:55,747][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.layer_norm1.weight
+[2025-11-18 13:50:55,747][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.layer_norm2.bias
+[2025-11-18 13:50:55,748][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.layer_norm2.weight
+[2025-11-18 13:50:55,748][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.mlp.fc1.bias
+[2025-11-18 13:50:55,748][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.mlp.fc1.weight
+[2025-11-18 13:50:55,749][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.mlp.fc2.bias
+[2025-11-18 13:50:55,749][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.mlp.fc2.weight
+[2025-11-18 13:50:55,750][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.self_attn.k_proj.bias
+[2025-11-18 13:50:55,750][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.self_attn.k_proj.weight
+[2025-11-18 13:50:55,751][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.self_attn.out_proj.bias
+[2025-11-18 13:50:55,751][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.self_attn.out_proj.weight
+[2025-11-18 13:50:55,751][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.self_attn.q_proj.bias
+[2025-11-18 13:50:55,752][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.self_attn.q_proj.weight
+[2025-11-18 13:50:55,752][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.self_attn.v_proj.bias
+[2025-11-18 13:50:55,752][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.11.self_attn.v_proj.weight
+[2025-11-18 13:50:55,753][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.layer_norm1.bias
+[2025-11-18 13:50:55,753][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.layer_norm1.weight
+[2025-11-18 13:50:55,755][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.layer_norm2.bias
+[2025-11-18 13:50:55,756][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.layer_norm2.weight
+[2025-11-18 13:50:55,757][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.mlp.fc1.bias
+[2025-11-18 13:50:55,757][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.mlp.fc1.weight
+[2025-11-18 13:50:55,757][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.mlp.fc2.bias
+[2025-11-18 13:50:55,758][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.mlp.fc2.weight
+[2025-11-18 13:50:55,758][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.self_attn.k_proj.bias
+[2025-11-18 13:50:55,759][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.self_attn.k_proj.weight
+[2025-11-18 13:50:55,759][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.self_attn.out_proj.bias
+[2025-11-18 13:50:55,760][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.self_attn.out_proj.weight
+[2025-11-18 13:50:55,760][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.self_attn.q_proj.bias
+[2025-11-18 13:50:55,761][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.self_attn.q_proj.weight
+[2025-11-18 13:50:55,761][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.self_attn.v_proj.bias
+[2025-11-18 13:50:55,761][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.2.self_attn.v_proj.weight
+[2025-11-18 13:50:55,762][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.layer_norm1.bias
+[2025-11-18 13:50:55,763][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.layer_norm1.weight
+[2025-11-18 13:50:55,763][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.layer_norm2.bias
+[2025-11-18 13:50:55,764][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.layer_norm2.weight
+[2025-11-18 13:50:55,764][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.mlp.fc1.bias
+[2025-11-18 13:50:55,765][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.mlp.fc1.weight
+[2025-11-18 13:50:55,765][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.mlp.fc2.bias
+[2025-11-18 13:50:55,766][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.mlp.fc2.weight
+[2025-11-18 13:50:55,766][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.self_attn.k_proj.bias
+[2025-11-18 13:50:55,767][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.self_attn.k_proj.weight
+[2025-11-18 13:50:55,767][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.self_attn.out_proj.bias
+[2025-11-18 13:50:55,767][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.self_attn.out_proj.weight
+[2025-11-18 13:50:55,768][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.self_attn.q_proj.bias
+[2025-11-18 13:50:55,768][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.self_attn.q_proj.weight
+[2025-11-18 13:50:55,768][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.self_attn.v_proj.bias
+[2025-11-18 13:50:55,769][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.3.self_attn.v_proj.weight
+[2025-11-18 13:50:55,769][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.layer_norm1.bias
+[2025-11-18 13:50:55,769][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.layer_norm1.weight
+[2025-11-18 13:50:55,770][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.layer_norm2.bias
+[2025-11-18 13:50:55,770][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.layer_norm2.weight
+[2025-11-18 13:50:55,771][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.mlp.fc1.bias
+[2025-11-18 13:50:55,771][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.mlp.fc1.weight
+[2025-11-18 13:50:55,772][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.mlp.fc2.bias
+[2025-11-18 13:50:55,772][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.mlp.fc2.weight
+[2025-11-18 13:50:55,772][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.self_attn.k_proj.bias
+[2025-11-18 13:50:55,773][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.self_attn.k_proj.weight
+[2025-11-18 13:50:55,773][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.self_attn.out_proj.bias
+[2025-11-18 13:50:55,773][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.self_attn.out_proj.weight
+[2025-11-18 13:50:55,773][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.self_attn.q_proj.bias
+[2025-11-18 13:50:55,774][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.self_attn.q_proj.weight
+[2025-11-18 13:50:55,774][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.self_attn.v_proj.bias
+[2025-11-18 13:50:55,776][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.4.self_attn.v_proj.weight
+[2025-11-18 13:50:55,777][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.layer_norm1.bias
+[2025-11-18 13:50:55,777][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.layer_norm1.weight
+[2025-11-18 13:50:55,778][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.layer_norm2.bias
+[2025-11-18 13:50:55,778][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.layer_norm2.weight
+[2025-11-18 13:50:55,778][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.mlp.fc1.bias
+[2025-11-18 13:50:55,779][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.mlp.fc1.weight
+[2025-11-18 13:50:55,779][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.mlp.fc2.bias
+[2025-11-18 13:50:55,779][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.mlp.fc2.weight
+[2025-11-18 13:50:55,780][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.self_attn.k_proj.bias
+[2025-11-18 13:50:55,780][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.self_attn.k_proj.weight
+[2025-11-18 13:50:55,780][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.self_attn.out_proj.bias
+[2025-11-18 13:50:55,781][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.self_attn.out_proj.weight
+[2025-11-18 13:50:55,782][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.self_attn.q_proj.bias
+[2025-11-18 13:50:55,782][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.self_attn.q_proj.weight
+[2025-11-18 13:50:55,783][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.self_attn.v_proj.bias
+[2025-11-18 13:50:55,783][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.5.self_attn.v_proj.weight
+[2025-11-18 13:50:55,783][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.layer_norm1.bias
+[2025-11-18 13:50:55,784][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.layer_norm1.weight
+[2025-11-18 13:50:55,784][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.layer_norm2.bias
+[2025-11-18 13:50:55,784][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.layer_norm2.weight
+[2025-11-18 13:50:55,785][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.mlp.fc1.bias
+[2025-11-18 13:50:55,785][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.mlp.fc1.weight
+[2025-11-18 13:50:55,786][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.mlp.fc2.bias
+[2025-11-18 13:50:55,786][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.mlp.fc2.weight
+[2025-11-18 13:50:55,787][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.self_attn.k_proj.bias
+[2025-11-18 13:50:55,787][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.self_attn.k_proj.weight
+[2025-11-18 13:50:55,787][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.self_attn.out_proj.bias
+[2025-11-18 13:50:55,788][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.self_attn.out_proj.weight
+[2025-11-18 13:50:55,788][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.self_attn.q_proj.bias
+[2025-11-18 13:50:55,788][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.self_attn.q_proj.weight
+[2025-11-18 13:50:55,789][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.self_attn.v_proj.bias
+[2025-11-18 13:50:55,789][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.6.self_attn.v_proj.weight
+[2025-11-18 13:50:55,789][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.layer_norm1.bias
+[2025-11-18 13:50:55,790][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.layer_norm1.weight
+[2025-11-18 13:50:55,790][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.layer_norm2.bias
+[2025-11-18 13:50:55,790][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.layer_norm2.weight
+[2025-11-18 13:50:55,791][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.mlp.fc1.bias
+[2025-11-18 13:50:55,791][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.mlp.fc1.weight
+[2025-11-18 13:50:55,791][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.mlp.fc2.bias
+[2025-11-18 13:50:55,792][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.mlp.fc2.weight
+[2025-11-18 13:50:55,792][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.self_attn.k_proj.bias
+[2025-11-18 13:50:55,793][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.self_attn.k_proj.weight
+[2025-11-18 13:50:55,793][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.self_attn.out_proj.bias
+[2025-11-18 13:50:55,793][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.self_attn.out_proj.weight
+[2025-11-18 13:50:55,794][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.self_attn.q_proj.bias
+[2025-11-18 13:50:55,794][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.self_attn.q_proj.weight
+[2025-11-18 13:50:55,794][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.self_attn.v_proj.bias
+[2025-11-18 13:50:55,795][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.7.self_attn.v_proj.weight
+[2025-11-18 13:50:55,795][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.layer_norm1.bias
+[2025-11-18 13:50:55,796][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.layer_norm1.weight
+[2025-11-18 13:50:55,797][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.layer_norm2.bias
+[2025-11-18 13:50:55,798][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.layer_norm2.weight
+[2025-11-18 13:50:55,798][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.mlp.fc1.bias
+[2025-11-18 13:50:55,799][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.mlp.fc1.weight
+[2025-11-18 13:50:55,799][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.mlp.fc2.bias
+[2025-11-18 13:50:55,799][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.mlp.fc2.weight
+[2025-11-18 13:50:55,800][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.self_attn.k_proj.bias
+[2025-11-18 13:50:55,800][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.self_attn.k_proj.weight
+[2025-11-18 13:50:55,800][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.self_attn.out_proj.bias
+[2025-11-18 13:50:55,801][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.self_attn.out_proj.weight
+[2025-11-18 13:50:55,801][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.self_attn.q_proj.bias
+[2025-11-18 13:50:55,801][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.self_attn.q_proj.weight
+[2025-11-18 13:50:55,802][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.self_attn.v_proj.bias
+[2025-11-18 13:50:55,802][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.8.self_attn.v_proj.weight
+[2025-11-18 13:50:55,802][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.layer_norm1.bias
+[2025-11-18 13:50:55,803][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.layer_norm1.weight
+[2025-11-18 13:50:55,803][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.layer_norm2.bias
+[2025-11-18 13:50:55,804][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.layer_norm2.weight
+[2025-11-18 13:50:55,804][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.mlp.fc1.bias
+[2025-11-18 13:50:55,805][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.mlp.fc1.weight
+[2025-11-18 13:50:55,805][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.mlp.fc2.bias
+[2025-11-18 13:50:55,805][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.mlp.fc2.weight
+[2025-11-18 13:50:55,806][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.self_attn.k_proj.bias
+[2025-11-18 13:50:55,806][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.self_attn.k_proj.weight
+[2025-11-18 13:50:55,806][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.self_attn.out_proj.bias
+[2025-11-18 13:50:55,807][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.self_attn.out_proj.weight
+[2025-11-18 13:50:55,807][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.self_attn.q_proj.bias
+[2025-11-18 13:50:55,807][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.self_attn.q_proj.weight
+[2025-11-18 13:50:55,808][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.self_attn.v_proj.bias
+[2025-11-18 13:50:55,808][__main__][INFO] -   - strategist.vision_backbone.vision_encoder.layers.9.self_attn.v_proj.weight
+[2025-11-18 13:50:55,809][__main__][INFO] -   - strategist.vision_backbone.vision_head.attention.in_proj_bias
+[2025-11-18 13:50:55,809][__main__][INFO] -   - strategist.vision_backbone.vision_head.attention.in_proj_weight
+[2025-11-18 13:50:55,809][__main__][INFO] -   - strategist.vision_backbone.vision_head.attention.out_proj.bias
+[2025-11-18 13:50:55,810][__main__][INFO] -   - strategist.vision_backbone.vision_head.attention.out_proj.weight
+[2025-11-18 13:50:55,810][__main__][INFO] -   - strategist.vision_backbone.vision_head.layernorm.bias
+[2025-11-18 13:50:55,810][__main__][INFO] -   - strategist.vision_backbone.vision_head.layernorm.weight
+[2025-11-18 13:50:55,811][__main__][INFO] -   - strategist.vision_backbone.vision_head.mlp.fc1.bias
+[2025-11-18 13:50:55,811][__main__][INFO] -   - strategist.vision_backbone.vision_head.mlp.fc1.weight
+[2025-11-18 13:50:55,811][__main__][INFO] -   - strategist.vision_backbone.vision_head.mlp.fc2.bias
+[2025-11-18 13:50:55,812][__main__][INFO] -   - strategist.vision_backbone.vision_head.mlp.fc2.weight
+[2025-11-18 13:50:55,812][__main__][INFO] -   - strategist.vision_backbone.vision_head.probe
+[2025-11-18 13:50:55,812][__main__][INFO] -   - strategist.vision_backbone.vision_post_layernorm.bias
+[2025-11-18 13:50:55,813][__main__][INFO] -   - strategist.vision_backbone.vision_post_layernorm.weight
+[2025-11-18 13:50:55,813][__main__][INFO] - --- Migration Complete ---
+[2025-11-18 13:50:55,822][__main__][INFO] - Found EMA weights in warm-start checkpoint, attempting migration...
+[2025-11-18 13:50:55,876][__main__][INFO] - Warm-start EMA weights restored.
+[2025-11-18 13:50:56,934][__main__][INFO] - Loading TRAINING dataset from: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+[2025-11-18 13:50:56,935][utils.ego_planner_dataset][INFO] - Initializing EgoPlannerDataset (Definitive Patched Version, use_aug=False)
+[2025-11-18 13:50:56,937][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-11-18 13:50:56,939][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-11-18 13:50:56,940][utils.ego_planner_dataset][INFO] - Building explicit sample index map for robust indexing...
+[2025-11-18 13:50:56,943][utils.ego_planner_dataset][INFO] - Successfully initialized. Found 2945 valid samples across 12 episodes.
+[2025-11-18 13:50:56,944][__main__][INFO] - Loading VALIDATION dataset from: C:/Users/Hellx/Documents/Programming/python/Project/dgpo/data/validation/sota_dataset/expert_validation_run_99914b93.lmdb
+[2025-11-18 13:50:56,946][utils.ego_planner_dataset][INFO] - Initializing EgoPlannerDataset (Definitive Patched Version, use_aug=False)
+[2025-11-18 13:50:56,948][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\dgpo\data\validation\sota_dataset\expert_validation_run_99914b93_index.json...
+[2025-11-18 13:50:56,949][utils.expert_dataset][INFO] - Loaded 12 episodes, 2945 total valid chunks (Virtually Indexed).
+[2025-11-18 13:50:56,950][utils.ego_planner_dataset][INFO] - Building explicit sample index map for robust indexing...
+[2025-11-18 13:50:56,951][utils.ego_planner_dataset][INFO] - Successfully initialized. Found 2945 valid samples across 12 episodes.
+[2025-11-18 13:50:56,954][__main__][INFO] - Moving noise scheduler to device: cpu
+[2025-11-18 13:50:56,954][__main__][INFO] - Moving EMA model to device: cpu
+[2025-11-18 13:50:56,967][__main__][INFO] - Configuring optimizer with corrected parameter groups...
+[2025-11-18 13:50:56,970][__main__][INFO] - Using differential LR: Backbone LR = 0.0001, Other Params LR = 1e-05
+[2025-11-18 13:50:56,972][utils.samplers][INFO] - Building episode-to-index map for sampler...
+[2025-11-18 13:50:56,978][utils.samplers][INFO] - Map building complete.
+[2025-11-18 13:50:56,979][__main__][INFO] - Using EpisodeAwareSampler for training to optimize I/O.
+[2025-11-18 13:51:44,014][__main__][WARNING] - Training interrupted or failed: 'action_chunk'
+[2025-11-18 13:51:44,015][__main__][INFO] - Attempting to save a final 'interrupted.ckpt'...
+[2025-11-18 13:51:46,883][__main__][ERROR] - Could not save final interrupted checkpoint: [enforce fail at inline_container.cc:664] . unexpected pos 936693248 vs 936693136

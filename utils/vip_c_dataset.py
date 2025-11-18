@@ -108,13 +108,8 @@ class ViPCDataset(Dataset):
             current_task_phase = all_phases[timestep_t]
             all_heatmaps_uint8 = get_full_modality("subgoal_heatmaps")
             gt_heatmap_uint8 = all_heatmaps_uint8[timestep_t]
-            all_goal_indices = get_full_modality("phase_goal_image_indices")
-            # 2. Get the specific goal image index for the current timestep.
-            goal_image_index = all_goal_indices[timestep_t]
-            # 3. Load the primary camera image from that correct, phase-consistent index.
-            goal_image_np = get_full_modality("image_primary")[goal_image_index]
-            # goal_image_np = self.expert_reader.get_goal_image(ep_idx)
-
+            
+            goal_image_np = get_full_modality("image_primary")[-1]
 
             # --- Data Transformation ---
             current_image = self.transform_planner_img(Image.fromarray(current_image_np))

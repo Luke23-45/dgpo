@@ -1,0 +1,63 @@
+seed: 42
+model:
+  action_dim: 8
+  proprio_dim: 22
+  action_horizon: 8
+  obs_horizon: 2
+  vision_backbone_model: google/siglip-base-patch16-224
+  vision_feature_dim: 768
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  resnet_feature_dim: 256
+  pilot_d_model: 512
+  denoiser_layers: 6
+  denoiser_heads: 8
+  p_plan_drop: 0.1
+  p_obs_drop: 0.1
+  num_task_phases: 5
+scheduler:
+  timesteps: 100
+  beta_schedule: cosine
+  beta_start: 0.0001
+  beta_end: 0.02
+dataset:
+  train_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+  val_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/validation_dataset.lmdb
+  num_workers: 1
+  use_aug: false
+training:
+  batch_size: 32
+  val_batch_size: 32
+  ema_decay: 0.999
+  use_activation_checkpointing: true
+  use_swa: false
+  swa_lrs: 1.0e-05
+  backup_every_n_epochs: 3
+  resume_from_checkpoint: null
+  warm_start_from_checkpoint: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/backup_epoch_80.ckpt
+validation:
+  run_full_validation_every_n_epoch: 120
+  sampling_steps: 30
+  guidance_scale_plan: 7.5
+  guidance_scale_obs: 1.5
+  num_inference_steps: 30
+optimizer:
+  lr: 0.0001
+  head_lr: 1.0e-05
+  weight_decay: 1.0e-06
+  warmup_steps: 0.05
+  gradient_clip_val: 1.0
+  warmup_percentage: 0.05
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 1000
+  check_val_every_n_epoch: 120
+  accumulate_grad_batches: 2
+logging:
+  use_wandb: true
+  wandb_project: ego_planner_v4
+  wandb_run_name: null
+  log_every_n_steps: 50
+  wandb_mode: offline

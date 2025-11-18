@@ -73,6 +73,7 @@ class EgoPlannerConfig:
     beta_schedule: str = "cosine"
     beta_start: float = 1e-4
     beta_end: float = 0.02
+    num_task_phases: int = 5
 
 
 @dataclass
@@ -365,27 +366,36 @@ class ContextualPlanEncoder(nn.Module):
         # A separate embedding for the CLS token
         self.cls_pos_emb = nn.Parameter(torch.randn(1, 1, cfg.vision_feature_dim))
         
-        self.start_token_type = nn.Parameter(torch.randn(1, 1, cfg.vision_feature_dim))
-        self.goal_token_type = nn.Parameter(torch.randn(1, 1, cfg.vision_feature_dim))
+        self.task_phase_embedding = nn.Embedding(cfg.num_task_phases, cfg.vision_feature_dim)
         
-# In CLASS ContextualPlanEncoder
+        # SOTA: Replace separate nn.Parameters with a single, cleaner nn.Embedding for token types.
+        # 0: start_image, 1: goal_image, 2: task_phase
+        self.token_type_embeddings = nn.Embedding(3, cfg.vision_feature_dim)
+        # --- [END OF PATCH 2] ---
 
-    def forward(self, initial_image: torch.Tensor, goal_image: torch.Tensor) -> torch.Tensor:
+
+
+    def forward(self, 
+                initial_image: torch.Tensor, 
+                goal_image: torch.Tensor,
+                task_phase: torch.Tensor
+                ) -> torch.Tensor:
         """
+        [SOTA, DEFINITIVE PATCHED VERSION]
+        This version correctly parses the output of the SiglipVisionModel,
+        sourcing the [CLS] token from the `pooler_output` and the patch tokens
+        from `last_hidden_state`, resolving the tensor shape mismatch.
+        
         Args:
             initial_image (torch.Tensor): Shape (B, 3, 224, 224).
             goal_image (torch.Tensor): Shape (B, 3, 224, 224).
+            task_phase (torch.Tensor): Shape (B,).
         
         Returns:
             torch.Tensor: The final `plan_vector`. Shape (B, D_vis).
         """
-        # --- DEFINITIVE DEVICE GUARD FIX ---
-        # Get the target device from the input tensor, which we know is on the correct device.
-        target_device = initial_image.device
-        # Ensure the vision backbone is on the same device as the input.
-        # This is a failsafe against initialization issues.
-        self.to(target_device)
-        # --- END OF FIX ---
+        B, device = initial_image.shape[0], initial_image.device
+        self.to(device)
 
         with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
             initial_image_fp32 = initial_image.float()
@@ -393,30 +403,43 @@ class ContextualPlanEncoder(nn.Module):
             outputs_start = self.vision_backbone(initial_image_fp32, output_hidden_states=False)
             outputs_goal = self.vision_backbone(goal_image_fp32, output_hidden_states=False)
 
-
-        # The rest of the function remains the same...
-        start_patch_tokens = outputs_start.last_hidden_state.clone()
-        start_cls_token = outputs_start.pooler_output.clone().unsqueeze(1) # -> (B, 1, D)
+        # --- [START OF DEFINITIVE PATCH] ---
+        # CORRECTLY parse the model's output.
+        # `last_hidden_state` contains ONLY the 196 patch tokens.
+        start_patch_tokens = outputs_start.last_hidden_state.clone() # -> Shape [B, 196, D]
+        # `pooler_output` is the processed [CLS] token representation.
+        start_cls_token = outputs_start.pooler_output.clone().unsqueeze(1) # -> Shape [B, 1, D]
         
-        goal_patch_tokens = outputs_goal.last_hidden_state.clone()
-        goal_cls_token = outputs_goal.pooler_output.clone().unsqueeze(1) # -> (B, 1, D)
-
+        goal_patch_tokens = outputs_goal.last_hidden_state.clone()   # -> Shape [B, 196, D]
+        goal_cls_token = outputs_goal.pooler_output.clone().unsqueeze(1) # -> Shape [B, 1, D]
+        # --- [END OF DEFINITIVE PATCH] ---
+        
+        # Apply positional embeddings to image tokens
         start_patch_tokens += self.patch_pos_emb
         goal_patch_tokens += self.patch_pos_emb
+        start_cls_token += self.cls_pos_emb
+        goal_cls_token += self.cls_pos_emb
         
-        start_cls_token += self.cls_pos_emb + self.start_token_type
-        goal_cls_token += self.cls_pos_emb + self.goal_token_type
-
+        # Add token type embeddings
+        start_cls_token += self.token_type_embeddings(torch.zeros(1, 1, dtype=torch.long, device=device))
+        goal_cls_token += self.token_type_embeddings(torch.ones(1, 1, dtype=torch.long, device=device))
+        
+        # Reconstruct the full sequences
         start_sequence = torch.cat([start_cls_token, start_patch_tokens], dim=1)
         goal_sequence = torch.cat([goal_cls_token, goal_patch_tokens], dim=1)
         
-        fused_input = torch.cat([start_sequence, goal_sequence], dim=1)
-        fused_output = self.fusion_transformer(fused_input)
+        # Create and embed the new phase token
+        phase_token = self.task_phase_embedding(task_phase).unsqueeze(1)
+        phase_token += self.token_type_embeddings(torch.full((1, 1), 2, dtype=torch.long, device=device))
         
+        # Form the final, multi-modal input sequence for the transformer
+        fused_input = torch.cat([start_sequence, goal_sequence, phase_token], dim=1)
+
+        # The rest of the logic remains the same.
+        fused_output = self.fusion_transformer(fused_input)
         plan_vector = fused_output[:, 0]
         
         return plan_vector
-
 
 
 class GroundedActionDecoder(nn.Module):
@@ -534,7 +557,11 @@ class EgoPlanner(nn.Module):
         """The main end-to-end training forward pass."""
         B, device = batch['initial_image'].shape[0], batch['initial_image'].device
         
-        plan_vector = self.strategist(batch['initial_image'], batch['goal_image'])
+        plan_vector = self.strategist(
+            batch['initial_image'], 
+            batch['goal_image'],
+            batch['task_phase'] 
+        )
         vision_tokens, proprio_tokens = self.pilot.encode_tactics(batch['observation_history'])
 
         if self.training:
@@ -569,7 +596,12 @@ class EgoPlanner(nn.Module):
                 # Manually cast the input tensors to float32 for the backbone
                 initial_image_fp32 = batch['initial_image'].float()
                 goal_image_fp32 = batch['goal_image'].float()
-                plan_cond = self.strategist(initial_image_fp32, goal_image_fp32)
+
+                plan_cond = self.strategist(
+                    initial_image_fp32, 
+                    goal_image_fp32,
+                    batch['task_phase'] 
+                )
         
         plan_uncond = self.uncond_embeddings.plan.expand(B, -1)
         
