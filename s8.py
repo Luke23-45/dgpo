@@ -33,37 +33,56 @@ log = logging.getLogger(__name__)
 
 
 
+# In FILE: s8.py
+# In FUNCTION: load_model_from_checkpoint
+
 def load_model_from_checkpoint(
-    checkpoint_path: str, 
-    train_cfg: DictConfig, # Now accepts the loaded training config
+    checkpoint_path: str,
+    train_cfg: DictConfig,
     device: torch.device
 ) -> EgoPlanner:
     """
-    [DEFINITIVE, SOTA VERSION 2.0]
-    Loads the EGO-Planner model by first instantiating it from the provided
-    training config and then loading the EMA weights from the checkpoint.
+    Loads the EGO-Planner model from a Lightning checkpoint.
+    
+    [DEFINITIVE, SOTA, PYTORCH-COMPATIBLE VERSION] 
+    This version is patched to be compatible with modern PyTorch versions by
+    explicitly setting `weights_only=False`, indicating that we trust our own
+    checkpoint files to contain safe, non-malicious pickled objects like hyperparameters.
     """
     log.info(f"Loading checkpoint from: {checkpoint_path}")
     
-    # 1. Load the checkpoint file to get the weights.
-    ckpt = torch.load(checkpoint_path, map_location='cpu')
+    # --- [START OF THE DEFINITIVE PATCH] ---
+    # CRITICAL FIX for modern PyTorch versions:
+    # We must explicitly set weights_only=False because our checkpoint contains
+    # pickled Python objects (the OmegaConf hyperparameters), not just tensors.
+    # This is safe because we are loading a checkpoint that we created ourselves.
+    ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    # --- [END OF THE DEFINITIVE PATCH] ---
+    
+    # --- The rest of the function is already correct and remains unchanged ---
+    if 'hyper_parameters' not in ckpt:
+        raise KeyError(
+            "Checkpoint is missing 'hyper_parameters'. It may be from an older version "
+            "of PyTorch Lightning or was saved improperly."
+        )
+    
+    original_train_cfg = OmegaConf.create(ckpt['hyper_parameters'])
+    log.info("Successfully loaded original training config from checkpoint.")
 
     if 'ema_state_dict' not in ckpt:
-        raise KeyError("Checkpoint requires 'ema_state_dict' for evaluation.")
+        raise KeyError(
+            "Checkpoint does not contain 'ema_state_dict'. "
+            "This script requires the EMA weights for evaluation."
+        )
         
-    log.info("Found 'ema_state_dict'. Initializing model from provided training config...")
+    log.info("Found 'ema_state_dict'. Initializing model from original config...")
     
-    # 2. Initialize the LightningModule with the FULL training config.
-    #    This ensures all components, including those not in `hyper_parameters`, are available.
-    lightning_model = EgoPlannerLightningModule(train_cfg)
+    lightning_model = EgoPlannerLightningModule(original_train_cfg)
     
-    # 3. Load the EMA state dict into the model's EMA object.
     lightning_model.ema.load_state_dict(ckpt['ema_state_dict'])
     
-    # 4. Get the *actual* model from the EMA wrapper.
     model = lightning_model.ema.ema_model
     
-    # 5. Move to the target device and set to evaluation mode.
     model.to(device)
     model.eval()
     

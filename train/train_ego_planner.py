@@ -426,6 +426,7 @@ class EgoPlannerLightningModule(pl.LightningModule):
         except Exception as e:
             log.error(f"Failed to save per-epoch failsafe backup: {e}", exc_info=True)
 
+
     # Helper to construct checkpoint data
     def _create_full_checkpoint(self) -> Dict[str, Any]:
         """

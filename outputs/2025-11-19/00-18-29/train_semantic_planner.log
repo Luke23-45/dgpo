@@ -1,0 +1,4 @@
+[2025-11-19 00:18:29,612][train_semantic_planner][INFO] - --- Starting AWSP Training Pipeline ---
+[2025-11-19 00:18:29,613][train_semantic_planner][INFO] - Working Dir: C:\Users\Hellx\Documents\Programming\python\Project\redhot
+[2025-11-19 00:18:29,644][models.semantic_planner][INFO] - [SemanticPlanner] Initializing with config: SemanticPlannerConfig(proprio_dim=22, vision_backbone_model='google/siglip-base-patch16-224', vision_feature_dim=768, fusion_transformer_layers=4, fusion_transformer_heads=8, dim_feedforward_ratio=4, num_task_phases=5, dropout=0.1)
+[2025-11-19 00:18:29,645][models.semantic_planner][INFO] - Loading Vision Backbone: google/siglip-base-patch16-224

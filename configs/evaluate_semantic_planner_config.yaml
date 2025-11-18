@@ -1,0 +1,25 @@
+# FILE: configs/evaluate_semantic_planner_config.yaml
+# (Definitive Evaluation Config)
+
+defaults:
+  - _self_
+
+checkpoint_path: "checkpoints/last.ckpt" # Path to your trained model .ckpt
+ik_solver_path: "urdf/panda_mujoco_kinematics.urdf" # Path to URDF
+
+# Environment settings
+env:
+  xml_path: "envs/panda_pick_place.xml"
+  control_mode: "delta"
+  
+seed: 1000
+num_episodes: 10
+max_steps: 400
+
+# Output paths (relative to hydra run dir)
+output_video_path: "evaluation_video.mp4"
+output_csv_path: "evaluation_metrics.csv"
+
+# If true, uses the same seed for every episode (good for debugging specific failures)
+# If false, increments seed (1000, 1001, ...) for diversity
+eval_static_scene: false

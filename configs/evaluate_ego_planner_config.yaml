@@ -2,15 +2,15 @@
 
 # --- Required Paths ---
 # You MUST provide the path to your trained model checkpoint.
-checkpoint_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_5.ckpt"
+checkpoint_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_23.ckpt"
 train_config_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/configs/train_ego_planner_config.yaml"
 
 # --- Output Settings ---
 output_video: "ego_planner_phase_aware_eval.mp4"
 
 # --- Evaluation Parameters ---
-num_episodes: 1 # How many episodes to run.
-seed: 44         # The master seed for reproducibility.
+num_episodes: 2 # How many episodes to run.
+seed: 48         # The master seed for reproducibility.
 
 # If true, the same scene will be used for all episodes (good for debugging).
 # If false, each episode will have a different scene (good for testing generalization).

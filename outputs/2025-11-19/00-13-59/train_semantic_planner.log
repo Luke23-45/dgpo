@@ -1,0 +1,22 @@
+[2025-11-19 00:13:59,478][train_semantic_planner][INFO] - --- Starting AWSP Training Pipeline ---
+[2025-11-19 00:13:59,482][train_semantic_planner][INFO] - Working Dir: C:\Users\Hellx\Documents\Programming\python\Project\redhot
+[2025-11-19 00:13:59,517][models.semantic_planner][INFO] - [SemanticPlanner] Initializing with config: SemanticPlannerConfig(proprio_dim=22, vision_backbone_model='google/siglip-base-patch16-224', vision_feature_dim=768, fusion_transformer_layers=4, fusion_transformer_heads=8, dim_feedforward_ratio=4, num_task_phases=5, dropout=0.1)
+[2025-11-19 00:13:59,518][models.semantic_planner][INFO] - Loading Vision Backbone: google/siglip-base-patch16-224
+[2025-11-19 00:14:03,008][models.semantic_planner][INFO] - [SemanticPlanner] Initialization Complete.
+[2025-11-19 00:14:03,056][train_semantic_planner][INFO] - Starting trainer.fit()...
+[2025-11-19 00:14:07,080][train_semantic_planner][INFO] - Loading Training Dataset from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb
+[2025-11-19 00:14:07,082][utils.semantic_planner_dataset][INFO] - Initializing SemanticPlannerDataset (SOTA Version). Path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb
+[2025-11-19 00:14:07,082][utils.ego_planner_dataset][INFO] - Initializing EgoPlannerDataset (Definitive Patched Version, use_aug=False)
+[2025-11-19 00:14:07,083][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\training_ready\training_index.json...
+[2025-11-19 00:14:07,086][utils.expert_dataset][INFO] - Loaded 80 episodes, 21092 total valid chunks (Virtually Indexed).
+[2025-11-19 00:14:07,088][utils.ego_planner_dataset][INFO] - Building explicit sample index map for robust indexing...
+[2025-11-19 00:14:07,104][utils.ego_planner_dataset][INFO] - Successfully initialized. Found 21092 valid samples across 80 episodes.
+[2025-11-19 00:14:07,105][utils.semantic_planner_dataset][INFO] - SemanticPlannerDataset validation successful. Ready for AWR training.
+[2025-11-19 00:14:07,106][train_semantic_planner][INFO] - Loading Validation Dataset from: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb
+[2025-11-19 00:14:07,107][utils.semantic_planner_dataset][INFO] - Initializing SemanticPlannerDataset (SOTA Version). Path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb
+[2025-11-19 00:14:07,108][utils.ego_planner_dataset][INFO] - Initializing EgoPlannerDataset (Definitive Patched Version, use_aug=False)
+[2025-11-19 00:14:07,108][utils.expert_dataset][INFO] - Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\training_ready\training_index.json...
+[2025-11-19 00:14:07,115][utils.expert_dataset][INFO] - Loaded 80 episodes, 21092 total valid chunks (Virtually Indexed).
+[2025-11-19 00:14:07,118][utils.ego_planner_dataset][INFO] - Building explicit sample index map for robust indexing...
+[2025-11-19 00:14:07,126][utils.ego_planner_dataset][INFO] - Successfully initialized. Found 21092 valid samples across 80 episodes.
+[2025-11-19 00:14:07,132][utils.semantic_planner_dataset][INFO] - SemanticPlannerDataset validation successful. Ready for AWR training.

@@ -43,7 +43,7 @@ model:
   
   # Probability of dropping ONLY the tactical observations (vision/proprio).
   # This is the key parameter to force the model to learn the plan's meaning.
-  p_obs_drop: 0.1
+
 # --- Diffusion Scheduler Configuration ---
 # Maps to NoiseSchedulerConfig in models/diffusion_policy.py
 scheduler:

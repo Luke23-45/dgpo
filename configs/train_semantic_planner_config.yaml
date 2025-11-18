@@ -1,0 +1,81 @@
+
+seed: 42
+
+
+model:
+  proprio_dim: 22       
+  num_task_phases: 5
+  
+  vision_backbone_model: "google/siglip-base-patch16-224"
+  vision_feature_dim: 768
+  
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  dim_feedforward_ratio: 4
+  
+  # [FIX] This was missing in your draft, but required by the Model Config dataclass.
+  dropout: 0.1
+
+  # Legacy param needed for Dataset init signature, though logic enforces 1.
+  obs_horizon: 1 
+
+# --- Dataset Configuration ---
+dataset:
+  train_path: "/content/drive/MyDrive/pda/data/training_ready/training.lmdb"
+  val_path: "/content/drive/MyDrive/pda/data/training_ready/training.lmdb" 
+
+  # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb"
+  # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb"
+  num_workers: 1            
+  use_aug: false
+
+# --- Training Loop Configuration ---
+training:
+  batch_size: 64
+  val_batch_size: 64
+
+  backup_every_n_epochs: 3
+  
+  # [FIX] Moved 'max_epochs' here so the LR Scheduler can access it easily.
+  max_epochs: 100 
+
+  # [FIX] Moved 'gradient_clip_val' here to match Python script access pattern.
+  gradient_clip_val: 1.0
+  val_check_interval: 1.0
+
+  # --- AWR Parameters ---
+  awr_temperature: 0.5       # Temperature (tau). 0.5 - 1.0 is standard.
+  awr_max_weight: 20.0       # Clipping to prevent gradient explosion.
+  
+  loss_weights:
+    lambda_gripper: 0.1      
+
+  resume_from_checkpoint: null 
+
+# --- Optimizer ---
+optimizer:
+  lr: 1e-4
+  weight_decay: 1e-6
+  min_lr: 1e-6               # Minimum LR for Cosine Scheduler
+  warmup_percentage: 0.05
+
+# --- PyTorch Lightning Trainer Flags ---
+# These are passed to the Trainer as **cfg.trainer
+trainer:
+  accelerator: "cuda"
+  devices: 1
+  precision: "16-mixed"
+  
+  # Note: max_epochs and gradient_clip_val are passed manually by the script 
+  # from the 'training' block above to ensure consistency.
+  accumulate_grad_batches: 1
+  log_every_n_steps: 10
+  num_sanity_val_steps: 2
+
+# --- Logging ---
+logging:
+  use_wandb: true
+  wandb_project: "AWSP-v1"
+  wandb_mode: "offline" # Change to 'online' to sync
+  run_name: "awsp_siglip_phase_aware"
+  log_grad_freq: 500
