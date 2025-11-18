@@ -374,7 +374,6 @@ class ContextualPlanEncoder(nn.Module):
         # --- [END OF PATCH 2] ---
 
 
-
     def forward(self, 
                 initial_image: torch.Tensor, 
                 goal_image: torch.Tensor,
