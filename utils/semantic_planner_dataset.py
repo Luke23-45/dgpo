@@ -19,8 +19,8 @@ Key Features:
     by scanning the future task phases of an episode to find the next transition boundary.
 3.  **Advantage Integration**: Natively loads the pre-calculated `advantages` modality
     to drive the AWR loss function, enabling value-weighted policy improvement.
-4.  **Inheritance & Reuse**: Inherits from `EgoPlannerDataset` to leverage the
-    optimized SOTA `ExpertTrajectoryDataset` reader, caching, and augmentation pipelines.
+4.  **Data Sanitization**: Automatically corrects invalid phase labels (e.g., -1 from DONE)
+    to prevent CUDA errors during embedding lookups.
 """
 
 from __future__ import annotations
@@ -61,16 +61,10 @@ class SemanticPlannerDataset(EgoPlannerDataset):
         Args:
             dataset_path (str): Path to the LMDB dataset (must include 'advantages').
             use_aug (bool): Whether to apply visual augmentations.
-        
-        Note:
-            We strictly set `obs_horizon=1` and `action_horizon=1`. The Semantic Planner
-            is architected as a Markovian, state-conditioned model that predicts a single
-            future state. It does not consume history chunks or predict action sequences.
         """
         log.info(f"Initializing SemanticPlannerDataset (SOTA Version). Path: {dataset_path}")
         
-        # Initialize base class with horizon=1 to maximize valid sampling range.
-        # This ensures self.samples includes almost every timestep in the dataset.
+        # Initialize base class with horizon=1.
         super().__init__(
             dataset_path=dataset_path,
             obs_horizon=1,
@@ -79,7 +73,6 @@ class SemanticPlannerDataset(EgoPlannerDataset):
         )
         
         # --- SOTA VALIDATION ---
-        # rigorous validation of dataset schema to prevent runtime failures.
         if self.expert_reader.get_num_episodes() > 0:
             first_ep_meta = self.expert_reader.episode_metadata[0]
             modalities = first_ep_meta["modalities"]
@@ -109,63 +102,38 @@ class SemanticPlannerDataset(EgoPlannerDataset):
         3. Find first $t'$ where $P_{t'} \neq P_t$.
         4. Return $Pose_{t'}$.
         5. Fallback: If current phase extends to end of episode, return final pose.
-
-        Args:
-            current_t: Current timestep index.
-            task_phases: Full array of task phases for the episode.
-            ee_poses: Full array of EE poses for the episode.
-
-        Returns:
-            np.ndarray: The 7D pose target.
         """
         current_phase = task_phases[current_t]
         
-        # Efficient vectorized search for the phase transition
-        # We slice the array from t+1 to the end
+        # Slice forward to find transitions
         future_phases = task_phases[current_t + 1:]
         
-        # Find indices where the phase is different from current
-        # This returns indices relative to the slice
+        # Find indices where the phase changes
         transition_indices = np.where(future_phases != current_phase)[0]
         
         if len(transition_indices) > 0:
-            # Found a transition. The first one is our target.
-            # Convert relative slice index back to absolute episode index
-            # logic: absolute_idx = (current_t + 1) + relative_idx
+            # Found a transition. Convert relative index to absolute.
             next_phase_start_t = (current_t + 1) + transition_indices[0]
             return ee_poses[next_phase_start_t]
         else:
-            # No transition found (we are in the final phase segment).
-            # The subgoal is the final state of the episode.
+            # No future transition (end of episode or single phase).
+            # Return final pose as the subgoal.
             return ee_poses[-1]
 
     def __getitem__(self, idx: int) -> Optional[Dict[str, Any]]:
         """
         Retrieves a complete training sample for the Semantic Planner.
-
-        Returns:
-            Dict containing:
-            - Inputs:
-                - 'initial_image': (C, H, W) FloatTensor [0-1]
-                - 'goal_image': (C, H, W) FloatTensor [0-1]
-                - 'task_phase': (1,) LongTensor
-                - 'current_proprio': (D,) FloatTensor
-            - Targets:
-                - 'ground_truth_subgoal_pose': (7,) FloatTensor
-                - 'ground_truth_gripper_state': (1,) FloatTensor (0.0 or 1.0)
-            - Metadata:
-                - 'advantage': (1,) FloatTensor
+        Includes SOTA Data Sanitization to prevent embedding crashes.
         """
         if not (0 <= idx < len(self)):
             raise IndexError(f"Index {idx} out of range.")
 
         try:
-            # 1. Resolve Index via Parent Mapping
+            # 1. Resolve Index
             ep_idx, timestep_t = self.samples[idx]
             ep_meta = self.expert_reader.episode_metadata[ep_idx]
 
-            # 2. Accessor Helper (Leverages SOTA Reader's LRU Cache)
-            # This is fast because `_get_full_modality_array` caches the decoded episode arrays.
+            # 2. Helper to access data (leveraging LRU cache)
             def get_mod(name):
                 meta = ep_meta["modalities"][name]
                 return self.expert_reader._get_full_modality_array(
@@ -174,49 +142,47 @@ class SemanticPlannerDataset(EgoPlannerDataset):
                 )
 
             # 3. Load Full Modalities
-            # We load full arrays because we need random access for Initial/Goal/Subgoal logic
             all_images = get_mod("image_primary")
             all_phases = get_mod("task_phases")
             all_poses = get_mod("ee_pose_world")
             all_actions = get_mod("actions")
             all_advantages = get_mod("advantages")
-            
-            # Loading proprio is handled by the chunk slicing logic in the base reader logic
-            # BUT since we override __getitem__, we must access it directly or re-implement logic.
-            # Here we access it directly for efficiency.
             all_proprio = get_mod("proprio")
 
-            # 4. Extract Planner Inputs
-            # Initial Image: t=0
+            # 4. Extract & Sanitize Inputs
+            
+            # A. Initial/Goal Images
             initial_image_np = all_images[0]
-            # Goal Image: t=T-1 (Final frame)
             goal_image_np = all_images[-1]
-            # Current Task Phase
-            current_phase_val = all_phases[timestep_t]
-            # Current Proprioception
+
+            # B. Task Phase (CRITICAL FIX)
+            # The enhancer maps 'DONE' to -1. nn.Embedding cannot handle -1.
+            # We clamp -1 to the last valid phase (4: RETRACT) or 0.
+            # Assuming phases 0..4 are valid.
+            current_phase_val = int(all_phases[timestep_t])
+            if current_phase_val < 0:
+                current_phase_val = 4 # SOTA: Map invalid/DONE to final phase
+            
+            # C. Proprioception
             current_proprio_np = all_proprio[timestep_t]
 
             # 5. Extract Ground Truth Targets
             
-            # A. Subgoal Pose (The "Where to go next")
+            # A. Subgoal Pose
             gt_subgoal_pose_np = self._find_next_subgoal_pose(timestep_t, all_phases, all_poses)
             
-            # B. Gripper State (The "What to do with hand")
-            # Expert action [-1] is gripper. < 0 is Close/Active, > 0 is Open/Inactive.
-            # We map this to: 1.0 (Active) vs 0.0 (Inactive)
+            # B. Gripper State
             current_gripper_action = all_actions[timestep_t][-1]
             gt_gripper_state_val = 1.0 if current_gripper_action < -0.1 else 0.0
             
-            # C. Advantage (The "How much to care")
+            # C. Advantage
             advantage_val = all_advantages[timestep_t]
 
-            # 6. Preprocessing & Augmentation
+            # 6. Visual Processing
             initial_image_pil = Image.fromarray(initial_image_np)
             goal_image_pil = Image.fromarray(goal_image_np)
 
             if self.use_aug:
-                # SOTA: Independent jitter on start/goal forces the encoder 
-                # to be robust to lighting/color shifts over long horizons.
                 if random.random() < self.aug_random_apply_p:
                     initial_image_pil = self.aug_color_jitter(initial_image_pil)
                 if random.random() < self.aug_random_apply_p:
@@ -225,8 +191,9 @@ class SemanticPlannerDataset(EgoPlannerDataset):
             initial_image_tensor = self.transform_primary(initial_image_pil)
             goal_image_tensor = self.transform_primary(goal_image_pil)
 
-            # 7. Assemble Output
-            # Note: Float tensors are critical for PyTorch training stability.
+            # 7. Assemble Output with Copy for Writability
+            # torch.from_numpy on read-only LMDB buffers triggers warnings.
+            # .float() creates a copy, making it writable and safe.
             return {
                 'initial_image': initial_image_tensor.float(),
                 'goal_image': goal_image_tensor.float(),
@@ -245,18 +212,12 @@ class SemanticPlannerDataset(EgoPlannerDataset):
 
 def semantic_planner_collate_fn(batch: List[Optional[Dict[str, Any]]]) -> Dict[str, Any]:
     """
-    [DEFINITIVE, RESILIENT BATCHING]
-    Filters out any `None` samples that may have been returned by `__getitem__`
-    due to data loading errors, preventing a single bad data point from
-    crashing an entire training batch.
-    
-    This should be passed to the DataLoader's `collate_fn` argument.
+    Filters out None samples to prevent training crashes from single bad data points.
     """
     valid_samples = [s for s in batch if s is not None]
 
     if not valid_samples:
         log.warning("An entire batch of data loading failed. Skipping batch.")
-        return {} # Return empty dict, Trainer must handle this or skip
+        return {} 
 
-    # Use PyTorch's default collation on the filtered list
     return default_collate(valid_samples)

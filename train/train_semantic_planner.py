@@ -342,60 +342,63 @@ class SemanticPlannerLightningModule(pl.LightningModule):
             }
         }
 
+
     def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int) -> None:
         """
-        [SOTA, ROBUST VERSION]
-        SOTA Hook for Failsafe Backups on the last batch of an epoch.
-        Protects against Colab/Cloud preemption by saving training state aggressively.
+        [SOTA, ATOMICALLY SAFE, PRODUCTION-GRADE VERSION]
+        Hook for Failsafe Backups. This version is engineered to be atomic,
+        ensuring that the old backup is only deleted *after* the new one has
+        been successfully saved. This prevents data loss during a crash.
         """
-        # Only run on global rank 0
-        if self.trainer.global_rank != 0: 
-            return
+        if self.trainer.global_rank != 0: return
 
-        # Only run at the end of the training epoch
-        # num_training_batches is approximate in some dist modes, but reliable in standard DDP/Single
         try:
             total_batches = len(self.trainer.train_dataloader)
         except:
             total_batches = self.trainer.num_training_batches
-
+        
         is_last_batch = (batch_idx + 1) == total_batches
-        if not is_last_batch: 
-            return
+        if not is_last_batch: return
 
         epoch = self.trainer.current_epoch
-        # Default to backup every 1 epoch if not specified
         backup_freq = self.cfg.training.get("backup_every_n_epochs", 1)
         
         if backup_freq <= 0 or (epoch + 1) % backup_freq != 0:
             return
         
-        logger.info(f"End of epoch {epoch}: Triggering periodic failsafe backup...")
+        # --- [START OF THE DEFINITIVE PATCH 2] ---
+        
+        logger.info(f"End of epoch {epoch}: Triggering atomic failsafe backup...")
+        
+        # 1. Define the path for the NEW backup.
+        backup_dir = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        new_backup_path = backup_dir / f"backup_epoch_{epoch:03d}.ckpt"
 
         try:
-            # Ensure directory exists
-            self.backup_dir.mkdir(parents=True, exist_ok=True) 
-            
-            # Define new backup path
-            backup_path = self.backup_dir / f"backup_epoch_{epoch:03d}.ckpt"
-            
-            # SOTA Logic: Delete the *previous* backup before saving the new one to save space.
-            if self.last_backup_path and self.last_backup_path.exists():
-                try:
-                    self.last_backup_path.unlink()
-                    logger.info(f"Cleaned up previous backup: {self.last_backup_path.name}")
-                except OSError as e:
-                    logger.warning(f"Could not delete previous backup: {e}")
+            # 2. SAVE THE NEW CHECKPOINT FIRST. This is the critical step.
+            self.trainer.save_checkpoint(new_backup_path)
+            logger.info(f"Failsafe backup for epoch {epoch} saved successfully to {new_backup_path}.")
 
-            # Save the new checkpoint
-            self.trainer.save_checkpoint(backup_path)
+            # 3. ONLY AFTER the save is successful, find and delete older backups.
+            # This is safer than relying on a state variable. We scan the directory.
+            all_backups = sorted(list(backup_dir.glob("backup_epoch_*.ckpt")))
             
-            # Update pointer
-            self.last_backup_path = backup_path
-            logger.info(f"Failsafe backup for epoch {epoch} saved to {backup_path}.")
+            # Keep the most recent N backups (e.g., keep the last 2)
+            backups_to_keep = self.cfg.training.get("backups_to_keep", 2)
+            
+            if len(all_backups) > backups_to_keep:
+                backups_to_delete = all_backups[:-backups_to_keep]
+                for old_backup in backups_to_delete:
+                    try:
+                        old_backup.unlink()
+                        logger.info(f"Cleaned up old failsafe backup: {old_backup.name}")
+                    except OSError as e:
+                        logger.warning(f"Could not delete old backup {old_backup}: {e}")
 
         except Exception as e:
             logger.error(f"CRITICAL: Failed to save per-epoch failsafe backup: {e}", exc_info=True)
+
 # ==============================================================================
 # 3. MAIN EXECUTION ENTRY POINT
 # ==============================================================================
@@ -413,7 +416,7 @@ def main(cfg: DictConfig) -> None:
     
     # 2. Logging Setup
     # Hydra sets the working directory, so '.' is the output directory
-    output_dir = Path(os.getcwd()) 
+    output_dir = Path("/content/drive/MyDrive/pda/logs_ego/")
     
     loggers = [TensorBoardLogger(save_dir=".", name="tb_logs")]
     
@@ -462,7 +465,7 @@ def main(cfg: DictConfig) -> None:
         gradient_clip_val=cfg.training.get("gradient_clip_val", 1.0),
         precision=cfg.training.get("precision", "16-mixed"), # AMP
         log_every_n_steps=10,
-        val_check_interval=cfg.training.get("val_check_interval", 1.0), 
+        check_val_every_n_epoch=cfg.training.get("check_val_every_n_epoch", 1),
     )
 
     # 6. Execute
