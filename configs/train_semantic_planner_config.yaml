@@ -60,7 +60,7 @@ training:
   loss_weights:
     lambda_gripper: 2.0      
 
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backup_epoch_023.ckpt" 
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_023.ckpt" 
 
 # --- Optimizer ---
 optimizer:

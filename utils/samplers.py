@@ -49,10 +49,16 @@ class EpisodeAwareSampler(Sampler[int]):
                 rank = 0
             else:
                 try:
-                    num_replicas = dist.get_world_size()
-                    rank = dist.get_rank()
+                    # CRITICAL FIX: Check if the process group is actually initialized
+                    if dist.is_initialized():
+                        num_replicas = dist.get_world_size()
+                        rank = dist.get_rank()
+                    else:
+                        # Fallback for single-GPU / non-DDP runs
+                        num_replicas = 1
+                        rank = 0
                 except RuntimeError:
-                    # Dist initialized but not used, or not initialized
+                    # Catch-all for any other dist errors
                     num_replicas = 1
                     rank = 0
         
