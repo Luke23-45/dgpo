@@ -154,7 +154,7 @@ class SemanticPlannerDataset(EgoPlannerDataset):
             all_gt_grippers = get_mod("gt_gripper")
 
             # 4. Extract Inputs
-            initial_image_np = all_images[0]
+            initial_image_np = all_images[timestep_t]
             goal_image_np = all_images[-1]
             
             # Input: Use Explicit Phase (Scalar)

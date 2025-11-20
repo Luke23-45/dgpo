@@ -173,7 +173,8 @@ class SemanticPlannerLightningModule(pl.LightningModule):
             fusion_transformer_heads=cfg.model.fusion_transformer_heads,
             dim_feedforward_ratio=cfg.model.get("dim_feedforward_ratio", 4),
             num_task_phases=cfg.model.num_task_phases,
-            dropout=cfg.model.dropout
+            dropout=cfg.model.dropout,
+            phase_dropout_prob=cfg.model.get("phase_dropout_prob", 0.0) 
         )
         
         # 2. Model Instantiation
@@ -189,27 +190,6 @@ class SemanticPlannerLightningModule(pl.LightningModule):
 
         self.register_buffer('grip_pos_weight', torch.tensor([3.0]))
         self.gripper_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=self.grip_pos_weight)
-        self.register_buffer('grip_pos_weight', torch.tensor([3.0]))
-        self.gripper_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=self.grip_pos_weight)
-
-
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """
-        SOTA Migration Hook.
-        Detects if we are loading an old checkpoint (before weighted loss) and
-        injects the missing buffer keys to prevent a RuntimeError.
-        """
-        state_dict = checkpoint["state_dict"]
-        
-        # 1. Check if the new buffer key exists in the old checkpoint
-        if "grip_pos_weight" not in state_dict:
-            logger.warning("⚠️ Old checkpoint detected! Injecting 'grip_pos_weight' for backward compatibility.")
-            # Inject the current initialized value (3.0) into the loaded dictionary
-            state_dict["grip_pos_weight"] = self.grip_pos_weight
-            
-        # 2. Check if the criterion's pos_weight sub-module key exists
-        if "gripper_criterion.pos_weight" not in state_dict:
-            state_dict["gripper_criterion.pos_weight"] = self.grip_pos_weight
 
 
     def _compute_awr_weights(self, advantages: torch.Tensor) -> torch.Tensor:

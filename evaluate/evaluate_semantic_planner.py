@@ -215,46 +215,69 @@ class StateEstimator:
 # ==============================================================================
 # 3. CORE COMPONENT: TRAJECTORY SMOOTHER
 # ==============================================================================
-
 class TrajectorySmoother:
     """
-    Low-pass filter for neural network outputs.
-    Mimics physical inertia to prevent IK instability.
+    Output Filter & Latching Logic.
+    
+    Features:
+    1. Exponential Moving Average (EMA) for 7D Pose.
+    2. State-Locked Hysteresis for Gripper (The "Anti-Flicker" Fix).
     """
-    def __init__(self, alpha_pos: float = 0.3, alpha_grip: float = 0.1):
+    def __init__(self, alpha_pos=0.4, alpha_grip=0.2):
         self.alpha_pos = alpha_pos
         self.alpha_grip = alpha_grip
-        self.smooth_pose: Optional[np.ndarray] = None
-        self.smooth_logit: Optional[float] = None
+        
+        self.smooth_pose = None
+        self.smooth_grip_logit = None
+        
+        # Hysteresis State
+        self.gripper_command = 1.0 # Start OPEN
+        self.sticky_timer = 0
+        self.STICKY_DURATION = 20 # Lock state for ~0.6s (20 steps * 0.03s) to allow actuation
 
     def reset(self):
         self.smooth_pose = None
-        self.smooth_logit = None
+        self.smooth_grip_logit = None
+        self.gripper_command = 1.0
+        self.sticky_timer = 0
 
     def update(self, raw_pose: np.ndarray, raw_logit: float) -> Tuple[np.ndarray, float]:
+        # 1. Pose Smoothing (Standard EMA)
         if self.smooth_pose is None:
             self.smooth_pose = raw_pose.copy()
-            self.smooth_logit = raw_logit
+            self.smooth_grip_logit = raw_logit
         else:
-            # EMA on Position
-            self.smooth_pose[:3] = (self.alpha_pos * raw_pose[:3]) + \
-                                   ((1 - self.alpha_pos) * self.smooth_pose[:3])
-            
-            # Linear Blend on Quaternion (Approximation of Slerp for small angles)
-            # Safe because we renormalize immediately
-            self.smooth_pose[3:] = (self.alpha_pos * raw_pose[3:]) + \
-                                   ((1 - self.alpha_pos) * self.smooth_pose[3:])
-            
-            # CRITICAL: Re-project onto the unit manifold
+            self.smooth_pose[:3] = self.alpha_pos * raw_pose[:3] + (1 - self.alpha_pos) * self.smooth_pose[:3]
+            self.smooth_pose[3:] = self.alpha_pos * raw_pose[3:] + (1 - self.alpha_pos) * self.smooth_pose[3:]
             norm = np.linalg.norm(self.smooth_pose[3:])
-            if norm > 1e-6:
-                self.smooth_pose[3:] /= norm
-                
-            # EMA on Gripper Logit
-            self.smooth_logit = (self.alpha_grip * raw_logit) + \
-                                ((1 - self.alpha_grip) * self.smooth_logit)
+            if norm > 1e-6: self.smooth_pose[3:] /= norm
             
-        return self.smooth_pose, self.smooth_logit
+            self.smooth_grip_logit = self.alpha_grip * raw_logit + (1 - self.alpha_grip) * self.smooth_grip_logit
+            
+        # 2. Gripper Hysteresis Logic (The Fix)
+        # We define distinct thresholds to prevent flickering around 0.0
+        CLOSE_THRESH = 1.5   # Must be confident to close
+        OPEN_THRESH = -1.5   # Must be confident to open
+        
+        if self.sticky_timer > 0:
+            # Locked in state to allow physics execution
+            self.sticky_timer -= 1
+        else:
+            # Free to switch states
+            if self.gripper_command == 1.0: # Currently Open
+                # Only switch to Close if confidence is high
+                if self.smooth_grip_logit > CLOSE_THRESH:
+                    self.gripper_command = -1.0 # Switch to Close
+                    self.sticky_timer = self.STICKY_DURATION # Lock it!
+                    
+            elif self.gripper_command == -1.0: # Currently Closed
+                # Only Open if VERY confident we should let go.
+                if self.smooth_grip_logit < OPEN_THRESH: 
+                    self.gripper_command = 1.0 # Switch to Open
+                    self.sticky_timer = self.STICKY_DURATION
+            
+        # Return the discrete command (-1.0 or 1.0), NOT the logit
+        return self.smooth_pose, self.gripper_command
 
 
 # ==============================================================================
@@ -407,11 +430,8 @@ class AWSPEvaluator:
                     raw_logit = out['gripper_logit'].item()
 
                     # --- Temporal Smoothing ---
-                    target_pose, target_logit = self.smoother.update(raw_pose, raw_logit)
+                    target_pose, gripper_cmd = self.smoother.update(raw_pose, raw_logit)
 
-                    # --- Control Translation ---
-                    # Logic: Positive logit -> Closed (-1). Negative logit -> Open (1).
-                    gripper_cmd = -1.0 if target_logit > 0.0 else 1.0
 
                     try:
                         delta_joints = self.ik_solver.compute_delta_action(
@@ -449,7 +469,7 @@ class AWSPEvaluator:
                         "raw_target_x": raw_pose[0], "raw_target_y": raw_pose[1], "raw_target_z": raw_pose[2],
                         "raw_grip_logit": raw_logit,
                         "smooth_target_x": target_pose[0], "smooth_target_y": target_pose[1], "smooth_target_z": target_pose[2],
-                        "smooth_grip_score": target_logit,
+                        "smooth_grip_score": gripper_cmd,
                         "actual_ee_x": obs['ee_pose_world'][0], "actual_ee_y": obs['ee_pose_world'][1], "actual_ee_z": obs['ee_pose_world'][2],
                         "commanded_gripper": gripper_cmd,
                         "joint_vel_norm": np.linalg.norm(delta_joints)
@@ -466,7 +486,7 @@ class AWSPEvaluator:
                     color = (0, 255, 0) if gripper_cmd < 0 else (0, 255, 255)
                     
                     cv2.putText(frame, f"Ep {ep_idx} | {status_txt}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                    cv2.putText(frame, f"Grip: {grip_txt} ({target_logit:.1f})", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1)
+                    cv2.putText(frame, f"Grip: {grip_txt} ({gripper_cmd:.1f})", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1)
                     
                     video_writer.write(frame)
 

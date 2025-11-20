@@ -51,6 +51,7 @@ class SemanticPlannerConfig:
     dim_feedforward_ratio: int = 4
     num_task_phases: int = 5
     dropout: float = 0.1
+    phase_dropout_prob: float = 0.0
 
 
 def _init_weights(module: nn.Module):
@@ -188,11 +189,7 @@ class SemanticPlanner(nn.Module):
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
-        Forward pass.
-        
-        Key Change in v7.0: The "Plan Query" token is not a fixed parameter.
-        It is dynamically computed as: Query = Embed(Phase) + Encode(Proprio).
-        This fused query is then prepended to the visual tokens.
+        Forward pass with Phase Dropout.
         """
         initial_image = batch['initial_image']
         goal_image = batch['goal_image']
@@ -201,13 +198,30 @@ class SemanticPlanner(nn.Module):
 
         B, device = initial_image.shape[0], initial_image.device
 
-        # --- 1. Construct the Plan Query (The Context) ---
-        # Unlike v6, we don't treat proprio/phase as separate sequence tokens.
-        # We fuse them into the [CLS] token directly. This condenses the context.
-        # (B, D)
-        context_embedding = self.task_phase_embedding(task_phase) + self.proprio_encoder(current_proprio)
+        # --- 1. Construct Context (Proprio + Phase) ---
         
-        # Add Type 2 embedding (Plan Context)
+        # Get Phase Embeddings
+        phase_embed = self.task_phase_embedding(task_phase)
+
+        # [IMPLEMENTATION] Phase Dropout
+        # Only apply during training. If probability > 0, randomly zero out embeddings.
+        if self.training and self.cfg.phase_dropout_prob > 0.0:
+            # Generate keep mask (1 = keep, 0 = drop)
+            # keep_prob = 1 - drop_prob
+            keep_prob = 1.0 - self.cfg.phase_dropout_prob
+            
+            # Create mask of shape (B, 1)
+            mask = torch.bernoulli(torch.full((B, 1), keep_prob, device=device))
+            
+            # Broadcast mask to (B, FeatureDim) and apply
+            phase_embed = phase_embed * mask
+
+        proprio_embed = self.proprio_encoder(current_proprio)
+
+        # Fuse Phase + Proprio into Plan Query Context
+        context_embedding = phase_embed + proprio_embed
+        
+        # Add Token Type Embedding (Type 2 = Plan Query)
         context_embedding = context_embedding + self.token_type_embeddings(torch.tensor(2, device=device))
         
         # Reshape for sequence: (B, 1, D)
@@ -218,41 +232,30 @@ class SemanticPlanner(nn.Module):
             start_out = self.vision_backbone(initial_image.float())
             goal_out = self.vision_backbone(goal_image.float())
         
-        # (B, N, D)
         start_tokens = start_out.last_hidden_state
         goal_tokens = goal_out.last_hidden_state
 
         # --- 3. Inject Geometry & Modality Types ---
-        # Add Spatial Embeddings (Shared geometry)
         start_tokens = start_tokens + self.spatial_pos_embedding
         goal_tokens = goal_tokens + self.spatial_pos_embedding
 
-        # Add Token Types
         start_tokens = start_tokens + self.token_type_embeddings(torch.tensor(0, device=device))
         goal_tokens = goal_tokens + self.token_type_embeddings(torch.tensor(1, device=device))
 
         # --- 4. Fusion ---
-        # Sequence: [Plan_Query (Proprio+Phase), Start_Patches..., Goal_Patches...]
-        # The Plan_Query effectively attends to the visual patches to update its state.
         fused_input = torch.cat([plan_query_token, start_tokens, goal_tokens], dim=1)
-
-        # Transformer Output
         fused_output = self.fusion_transformer(fused_input)
 
         # Extract updated Plan Vector (Index 0)
-        # This vector now holds the "answer": Where to go, based on where I am and what I see.
         plan_vector = fused_output[:, 0, :] 
 
         # --- 5. Prediction Heads ---
-        
-        # Pose
         raw_pose = self.pose_head(plan_vector)
         pos_xyz = raw_pose[:, :3]
         quat_raw = raw_pose[:, 3:]
         quat_norm = F.normalize(quat_raw, p=2, dim=-1, eps=1e-8)
         predicted_pose = torch.cat([pos_xyz, quat_norm], dim=1)
 
-        # Gripper
         predicted_gripper_logit = self.gripper_head(plan_vector)
 
         return {

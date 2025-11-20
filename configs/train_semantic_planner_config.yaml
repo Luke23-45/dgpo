@@ -16,6 +16,8 @@ model:
   # [FIX] This was missing in your draft, but required by the Model Config dataclass.
   dropout: 0.1
 
+  phase_dropout_prob: 0.3 
+
   # Legacy param needed for Dataset init signature, though logic enforces 1.
   obs_horizon: 1 
 
@@ -54,13 +56,13 @@ training:
   val_check_interval: 1.0
 
   # --- AWR Parameters ---
-  awr_temperature: 5.0        # Temperature (tau). 0.5 - 1.0 is standard. 0.5
+  awr_temperature: 0.5        # Temperature (tau). 0.5 - 1.0 is standard. 0.5
   awr_max_weight: 20.0       # Clipping to prevent gradient explosion.
   
   loss_weights:
     lambda_gripper: 2.0      
 
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_023.ckpt" 
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_044.ckpt" 
 
 # --- Optimizer ---
 optimizer:
