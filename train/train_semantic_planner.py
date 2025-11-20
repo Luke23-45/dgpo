@@ -44,6 +44,7 @@ from pytorch_lightning.callbacks import (
     ModelCheckpoint,
     TQDMProgressBar,
 )
+from utils.samplers import EpisodeAwareSampler
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from torch.utils.data import DataLoader
 from transformers import get_cosine_schedule_with_warmup
@@ -109,15 +110,22 @@ class SemanticPlannerDataModule(pl.LightningDataModule):
                 )
 
     def train_dataloader(self) -> DataLoader:
+        sampler = EpisodeAwareSampler(
+            self.train_dataset, 
+            shuffle=True, 
+            seed=self.cfg.seed
+        )
+
         return DataLoader(
             self.train_dataset,
             batch_size=self.cfg.training.batch_size,
-            shuffle=True,
+            shuffle=False,  # <--- MUST be False when using a custom sampler
+            sampler=sampler, # <--- Inject the SOTA sampler
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
             collate_fn=semantic_planner_collate_fn,
-            drop_last=True # Drop incomplete batches to stabilize BatchNorm stats
+            drop_last=True
         )
 
     def val_dataloader(self) -> Optional[DataLoader]:
@@ -178,7 +186,9 @@ class SemanticPlannerLightningModule(pl.LightningModule):
 
         # 4. Loss Functions (reduction='none' allows per-sample weighting)
         self.pose_criterion = nn.L1Loss(reduction='none') 
-        self.gripper_criterion = nn.BCEWithLogitsLoss(reduction='none')
+
+        self.register_buffer('grip_pos_weight', torch.tensor([3.0]))
+        self.gripper_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=self.grip_pos_weight)
 
     def _compute_awr_weights(self, advantages: torch.Tensor) -> torch.Tensor:
         """

@@ -1,87 +1,179 @@
 # FILE: utils/samplers.py
-# SOTA Samplers for Efficient, Cache-Aware Data Loading (Final, Corrected Version)
+# (Definitive, SOTA, DDP-Aware, Vectorized Version)
 
 import torch
 from torch.utils.data import Sampler, Dataset, Subset
-from typing import Iterator, Sized, List, Dict, Tuple
+import torch.distributed as dist
+from typing import Iterator, Sized, List, Optional
 import logging
+import math
 import numpy as np
-import random
+
 log = logging.getLogger(__name__)
 
 class EpisodeAwareSampler(Sampler[int]):
     """
-    State-of-the-art Sampler that yields indices in an episode-contiguous manner.
-
-    This SOTA version is robustly designed to work seamlessly with both full datasets
-    and `torch.utils.data.Subset` objects created by `random_split`.
-
-    It sacrifices perfect global shuffling for vastly improved data loading performance
-    by maximizing cache hits. It shuffles episodes, then yields all indices from one
-    episode before moving to the next.
+    SOTA Sampler for Robotics Transformers.
+    
+    Features:
+    1. **Cache Locality**: Yields all indices of Episode N before moving to Episode M.
+    2. **DDP Support**: Automatically partitions episodes across multiple GPUs/ranks.
+    3. **Vectorized Init**: Builds index mappings using NumPy for instant startup.
+    4. **Robust**: Handles PyTorch Subsets (random_split) seamlessly.
+    
+    Logic:
+    It views the dataset as a collection of Episodes, not individual Frames.
+    It shuffles the list of Episodes, assigns a subset of Episodes to the current GPU,
+    and then flattens them into a stream of frame indices.
     """
-    def __init__(self, dataset: Sized, shuffle: bool = True, seed: int = 42):
-        super().__init__()
-        
-        # --- SOTA PATCH: ROBUST SUBSET HANDLING ---
-        self.is_subset = isinstance(dataset, Subset)
-        if self.is_subset:
-            self.subset_indices = dataset.indices
-            self.full_dataset = dataset.dataset
-        else:
-            self.full_dataset = dataset
-            self.subset_indices = None
-        
-        self.num_samples = len(dataset)
-        # --- END OF SOTA PATCH ---
 
+    def __init__(self, 
+                 dataset: Sized, 
+                 shuffle: bool = True, 
+                 seed: int = 42, 
+                 num_replicas: Optional[int] = None, 
+                 rank: Optional[int] = None, 
+                 drop_last: bool = False):
+        super().__init__(dataset)
+        
+        self.dataset = dataset
         self.shuffle = shuffle
         self.seed = seed
-        self.generator = torch.Generator().manual_seed(self.seed)
+        self.drop_last = drop_last
+        self.epoch = 0
 
-        # The sampler requires access to the full dataset's index structure.
-        if not hasattr(self.full_dataset, 'expert_reader') or not hasattr(self.full_dataset.expert_reader, '_cumulative_chunks'):
-            raise ValueError("EpisodeAwareSampler requires the underlying dataset to expose "
-                             "`expert_reader._cumulative_chunks` attribute.")
+        # --- 1. Resolve Distributed (DDP) Parameters ---
+        if num_replicas is None:
+            if not dist.is_available():
+                num_replicas = 1
+                rank = 0
+            else:
+                try:
+                    num_replicas = dist.get_world_size()
+                    rank = dist.get_rank()
+                except RuntimeError:
+                    # Dist initialized but not used, or not initialized
+                    num_replicas = 1
+                    rank = 0
         
-        self.cumulative_chunks = self.full_dataset.expert_reader._cumulative_chunks
-        self.num_episodes = len(self.cumulative_chunks)
+        self.num_replicas = num_replicas
+        self.rank = rank
+        
+        if self.rank == 0:
+            log.info(f"Initializing EpisodeAwareSampler (DDP: {self.num_replicas > 1}, Rank: {self.rank})")
 
-        # --- SOTA PATCH: PRE-COMPUTE EPISODE-TO-INDEX MAPPING ---
-        # This is the key to making Subset handling efficient.
-        # We create a map: {ep_idx: [list of sample indices in this episode]}
-        self.episode_to_indices_map: Dict[int, List[int]] = {i: [] for i in range(self.num_episodes)}
+        # --- 2. Resolve Underlying Data Structure ---
+        # Handle Subset wrapping to find the source of truth (Cumulative Chunks)
+        if isinstance(dataset, Subset):
+            self.subset_indices = np.array(dataset.indices)
+            full_dataset = dataset.dataset
+        else:
+            # Create a range for the full dataset
+            self.subset_indices = np.arange(len(dataset))
+            full_dataset = dataset
+
+        # Access the Episode Index from the ExpertReader
+        if not hasattr(full_dataset, 'expert_reader'):
+             # Graceful fallback if used with a different dataset type, though less optimal
+             raise ValueError("Dataset must expose 'expert_reader' for EpisodeAware sampling.")
+             
+        self.cumulative_chunks = np.array(full_dataset.expert_reader._cumulative_chunks)
+        self.num_total_episodes = len(self.cumulative_chunks)
+
+        # --- 3. Vectorized Episode Mapping (The Optimization) ---
+        # Instead of looping python ints, we use numpy to bucket ALL indices at once.
+        # Find which episode every valid index belongs to.
+        # e.g. indices [0, 1, 2, 100, 101] -> episodes [0, 0, 0, 1, 1]
+        episode_assignments = np.searchsorted(self.cumulative_chunks, self.subset_indices, side='right')
         
-        # Determine which indices belong to the sampler (all if not a subset)
-        indices_to_process = self.subset_indices if self.is_subset else range(len(self.full_dataset))
+        # We need to group indices by episode.
+        # Structure: { ep_idx: [frame_idx_1, frame_idx_2...] }
+        # Optimization: Use sorting to group them efficiently.
+        sort_order = np.argsort(episode_assignments)
+        sorted_indices = self.subset_indices[sort_order]
+        sorted_episodes = episode_assignments[sort_order]
         
-        log.info("Building episode-to-index map for sampler...")
-        for sample_idx in indices_to_process:
-            # Find which episode this sample_idx belongs to
-            ep_idx = np.searchsorted(self.cumulative_chunks, sample_idx, side='right')
-            self.episode_to_indices_map[ep_idx].append(sample_idx)
-        log.info("Map building complete.")
-        # --- END OF SOTA PATCH ---
+        # Find boundaries where episode ID changes
+        unique_eps, split_indices = np.unique(sorted_episodes, return_index=True)
+        
+        # Split the sorted index array into chunks, one per episode
+        # This gives us a list where grouped_indices[i] is the array of frames for unique_eps[i]
+        grouped_indices = np.split(sorted_indices, split_indices[1:])
+        
+        # Map episode ID -> Array of Global Indices
+        # We filter out empty episodes automatically via unique()
+        self.episode_map = {ep_id: indices for ep_id, indices in zip(unique_eps, grouped_indices) if len(indices) > 0}
+        
+        # The list of episodes available in this specific Subset
+        self.available_episodes = list(self.episode_map.keys())
+        
+        # --- 4. Calculate DDP Lengths ---
+        # We partition based on EPISODES, not FRAMES, to preserve cache locality.
+        total_episodes = len(self.available_episodes)
+        
+        if self.drop_last and self.num_replicas > 1:
+            self.num_episodes_per_replica = math.floor(total_episodes / self.num_replicas)
+        else:
+            self.num_episodes_per_replica = math.ceil(total_episodes / self.num_replicas)
+            
+        self.total_size_episodes = self.num_episodes_per_replica * self.num_replicas
 
     def __iter__(self) -> Iterator[int]:
-        # 1. Create a list of episode indices that have samples in them.
-        episode_order = [ep_idx for ep_idx, indices in self.episode_to_indices_map.items() if indices]
+        # 1. Deterministic Shuffling (Epoch-based)
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
         
+        # Shuffle the list of EPISODES
         if self.shuffle:
-            # Shuffle the order of episodes to be processed.
-            random.Random(self.seed).shuffle(episode_order)
+            indices = torch.randperm(len(self.available_episodes), generator=g).tolist()
+        else:
+            indices = list(range(len(self.available_episodes)))
+            
+        # 2. DDP Padding (Ensure all ranks have equal number of episodes)
+        if not self.drop_last:
+            # Add extra episodes to make it evenly divisible
+            padding_size = self.total_size_episodes - len(indices)
+            if padding_size <= len(indices):
+                indices += indices[:padding_size]
+            else:
+                indices += (indices * math.ceil(padding_size / len(indices)))[:padding_size]
+        else:
+            # Truncate
+            indices = indices[:self.total_size_episodes]
+
+        # 3. Subsample: Pick the episodes for THIS specific GPU (Rank)
+        # This is the magic step. Rank 0 gets ep [0, 4, 8...], Rank 1 gets [1, 5, 9...]
+        # Note: Strided slicing (rank::num_replicas) spreads the load better than chunking
+        my_episode_indices = indices[self.rank : self.total_size_episodes : self.num_replicas]
         
-        # 2. Iterate through the shuffled episodes.
-        for ep_idx in episode_order:
-            # 3. Get the list of all valid sample indices for this episode.
-            episode_indices = self.episode_to_indices_map[ep_idx]
+        # 4. Flatten into Frame Indices
+        # Now we yield all frames for Ep A, then all frames for Ep B...
+        final_indices = []
+        for idx_in_list in my_episode_indices:
+            real_ep_id = self.available_episodes[idx_in_list]
+            frames = self.episode_map[real_ep_id]
             
-            # 4. (Optional) Shuffle the samples *within* the episode.
-            if self.shuffle:
-                random.Random(self.seed + ep_idx).shuffle(episode_indices)
-            
-            # 5. Yield all indices from this episode.
-            yield from episode_indices
+            # Optional: Shuffle frames WITHIN the episode? 
+            # Usually NO for RNNs, YES for Transformers/CNNs if obs_horizon=1.
+            # Since we are doing single-frame planning, local shuffling breaks correlation 
+            # slightly which is good for IID, but we keep order for cache consistency usually.
+            # We will yield sequentially to be cache-friendly.
+            final_indices.extend(frames)
+
+        return iter(final_indices)
 
     def __len__(self) -> int:
-        return self.num_samples
+        # Note: This is an approximation because episodes have different lengths.
+        # PyTorch mostly uses this for the progress bar.
+        # We calculate the exact number of frames assigned to this rank.
+        # To avoid recomputing every call, we return the count based on initialization.
+        # This might be slightly off if DDP padding occurs, but is generally safe.
+        total_frames = sum(len(self.episode_map[ep]) for ep in self.available_episodes)
+        return math.ceil(total_frames / self.num_replicas)
+
+    def set_epoch(self, epoch: int):
+        """
+        Sets the epoch for this sampler. This ensures that the shuffle order
+        changes every epoch, which is critical for training convergence.
+        """
+        self.epoch = epoch

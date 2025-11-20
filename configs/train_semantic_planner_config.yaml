@@ -21,8 +21,8 @@ model:
 
 # --- Dataset Configuration ---
 dataset:
-  train_path: "/content/drive/MyDrive/pda/data/training_ready/training.lmdb"
-  val_path: "/content/drive/MyDrive/pda/data/training_ready/training.lmdb" 
+  train_path: "/content/drive/MyDrive/pda/data/training_ready/training_data.lmdb"
+  val_path: "/content/drive/MyDrive/pda/data/training_ready/training_data.lmdb" 
 
   # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb"
   # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb"
@@ -31,12 +31,12 @@ dataset:
 
 # --- Training Loop Configuration ---
 training:
-  batch_size: 128
-  val_batch_size: 128
+  batch_size: 224
+  val_batch_size: 224
 
   check_val_every_n_epoch: 50
 
-  backup_every_n_epochs: 3
+  backup_every_n_epochs: 1
 
   backup_dir: "/content/drive/MyDrive/pda/models/v1/backups"
   
@@ -54,13 +54,13 @@ training:
   val_check_interval: 1.0
 
   # --- AWR Parameters ---
-  awr_temperature: 0.5       # Temperature (tau). 0.5 - 1.0 is standard.
+  awr_temperature: 5.0        # Temperature (tau). 0.5 - 1.0 is standard. 0.5
   awr_max_weight: 20.0       # Clipping to prevent gradient explosion.
   
   loss_weights:
-    lambda_gripper: 0.1      
+    lambda_gripper: 2.0      
 
-  resume_from_checkpoint: null 
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backup_epoch_023.ckpt" 
 
 # --- Optimizer ---
 optimizer:

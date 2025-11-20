@@ -180,6 +180,11 @@ class ExpertDatasetWriter:
                     self._write_pickled_modality(txn, ep_meta, prefix, "expert_states", expert_states_list)
                     camera_params_list = [o["camera_params"] for o in ep_dict["obs_list"]]
                     self._write_pickled_modality(txn, ep_meta, prefix, "camera_params", camera_params_list)
+                    gt_phases_arr = np.stack([o["gt_phase"] for o in ep_dict["obs_list"]]).astype(np.int32)
+                    self._write_raw_numpy(txn, ep_meta, prefix, "gt_phase", gt_phases_arr)
+
+                    gt_gripper_arr = np.stack([o["gt_gripper"] for o in ep_dict["obs_list"]]).astype(np.float32)
+                    self._write_raw_numpy(txn, ep_meta, prefix, "gt_gripper", gt_gripper_arr)
 
                     self.index_data["episodes"].append(ep_meta)
                     self._episode_id_counter += 1
@@ -806,31 +811,21 @@ class ExpertDataset(IterableDataset):
                 raise ValueError(f"Key {k} has shape {arr.shape}, expected at least dims {shape_tpl}")
             # we could enforce exact dims for fixed-length keys
     
+
     def _generate_one(self, current_obs: Dict) -> Tuple[Dict, np.ndarray, np.ndarray, bool]: 
         """
         Produces (obs, sim_action, data_action, ik_failed_flag).
-        sim_action: absolute action used to step simulator [cite: 281]
-        data_action: normalized delta to train on [cite: 281]
-        ik_failed_flag: True if IK solver used fallback [cite: 281]
+        Captures Expert ground truth metadata.
         """
-        # Validate schema on input (optional)
-        # self._check_schema(current_obs)
-        
-        # Use scripted expert always
-        pose_world, gripper_act = self._scripted_expert.get_target_pose(current_obs) 
+        # Unpack 3 values: Pose, Action, Info (Metadata)
+        pose_world, gripper_act, expert_info = self._scripted_expert.get_target_pose(current_obs) 
          
-        # Transform world pose into base frame
+        # Transform world pose into base frame (IK Logic remains the same)
         N_SUBSTEPS = 20
         effective_dt = self._env.model.opt.timestep * N_SUBSTEPS
         max_dq = self._env.ACTION_SCALING_FACTOR / effective_dt
-        arm_joint_ids = np.arange(7) # Assuming the first 7 joints are the arm
-        if self._env.data.time < 1e-6: # Log only at the beginning of an episode
-            logger.info( 
-                 f"[worker {get_worker_info().id if get_worker_info() else 0}] "
-                 f"IK params calculated: effective_dt={effective_dt:.4f}, "
-                 f"max_dq={max_dq:.4f}"
-            ) 
-        # 2. Call compute_delta_action to get the data_action directly.
+        arm_joint_ids = np.arange(7) 
+
         delta_arm_action = self._ik_solver.compute_delta_action( 
             target_ee_pose=pose_world,
             model=self._env.model,
@@ -841,18 +836,19 @@ class ExpertDataset(IterableDataset):
             max_dq=max_dq
         ) 
          
-        # 3. For a direct delta pipeline, the sim_action IS the data_action. [cite: 285]
         action = np.concatenate([delta_arm_action, [gripper_act]]).astype(np.float32) 
-
-        # 4. The concept of IK failure is less direct here. [cite: 287]
-        #    We can assume it doesn't
-        #    fail in the same way, or check if the returned action is all zeros. [cite: 287]
         ik_failed = np.linalg.norm(delta_arm_action) < 1e-4 
         
-        # Add expert source tag (scripted-only)
+        # [SOTA PATCH: Inject Ground Truths into Observation Dict]
+        # We store these in the obs dict so they travel through the pipeline to the Writer
+        current_obs["gt_phase"] = np.array([expert_info["gt_phase"]], dtype=np.int32)
+        current_obs["gt_gripper"] = np.array([expert_info["gt_gripper_intent"]], dtype=np.float32)
+        current_obs["expert_state_str"] = expert_info["expert_state_str"] # Optional, mostly for debug
+        
         current_obs["expert_source"] = 0
         
         return current_obs, action, ik_failed
+
         
     def __iter__(self) -> Iterator[Tuple[Dict, np.ndarray]]:
         """

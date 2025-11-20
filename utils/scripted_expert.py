@@ -7,6 +7,22 @@ from dataclasses import dataclass, field
 from typing import Tuple, Optional
 from scipy.spatial.transform import Rotation as R,Slerp
 
+
+EXPERT_PHASE_MAP = {
+    "MOVE_TO_PRE_GRASP": 0,
+    "PREPARE_GRIPPER": 0,
+    "DESCEND_TO_GRASP": 0,
+    "GRASP": 1,                 # The critical moment of intent
+    "LIFT": 2,
+    "MOVE_TO_GOAL": 2,
+    "PREPARE_PLACE": 3,
+    "DESCEND_TO_PLACE": 3,
+    "AWAIT_STABLE_PLACEMENT": 3,
+    "RELEASE": 3,               # During Release, intent flips to Open (see logic below)
+    "RETRACT": 4,
+    "DONE": 4
+}
+
 @dataclass
 class ObjectProfile:
     """Holds the geometric properties of a manipulable object."""
@@ -1006,8 +1022,40 @@ class ScriptedExpert:
         if self._target_pose_7d is None:
             self._target_pose_7d = np.concatenate([ee_pos, self._downward_quat])
 
-        # Clamp position to workspace for safety
+        phase_int = EXPERT_PHASE_MAP.get(self._state, 0)
+
+        # 2. Extract Binary Gripper Intent
+        # We define "Closed Intent" as any state where the robot is actively grasping or holding.
+        # Note: 'RELEASE' is excluded because the intent switches to Open (0.0).
+        closed_intent_states = [
+            "GRASP", 
+            "LIFT", 
+            "MOVE_TO_GOAL", 
+            "PREPARE_PLACE", 
+            "DESCEND_TO_PLACE", 
+            "AWAIT_STABLE_PLACEMENT"
+        ]
+        
+        if self._state in closed_intent_states:
+            gripper_intent = 1.0 # CLOSED
+        else:
+            gripper_intent = 0.0 # OPEN (Includes Reach, Release, Retract)
+            
+        # 3. Bundle metadata into the info dict
+        info = {
+            "gt_phase": int(phase_int),
+            "gt_gripper_intent": float(gripper_intent),
+            "expert_state_str": self._state # Useful for string-based debugging in CSVs
+        }
+
+        # 4. Safety Clamp and Formatting
+        ee_pose = expert_obs["ee_pose_world"]
+        if self._target_pose_7d is None:
+            # Fallback for initialization or errors
+            self._target_pose_7d = np.concatenate([ee_pose[:3], self._downward_quat])
+
         clamped_pos = self._clamp_to_workspace(self._target_pose_7d[:3])
         final_pose = np.concatenate([clamped_pos, self._target_pose_7d[3:]]).astype(np.float32)
 
-        return final_pose, float(self._gripper_action)
+        # Return the Triplet
+        return final_pose, float(self._gripper_action), info

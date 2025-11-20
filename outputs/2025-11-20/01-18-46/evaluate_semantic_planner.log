@@ -1,0 +1,14 @@
+[2025-11-20 01:18:46,473][AWSP_Evaluator][INFO] - --- Starting AWSP Evaluation ---
+[2025-11-20 01:18:46,487][AWSP_Evaluator][INFO] - Loading checkpoint: C:/Users/Hellx/Documents/Programming/python/Project/redhot/checkpoints/backup/backup_epoch_011.ckpt
+[2025-11-20 01:18:47,016][models.semantic_planner][INFO] - [SemanticPlanner] Initializing with config: SemanticPlannerConfig(proprio_dim=22, vision_backbone_model='google/siglip-base-patch16-224', vision_feature_dim=768, fusion_transformer_layers=4, fusion_transformer_heads=8, dim_feedforward_ratio=4, num_task_phases=5, dropout=0.1)
+[2025-11-20 01:18:47,016][models.semantic_planner][INFO] - Loading Vision Backbone: google/siglip-base-patch16-224
+[2025-11-20 01:18:50,639][models.semantic_planner][INFO] - [SemanticPlanner] Initialization Complete.
+[2025-11-20 01:18:50,774][AWSP_Evaluator][INFO] - Model loaded. Freeze-drying configuration...
+[2025-11-20 01:18:50,774][AWSP_Evaluator][INFO] - Initializing Env from: envs/panda_pick_place.xml
+[2025-11-20 01:18:53,656][utils.ik_solver][INFO] - Kinematic chain loaded and configured.
+[2025-11-20 01:18:53,658][AWSP_Evaluator][INFO] - Controller Calibrated: dt=0.01, max_dq=50.0
+[2025-11-20 01:26:59,165][AWSP_Evaluator][WARNING] - Evaluation interrupted by user.
+[2025-11-20 01:26:59,166][AWSP_Evaluator][INFO] - Finalizing resources...
+[2025-11-20 01:26:59,311][AWSP_Evaluator][INFO] - FINAL RESULTS: Success Rate = 0.0% (0/1)
+[2025-11-20 01:26:59,311][AWSP_Evaluator][INFO] - Video saved to: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\2025-11-20\01-18-46\evaluation_video.mp4
+[2025-11-20 01:26:59,312][AWSP_Evaluator][INFO] - Metrics saved to: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\2025-11-20\01-18-46\evaluation_metrics.csv

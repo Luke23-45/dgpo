@@ -64,7 +64,7 @@ def merge_sota_shards(shard_dirs: list[Path], out_dir: Path, run_name: str, tota
 
     # We need a central LMDB writer for the merged data
     final_lmdb_path = final_dataset_path / f"{final_dataset_name}.lmdb"
-    map_size = int(1 * 1024**3)  # 100 GB, adjust as needed
+    map_size = int(8 * 1024**3)  # 100 GB, adjust as needed
     final_env = lmdb.open(str(final_lmdb_path), map_size=map_size, subdir=False, readonly=False, lock=True)
 
     try:
@@ -191,7 +191,13 @@ def worker_loop_fn_SOTA(worker_id: int, cfg: dict, shard_dir_path_str: str,
                 new_eps_to_write = ds.episodes[last_saved_episode_count:]
                 writer.save_batch(new_eps_to_write)
                 last_saved_episode_count = len(ds.episodes)
-        
+            if len(ds.episodes) == 1 and last_saved_episode_count == 0:
+                first_ep = ds.episodes[0]
+                if "gt_phase" not in first_ep["obs_list"][0] or "gt_gripper" not in first_ep["obs_list"][0]:
+                    raise RuntimeError(
+                        f"[Worker {worker_id}] CRITICAL FAILURE: Generated episode is missing "
+                        f"'gt_phase' or 'gt_gripper'. Check ExpertDataset implementation."
+                    )
         pbar.close()
 
         # Finalize the writer (this saves the final index.json for the shard)
