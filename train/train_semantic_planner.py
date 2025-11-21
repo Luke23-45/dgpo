@@ -32,7 +32,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
-
+import math
 import hydra
 import pytorch_lightning as pl
 import torch
@@ -189,7 +189,8 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         self.pose_criterion = nn.L1Loss(reduction='none') 
 
         self.register_buffer('grip_pos_weight', torch.tensor([3.0]))
-        self.gripper_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=self.grip_pos_weight)
+        
+        
 
 
     def _compute_awr_weights(self, advantages: torch.Tensor) -> torch.Tensor:
@@ -200,9 +201,16 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         with torch.no_grad():
             # Scale advantages
             scaled_adv = advantages / self.awr_temperature
-            # Exponentiate
+            
+            # SOTA OPTIMIZATION: Use pure Python math for scalar constants to avoid 
+            # unnecessary Tensor creation and CPU-GPU synchronization overhead.
+            # ln(20) is approx 3.0. 
+            max_exponent = math.log(self.awr_max_weight) + 2.0 
+            
+            # Clamp using float values (safe and fast for GPU tensors)
+            scaled_adv = torch.clamp(scaled_adv, max=max_exponent)
+            
             weights = torch.exp(scaled_adv)
-            # Clamp for numerical stability (prevent gradients from exploding on outliers)
             weights = torch.clamp(weights, max=self.awr_max_weight)
             return weights
 
@@ -218,45 +226,47 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         angle_rad = 2 * torch.acos(dot_product)
         return torch.rad2deg(angle_rad).mean()
 
+
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> Optional[torch.Tensor]:
-        # Gracefully handle dropped batches
-        if not batch:
-            return None
+        if not batch: return None
 
         # 1. Forward Pass
         outputs = self.model(batch)
-        pred_pose = outputs['pose']      # (B, 7)
-        pred_grip = outputs['gripper_logit'] # (B, 1)
+        pred_pose = outputs['pose']
+        pred_grip = outputs['gripper_logit']
 
         # 2. Ground Truths
         gt_pose = batch['ground_truth_subgoal_pose']
-        gt_grip = batch['ground_truth_gripper_state']
+        gt_grip = batch['ground_truth_gripper_state'].float() 
         advantage = batch['advantage']
 
         # 3. Compute Raw Losses (Per Sample)
-        # Pose: (B, 7) -> mean dim=1 -> (B,)
         loss_pose_sample = self.pose_criterion(pred_pose, gt_pose).mean(dim=-1)
-        # Gripper: (B, 1) -> (B,)
-        loss_grip_sample = self.gripper_criterion(pred_grip, gt_grip).squeeze(-1)
+        
+        # Functional Call guarantees device match with self.grip_pos_weight
+        loss_grip_sample = F.binary_cross_entropy_with_logits(
+            pred_grip, gt_grip, pos_weight=self.grip_pos_weight, reduction='none'
+        ).squeeze(-1)
 
         # 4. Compute Weights
-        # Advantage shape (B, 1) -> squeeze -> (B,)
         weights = self._compute_awr_weights(advantage.squeeze(-1))
 
         # 5. Weighted Aggregation
-        # Total raw loss per sample
         loss_total_sample = loss_pose_sample + (self.lambda_gripper * loss_grip_sample)
-        # Apply weights and mean
         weighted_loss = (loss_total_sample * weights).mean()
 
-        # 6. Diagnostic Logging
+        # 6. Logging
         self.log("train/loss", weighted_loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log("train/weights_mean", weights.mean(), on_step=False, on_epoch=True)
-        self.log("train/weights_max", weights.max(), on_step=False, on_epoch=True)
-        self.log("train/pose_loss_raw", loss_pose_sample.mean(), on_step=False, on_epoch=True)
-        self.log("train/gripper_loss_raw", loss_grip_sample.mean(), on_step=False, on_epoch=True)
         
+        # [UPDATED] Log the component errors (Pose & Gripper) to the progress bar
+        self.log("train/loss_pose", loss_pose_sample.mean(), on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/loss_grip", loss_grip_sample.mean(), on_step=True, on_epoch=True, prog_bar=True)
+
         return weighted_loss
+
+
+
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         if not batch: return
@@ -267,92 +277,111 @@ class SemanticPlannerLightningModule(pl.LightningModule):
             pred_grip = outputs['gripper_logit']
 
             gt_pose = batch['ground_truth_subgoal_pose']
-            gt_grip = batch['ground_truth_gripper_state']
+            gt_grip = batch['ground_truth_gripper_state'].float()
 
             # 1. Standard Unweighted Loss
             loss_pose = F.l1_loss(pred_pose, gt_pose)
             loss_grip = F.binary_cross_entropy_with_logits(pred_grip, gt_grip)
+            
+            # Weighted total for the progress bar
             total_val_loss = loss_pose + (self.lambda_gripper * loss_grip)
 
             # 2. Physical Metrics
-            # Position Error (Euclidean distance in meters)
             pos_error_m = torch.norm(pred_pose[:, :3] - gt_pose[:, :3], dim=-1).mean()
-            
-            # Rotation Error (Degrees)
             rot_error_deg = self._compute_geodesic_loss(pred_pose[:, 3:], gt_pose[:, 3:])
             
-            # Gripper Accuracy
             pred_cls = (torch.sigmoid(pred_grip) > 0.5).float()
             grip_acc = (pred_cls == gt_grip).float().mean()
 
             # 3. Logging
             self.log("val/loss", total_val_loss, on_epoch=True, sync_dist=True, prog_bar=True)
+            # [NEW] Log components separately
+            self.log("val/loss_pose", loss_pose, on_epoch=True, sync_dist=True)
+            self.log("val/loss_grip", loss_grip, on_epoch=True, sync_dist=True)
+            
             self.log("val/pos_error_m", pos_error_m, on_epoch=True, sync_dist=True)
             self.log("val/rot_error_deg", rot_error_deg, on_epoch=True, sync_dist=True)
             self.log("val/gripper_acc", grip_acc, on_epoch=True, sync_dist=True)
 
+
     def configure_optimizers(self):
         """
-        Sets up AdamW with correct weight decay handling and Cosine Scheduler.
-        
-        SOTA Practice: 
-        - Weight decay applied to MatMul weights.
-        - Weight decay DISABLED for LayerNorms, Biases, and Embeddings.
+        Robust SOTA Optimizer Configuration.
+        Includes safeguards against top-level parameter crashes.
         """
-        # Separation of parameters
         decay = set()
         no_decay = set()
         
+        # Define Module Types for filtering
         whitelist_weight_modules = (torch.nn.Linear, torch.nn.MultiheadAttention)
         blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.Embedding)
         
-        for mn, m in self.named_modules():
-            for pn, p in m.named_parameters():
-                fpn = '%s.%s' % (mn, pn) if mn else pn  # full param name
+        # Pre-compute module map for safe lookups
+        name_to_module = {n: m for n, m in self.named_modules()}
 
-                # Skip frozen backbone parameters (handled by requires_grad check later, but cleaner to skip here)
-                if "vision_backbone" in fpn:
-                    continue
+        for pn, p in self.named_parameters():
+            if not p.requires_grad:
+                continue
+            
+            # Explicitly exclude Frozen Backbone
+            if "vision_backbone" in pn:
+                continue
 
-                if pn.endswith('bias'):
-                    no_decay.add(fpn)
-                elif pn.endswith('weight') and isinstance(m, blacklist_weight_modules):
-                    no_decay.add(fpn)
-                elif pn.endswith('weight') and isinstance(m, whitelist_weight_modules):
-                    decay.add(fpn)
+            # 1. Catch Explicit "No Decay" cases (Biases, Orphans, Norms)
+            if pn.endswith('bias'):
+                no_decay.add(pn)
+            elif "spatial_pos_embedding" in pn or "query_token" in pn or "token_type" in pn:
+                no_decay.add(pn)
+            elif pn.endswith("weight") and "norm" in pn:
+                no_decay.add(pn)
+            elif p.ndim < 2:
+                # Catch 1D parameters (like new learned scalars) automatically
+                no_decay.add(pn)
+            
+            # 2. Module-based Logic (Robust Implementation)
+            elif pn.endswith("weight"):
+                # Safe Parent Extraction
+                # rpartition splits safely even if separator is missing
+                parent_name = pn.rpartition('.')[0] 
+                
+                # Check if parent is in our module map (handles orphans gracefully)
+                if parent_name in name_to_module:
+                    parent_mod = name_to_module[parent_name]
+                    if isinstance(parent_mod, blacklist_weight_modules):
+                        no_decay.add(pn)
+                    else:
+                        decay.add(pn)
+                else:
+                    # Fallback for weights without mapped parents (Standard Decay)
+                    decay.add(pn)
+            else:
+                # Default for everything else
+                decay.add(pn)
 
-        # Dictionary of all trainable parameters
+        # Create Groups
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        decay_params = [param_dict[pn] for pn in sorted(list(decay))]
+        no_decay_params = [param_dict[pn] for pn in sorted(list(no_decay))]
 
-        # Intersect with requires_grad parameters
-        decay_params = [param_dict[pn] for pn in sorted(list(decay)) if pn in param_dict]
-        no_decay_params = [param_dict[pn] for pn in sorted(list(no_decay)) if pn in param_dict]
-
-        optim_groups = [
-            {"params": decay_params, "weight_decay": self.cfg.optimizer.weight_decay},
-            {"params": no_decay_params, "weight_decay": 0.0},
-        ]
+        if self.trainer.is_global_zero:
+            logger.info(f"Optimizer Configured: {len(decay_params)} decay vars, {len(no_decay_params)} no-decay vars.")
 
         optimizer = torch.optim.AdamW(
-            optim_groups,
+            [
+                {"params": decay_params, "weight_decay": self.cfg.optimizer.weight_decay},
+                {"params": no_decay_params, "weight_decay": 0.0},
+            ],
             lr=self.cfg.optimizer.lr,
             betas=(0.9, 0.999)
         )
 
-        # Cosine Schedule with Warmup
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
             num_warmup_steps=int(self.trainer.estimated_stepping_batches * self.cfg.optimizer.warmup_percentage),
             num_training_steps=self.trainer.estimated_stepping_batches
         )
 
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step"
-            }
-        }
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
 
 
     def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int) -> None:
@@ -414,7 +443,6 @@ class SemanticPlannerLightningModule(pl.LightningModule):
 # ==============================================================================
 # 3. MAIN EXECUTION ENTRY POINT
 # ==============================================================================
-
 @hydra.main(version_base=None, config_path="../configs", config_name="train_semantic_planner_config")
 def main(cfg: DictConfig) -> None:
     """
@@ -423,21 +451,17 @@ def main(cfg: DictConfig) -> None:
     # 1. Reproducibility
     pl.seed_everything(cfg.seed, workers=True)
     
-    logger.info("--- Starting AWSP Training Pipeline ---")
+    logger.info("--- Starting AWSP Training Pipeline (v8.0 SOTA) ---")
     logger.info(f"Working Dir: {os.getcwd()}")
     
     # 2. Logging Setup
     # Hydra sets the working directory, so '.' is the output directory
-    output_dir = Path("/content/drive/MyDrive/pda/logs_ego/")
+    output_dir = Path("/content/drive/MyDrive/pda/logs_awsp/")
     
     loggers = [TensorBoardLogger(save_dir=".", name="tb_logs")]
     
-    # Conditional WandB
     if cfg.logging.get("use_wandb", False):
-        # Ensure mode is set
         os.environ["WANDB_MODE"] = cfg.logging.get("wandb_mode", "online")
-        
-        # Check for API key in environment, warn if missing but mode is not offline
         if "WANDB_API_KEY" not in os.environ and cfg.logging.get("wandb_mode") != "offline":
             logger.warning("WandB enabled but API Key not found in env. Switching to offline mode.")
             os.environ["WANDB_MODE"] = "offline"
@@ -458,7 +482,7 @@ def main(cfg: DictConfig) -> None:
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints",
         filename="awsp-{epoch:02d}-{val/pos_error_m:.4f}",
-        monitor="val/pos_error_m", # Monitoring physical error is more intuitive than combined loss
+        monitor="val/pos_error_m",
         mode="min",
         save_top_k=3,
         save_last=True
@@ -475,26 +499,68 @@ def main(cfg: DictConfig) -> None:
         logger=loggers,
         callbacks=[checkpoint_callback, lr_monitor, progress_bar],
         gradient_clip_val=cfg.training.get("gradient_clip_val", 1.0),
-        precision=cfg.training.get("precision", "16-mixed"), # AMP
+        precision=cfg.training.get("precision", "16-mixed"),
+        accumulate_grad_batches=cfg.trainer.get("accumulate_grad_batches", 1), # Ensure this is picked up
         log_every_n_steps=10,
         check_val_every_n_epoch=cfg.training.get("check_val_every_n_epoch", 1),
     )
 
-    # 6. Execute
+    # --- 6. SURGICAL MIGRATION LOGIC (The Critical Fix) ---
+# --- 6. SURGICAL MIGRATION LOGIC (The Critical Fix) ---
+    resume_path = cfg.training.get("resume_from_checkpoint")
+    ckpt_arg = None # Default: Start fresh
+
+    if resume_path and os.path.exists(resume_path):
+        logger.info(f"--- DETECTED CHECKPOINT: {resume_path} ---")
+        logger.info("Performing Surgical Weight Injection for v7 -> v8 Architecture Update...")
+        
+        try:
+            # Load raw checkpoint
+            checkpoint = torch.load(resume_path, map_location=model.device)
+            state_dict = checkpoint['state_dict']
+            
+            # [CRITICAL FIX] Filter out keys with size mismatches (Token Embeddings)
+            model_state = model.state_dict()
+            filtered_state_dict = {}
+            
+            for k, v in state_dict.items():
+                if k in model_state:
+                    if v.shape != model_state[k].shape:
+                        logger.warning(f"Skipping shape mismatch for key: {k} | Ckpt: {v.shape} vs Model: {model_state[k].shape}")
+                        continue
+                    filtered_state_dict[k] = v
+                else:
+                    # Key doesn't exist in new model (e.g. old buffers), ignore
+                    pass
+            
+            # Inject filtered weights
+            keys = model.load_state_dict(filtered_state_dict, strict=False)
+            
+            logger.info(f"Weights Loaded. Missing Keys (Expected for v8 new tokens): {keys.missing_keys}")
+            logger.info("Optimizer State: DISCARDED (AdamW will re-initialize).")
+            
+            # We set ckpt_arg to None because we manually loaded the weights.
+            ckpt_arg = None 
+            
+        except Exception as e:
+            logger.error(f"Surgical migration failed: {e}. Aborting.")
+            raise e
+    else:
+        logger.info("No checkpoint found or resume not requested. Starting fresh.")
+
+    # 7. Execute
     try:
         logger.info("Starting trainer.fit()...")
         trainer.fit(
             model, 
             datamodule=datamodule,
-            ckpt_path=cfg.training.get("resume_from_checkpoint")
+            ckpt_path=ckpt_arg 
         )
         logger.info(f"Training complete. Best model: {checkpoint_callback.best_model_path}")
     except Exception as e:
         logger.exception(f"Training failed with exception: {e}")
         raise e
     finally:
-        # Ensure WandB run is closed properly
-        # Check if any logger is a WandbLogger
         for lg in loggers:
             if isinstance(lg, WandbLogger):
                 import wandb

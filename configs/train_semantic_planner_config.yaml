@@ -33,14 +33,17 @@ dataset:
 
 # --- Training Loop Configuration ---
 training:
-  batch_size: 224
-  val_batch_size: 224
+  batch_size: 192 
+  val_batch_size: 192
 
-  check_val_every_n_epoch: 50
+  check_val_every_n_epoch: 90
 
-  backup_every_n_epochs: 1
+  backup_every_n_epochs: 4
 
   backup_dir: "/content/drive/MyDrive/pda/models/v1/backups"
+
+  # backup_dir: "/content/dgpo/checkpoints/backup"
+
   
   # --- [START OF THE DEFINITIVE PATCH 3] ---
   # Number of old failsafe backups to keep on disk.
@@ -56,13 +59,13 @@ training:
   val_check_interval: 1.0
 
   # --- AWR Parameters ---
-  awr_temperature: 0.5        # Temperature (tau). 0.5 - 1.0 is standard. 0.5
-  awr_max_weight: 20.0       # Clipping to prevent gradient explosion.
+  awr_temperature: 4.8745        # Temperature (tau). 0.5 - 1.0 is standard. 0.5
+  awr_max_weight: 20.0
   
   loss_weights:
     lambda_gripper: 2.0      
 
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_044.ckpt" 
+  resume_from_checkpoint: null
 
 # --- Optimizer ---
 optimizer:

@@ -1,33 +1,28 @@
 # FILE: models/semantic_planner.py
-# (Definitive, SOTA, Production-Grade, Robust Version 7.0 - Perceiver Upgrade)
+# (Definitive, SOTA, Disentangled Architecture v8.0)
 
 """
 The Advantage-Weighted Semantic Planner (AWSP Strategist).
 
 This module implements the **Semantic Planner**, a deterministic, goal-conditioned
-regression model. It acts as the high-level "Strategist" in the hierarchical
-control stack.
+regression model.
 
-Architectural Evolution (v7.0 - Perceiver-Lite):
-1.  **Dynamic Query Injection**: Unlike BERT-style models that use a static [CLS]
-    token, this model initializes the primary plan query directly from the
-    semantic context (Task Phase + Proprioception). This forces the Transformer
-    to act as a conditional cross-learner, attending to visual evidence *based on*
-    the current agent state.
-2.  **Shared Spatial Geometry**: Explicitly injects shared spatial encodings into
-    both Start and Goal image tokens to induce geometric correspondence (optical flow)
-    learning within the self-attention layers.
-3.  **Deep Residual Heads**: The regression heads are upgraded to multi-layer
-    residual MLPs (ResMLP) to allow for fine-grained coordinate refinement
-    after semantic decoding.
-4.  **Manifold Constraints**: Unit-norm quaternion enforcement remains strictly applied.
+Architectural Revolution (v8.0 - Disentangled Queries):
+1.  **Dual-Query Mechanism**: Instead of a single [CLS] token, we initialize
+    TWO distinct query tokens: `Pose_Query` and `Grip_Query`.
+2.  **Gradient Decoupling**: By forcing the transformer to output two separate
+    latent vectors, we ensure that the heavy gradients from the Pose loss do not
+    wash out the delicate gradients from the Gripper loss.
+3.  **Specialized Attention**: The `Grip_Query` is free to learn to attend specifically
+    to the gripper fingers/object contact points, while `Pose_Query` attends to
+    the global object geometry.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -55,9 +50,7 @@ class SemanticPlannerConfig:
 
 
 def _init_weights(module: nn.Module):
-    """
-    SOTA Weight Initialization Protocol.
-    """
+    """SOTA Weight Initialization Protocol."""
     if isinstance(module, (nn.Linear, nn.Embedding)):
         torch.nn.init.trunc_normal_(module.weight, std=0.02)
         if isinstance(module, nn.Linear) and module.bias is not None:
@@ -92,13 +85,16 @@ class ResidualMLPBlock(nn.Module):
 
 class SemanticPlanner(nn.Module):
     """
-    The Advantage-Weighted Semantic Planner.
+    The Disentangled Advantage-Weighted Semantic Planner.
+    
+    Uses a Dual-Query Transformer architecture with safe initialization protocols
+    to preserve pre-trained vision backbone weights.
     """
 
     def __init__(self, cfg: SemanticPlannerConfig):
         super().__init__()
         self.cfg = cfg
-        logger.info(f"[SemanticPlanner] Initializing with config: {cfg}")
+        logger.info(f"[SemanticPlanner] Initializing v8.0 (Disentangled) with config: {cfg}")
 
         # --- 1. Vision Backbone (Frozen) ---
         logger.info(f"Loading Vision Backbone: {cfg.vision_backbone_model}")
@@ -107,19 +103,17 @@ class SemanticPlanner(nn.Module):
         self.vision_backbone.eval()
 
         backbone_cfg = self.vision_backbone.config
-        if backbone_cfg.hidden_size != cfg.vision_feature_dim:
-            raise ValueError(
-                f"Config mismatch: Model dim {cfg.vision_feature_dim} != "
-                f"Backbone dim {backbone_cfg.hidden_size}"
-            )
         
-        # Infer patch count for spatial embeddings
-        # Default for SigLIP 224 / Patch 16 is 196 patches (14x14)
+        # Infer patch count (safely default to 196 if config missing)
         self.num_patches = 196
         if hasattr(backbone_cfg, "image_size") and hasattr(backbone_cfg, "patch_size"):
             self.num_patches = (backbone_cfg.image_size // backbone_cfg.patch_size) ** 2
+        
+        # Sanity check dimension
+        if backbone_cfg.hidden_size != cfg.vision_feature_dim:
+             raise ValueError(f"Config mismatch: Model dim {cfg.vision_feature_dim} != Backbone dim {backbone_cfg.hidden_size}")
 
-        # --- 2. Context Encoders (The "Query" Generators) ---
+        # --- 2. Context Encoders ---
         
         # Proprio Encoder: Projects raw physics state -> Model Dim
         self.proprio_encoder = nn.Sequential(
@@ -132,14 +126,17 @@ class SemanticPlanner(nn.Module):
         # Task Phase Embedding
         self.task_phase_embedding = nn.Embedding(cfg.num_task_phases, cfg.vision_feature_dim)
         
-        # --- 3. Visual Inductive Biases ---
+        # --- 3. Embeddings (Updated for Dual Queries) ---
         
-        # Spatial Positional Embedding: Shared between Start/Goal to align geometry
+        # Spatial Positional Embedding: Shared between Start/Goal
         self.spatial_pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, cfg.vision_feature_dim))
         
-        # Token Type Embeddings: Distinguish Start vs Goal tokens
-        # 0: Start Image Patches, 1: Goal Image Patches, 2: Plan Query (Context)
-        self.token_type_embeddings = nn.Embedding(3, cfg.vision_feature_dim)
+        # Token Types: 0:Start, 1:Goal, 2:Context, 4:PoseQ, 5:GripQ
+        self.token_type_embeddings = nn.Embedding(6, cfg.vision_feature_dim)
+
+        # [SOTA CHANGE] Split the Plan Token into Two Learnable Queries
+        self.pose_query_token = nn.Parameter(torch.randn(1, 1, cfg.vision_feature_dim))
+        self.grip_query_token = nn.Parameter(torch.randn(1, 1, cfg.vision_feature_dim))
 
         # --- 4. Fusion Transformer ---
         encoder_layer = nn.TransformerEncoderLayer(
@@ -149,16 +146,16 @@ class SemanticPlanner(nn.Module):
             dropout=cfg.dropout,
             activation='gelu',
             batch_first=True,
-            norm_first=True
+            norm_first=True # Pre-LN is critical for stability
         )
         self.fusion_transformer = nn.TransformerEncoder(
             encoder_layer, 
             num_layers=cfg.fusion_transformer_layers
         )
 
-        # --- 5. Deep Output Heads (ResMLP) ---
+        # --- 5. Deep Output Heads (Decoupled) ---
         
-        # Pose Head: 3 layers deep with residuals for precise coordinate regression
+        # Pose Head: Regresses from the Pose Latent Vector
         self.pose_head = nn.Sequential(
             nn.LayerNorm(cfg.vision_feature_dim),
             nn.Linear(cfg.vision_feature_dim, cfg.vision_feature_dim),
@@ -169,27 +166,51 @@ class SemanticPlanner(nn.Module):
             nn.Linear(cfg.vision_feature_dim, 7) 
         )
 
-        # Gripper Head: Simpler head is sufficient for binary classification
+        # Gripper Head: Regresses from the Grip Latent Vector
         self.gripper_head = nn.Sequential(
             nn.LayerNorm(cfg.vision_feature_dim),
             nn.Linear(cfg.vision_feature_dim, cfg.vision_feature_dim // 2),
             nn.GELU(),
-            nn.Dropout(cfg.dropout),
+            ResidualMLPBlock(cfg.vision_feature_dim // 2, cfg.dropout), 
             nn.Linear(cfg.vision_feature_dim // 2, 1)
         )
 
-        # --- 6. Initialization ---
-        self.apply(self._init_module_weights)
-        # Special init for spatial embeddings
+        # --- 6. Initialization (CRITICAL FIX) ---
+        # We must NOT use self.apply() globally because it would re-init 
+        # the Vision Backbone (wiping pre-trained weights).
+        
+        logger.info("Initializing custom modules (Skipping Vision Backbone)...")
+        
+        # Iterate over direct children and skip the backbone
+        for name, module in self.named_children():
+            if "vision_backbone" in name:
+                logger.info(f"Skipped initialization for: {name}")
+                continue
+            module.apply(_init_weights)
+
+        # Explicitly initialize Top-Level Parameters (Orphans)
         nn.init.trunc_normal_(self.spatial_pos_embedding, std=0.02)
+        nn.init.trunc_normal_(self.pose_query_token, std=0.02)
+        nn.init.trunc_normal_(self.grip_query_token, std=0.02)
+        
         logger.info("[SemanticPlanner] Initialization Complete.")
 
-    def _init_module_weights(self, module):
-        _init_weights(module)
+    def train(self, mode: bool = True):
+        """
+        [SOTA FIX] Override train mode to ensure Backbone stays FROZEN.
+        PyTorch Lightning calls model.train() every epoch, which recursively
+        activates Dropout in the backbone even if requires_grad=False.
+        This override forces the backbone to stay in eval mode.
+        """
+        super().train(mode)
+        if mode:
+            # Revert backbone to eval to disable dropout/batchnorm updates
+            self.vision_backbone.eval()
+        return self
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
-        Forward pass with Phase Dropout.
+        Forward pass with robust shape handling.
         """
         initial_image = batch['initial_image']
         goal_image = batch['goal_image']
@@ -204,30 +225,33 @@ class SemanticPlanner(nn.Module):
         phase_embed = self.task_phase_embedding(task_phase)
 
         # [IMPLEMENTATION] Phase Dropout
-        # Only apply during training. If probability > 0, randomly zero out embeddings.
         if self.training and self.cfg.phase_dropout_prob > 0.0:
-            # Generate keep mask (1 = keep, 0 = drop)
-            # keep_prob = 1 - drop_prob
             keep_prob = 1.0 - self.cfg.phase_dropout_prob
-            
-            # Create mask of shape (B, 1)
             mask = torch.bernoulli(torch.full((B, 1), keep_prob, device=device))
-            
-            # Broadcast mask to (B, FeatureDim) and apply
             phase_embed = phase_embed * mask
 
         proprio_embed = self.proprio_encoder(current_proprio)
 
-        # Fuse Phase + Proprio into Plan Query Context
+        # Fuse Phase + Proprio
         context_embedding = phase_embed + proprio_embed
-        
-        # Add Token Type Embedding (Type 2 = Plan Query)
         context_embedding = context_embedding + self.token_type_embeddings(torch.tensor(2, device=device))
         
-        # Reshape for sequence: (B, 1, D)
-        plan_query_token = context_embedding.unsqueeze(1)
+        # --- 2. Create Disentangled Queries ---
+        
+        # Expand learnable tokens: (1, 1, D) -> (B, 1, D)
+        pose_q = self.pose_query_token.expand(B, -1, -1)
+        grip_q = self.grip_query_token.expand(B, -1, -1)
+        
+        # Fuse Context into Queries
+        context_expanded = context_embedding.unsqueeze(1)
+        pose_q = pose_q + context_expanded
+        grip_q = grip_q + context_expanded
+        
+        # Add Distinct Token Types
+        pose_q = pose_q + self.token_type_embeddings(torch.tensor(4, device=device))
+        grip_q = grip_q + self.token_type_embeddings(torch.tensor(5, device=device))
 
-        # --- 2. Visual Encoding ---
+        # --- 3. Visual Encoding ---
         with torch.no_grad():
             start_out = self.vision_backbone(initial_image.float())
             goal_out = self.vision_backbone(goal_image.float())
@@ -235,28 +259,60 @@ class SemanticPlanner(nn.Module):
         start_tokens = start_out.last_hidden_state
         goal_tokens = goal_out.last_hidden_state
 
-        # --- 3. Inject Geometry & Modality Types ---
+        # --- [CRITICAL FIX] Dynamic Shape Handling ---
+        # Some ViTs return (197) tokens (CLS + Patches), others (196).
+        # We must align strictly with self.spatial_pos_embedding (196).
+        seq_len = start_tokens.shape[1]
+        
+        if seq_len != self.num_patches:
+            if seq_len > self.num_patches:
+                # If backbone adds CLS/Register tokens, take the LAST N tokens 
+                # (Standard ViT: CLS is index 0, patches [1:])
+                # Taking negative slice is safe regardless of where extra tokens are, 
+                # assuming patches are the majority block.
+                start_tokens = start_tokens[:, -self.num_patches:, :]
+                goal_tokens = goal_tokens[:, -self.num_patches:, :]
+            else:
+                raise ValueError(
+                    f"Vision Backbone output ({seq_len}) < Expected Patches ({self.num_patches}). "
+                    "Check image size/patch size config."
+                )
+
+        # --- 4. Inject Geometry & Modality Types ---
+        # Add Spatial Embeddings (Shared geometry)
         start_tokens = start_tokens + self.spatial_pos_embedding
         goal_tokens = goal_tokens + self.spatial_pos_embedding
 
+        # Add Token Types (0 & 1)
         start_tokens = start_tokens + self.token_type_embeddings(torch.tensor(0, device=device))
         goal_tokens = goal_tokens + self.token_type_embeddings(torch.tensor(1, device=device))
 
-        # --- 4. Fusion ---
-        fused_input = torch.cat([plan_query_token, start_tokens, goal_tokens], dim=1)
+        # --- 5. Fusion ---
+        # Sequence: [Pose_Query, Grip_Query, Start_Patches..., Goal_Patches...]
+        fused_input = torch.cat([pose_q, grip_q, start_tokens, goal_tokens], dim=1)
+
+        # Transformer Output
         fused_output = self.fusion_transformer(fused_input)
 
-        # Extract updated Plan Vector (Index 0)
-        plan_vector = fused_output[:, 0, :] 
+        # --- 6. Decoupled Latent Extraction ---
+        # Index 0 = Pose Latent, Index 1 = Grip Latent
+        pose_vector = fused_output[:, 0, :] 
+        grip_vector = fused_output[:, 1, :] 
 
-        # --- 5. Prediction Heads ---
-        raw_pose = self.pose_head(plan_vector)
+        # --- 7. Prediction Heads ---
+        
+        # A. Pose Regression
+        raw_pose = self.pose_head(pose_vector)
         pos_xyz = raw_pose[:, :3]
+        
         quat_raw = raw_pose[:, 3:]
-        quat_norm = F.normalize(quat_raw, p=2, dim=-1, eps=1e-8)
+        quat_norm = F.normalize(quat_raw, p=2, dim=-1, eps=1e-6)
+        
         predicted_pose = torch.cat([pos_xyz, quat_norm], dim=1)
 
-        predicted_gripper_logit = self.gripper_head(plan_vector)
+        # B. Gripper Classification
+        predicted_gripper_logit = self.gripper_head(grip_vector)
+
 
         return {
             'pose': predicted_pose,

@@ -1,209 +1,118 @@
-#!/usr/bin/env python3
-# FILE: scripts/evaluate_ego_planner.py
-# (Definitive, SOTA, Hydra-Integrated, and Fully Corrected Version)
-
 """
-The definitive, state-of-the-art evaluation script for the Ego-Planner policy,
-powered by the Hydra configuration framework.
-
-This script performs a true closed-loop, autonomous rollout of the policy in a
-simulated environment. It correctly loads the model, handles data preprocessing
-with scientific rigor, and generates a detailed video of the policy's attempt.
-
-Key Corrections & SOTA Features from Deep Analysis:
--   **Correct EMA Model Loading**: Implements a robust loader that is independent of
-    the training script and correctly extracts the EMA weights from the checkpoint.
--   **Scientifically Valid Data Preprocessing**: Leverages the dataset's own
-    transformation pipelines to guarantee a perfect match between training and
-    evaluation data distributions, fixing a critical normalization bug.
--   **Correct Policy API Invocation**: Calls the model's `.sample()` method with
-    the correct keyword arguments, fixing the "static video" bug and ensuring
-    the policy receives real-time sensory feedback.
--   **Robust Goal Image Handling**: Uses the ground-truth goal image from the dataset,
-    ensuring perfect consistency with the policy's training objective.
--   **Clean & Modular Structure**: Driven by a clean Hydra config for reproducibility
-    and easy experimentation.
+AWR Calibration Tool.
+Reads the computed advantages from your LMDB and suggests optimal 
+Temperature (tau) and Max Weight parameters to prevent training collapse.
 """
-
-import collections
-import logging
-from pathlib import Path
-import json
-import cv2
-import imageio
-import hydra
-import mujoco
+import lmdb
 import numpy as np
-import pytorch_lightning as pl
-import torch
-from omegaconf import DictConfig, OmegaConf
-from PIL import Image
+import argparse
 from tqdm import tqdm
+import matplotlib.pyplot as plt # Optional, for histogram if you want
 
-from envs.panda_env import PandaEnv
-from models.ego_planner import EgoPlanner, EgoPlannerConfig
-from models.diffusion_policy import NoiseScheduler, NoiseSchedulerConfig
-# NOTE: The EgoPlannerDataset is now the central hub for data access and transforms
-from utils.ego_planner_dataset import EgoPlannerDataset
+def calibrate(lmdb_path):
+    print(f"--- Calibrating AWR for: {lmdb_path} ---")
+    
+    env = lmdb.open(lmdb_path, subdir=False, readonly=True, lock=False)
+    
+    all_advantages = []
+    
+    with env.begin() as txn:
+        cursor = txn.cursor()
+        for key, value in tqdm(cursor, desc="Reading Advantages"):
+            key_str = key.decode('ascii')
+            if key_str.endswith('_advantages'):
+                # Read raw bytes -> float32 numpy
+                adv = np.frombuffer(value, dtype=np.float32)
+                all_advantages.append(adv)
+                
+    env.close()
+    
+    if not all_advantages:
+        print("ERROR: No advantages found in LMDB. Did you run advantage_calculator.py?")
+        return
 
-log = logging.getLogger(__name__)
+    # Concatenate all to get global stats
+    flat_adv = np.concatenate(all_advantages)
+    
+    mean_adv = np.mean(flat_adv)
+    std_adv = np.std(flat_adv)
+    min_adv = np.min(flat_adv)
+    max_adv = np.max(flat_adv)
+    
+    print(f"\n[Data Statistics]")
+    print(f"Count: {len(flat_adv)}")
+    print(f"Mean:  {mean_adv:.4f}")
+    print(f"Std:   {std_adv:.4f}")
+    print(f"Min:   {min_adv:.4f}")
+    print(f"Max:   {max_adv:.4f}")
+    
+    print(f"\n[Calibration Analysis]")
+    print("-" * 60)
+    print(f"{'Temp (tau)':<12} | {'Mean Weight':<12} | {'Max Weight (Raw)':<18} | {'Suggestion'}")
+    print("-" * 60)
 
-# -----------------------------------------------------------------------------
-# 1. Definitive Model and Data Loaders
-# -----------------------------------------------------------------------------
+    # We test temperatures based on fractions of the Standard Deviation
+    test_taus = [
+        std_adv * 2.0,   # Very Conservative (BC-like)
+        std_adv * 1.0,   # Standard AWR
+        std_adv * 0.5,   # Aggressive
+        std_adv * 0.2,   # Very Aggressive
+        0.5,             # The default guess
+        0.1              # The aggressive guess
+    ]
+    test_taus = sorted(list(set(test_taus)), reverse=True) # Remove duplicates
 
-def load_policy_from_checkpoint(cfg: DictConfig, ckpt_path: str, device: torch.device) -> EgoPlanner:
-    """
-    Definitively loads the Ego-Planner from a PL checkpoint, prioritizing EMA weights.
-    """
-    log.info(f"Loading checkpoint from: {ckpt_path}")
-    if not Path(ckpt_path).exists():
-        raise FileNotFoundError(ckpt_path)
+    recommended_config = None
 
-    payload = torch.load(ckpt_path, map_location=device)
+    for tau in test_taus:
+        if tau < 1e-6: continue
+        
+        # Calculate weights: w = exp(A / tau)
+        # Note: We usually normalize A by mean for calculation if not already centered
+        # But AWR formula is exp(A/tau). Let's see raw impact.
+        
+        # To avoid overflow in printing, we check exponents first
+        max_exponent = max_adv / tau
+        
+        if max_exponent > 80: # exp(80) is huge
+            weight_max_str = "EXPLODES (NaN)"
+            weight_mean_str = "N/A"
+            note = "Too Unstable"
+        else:
+            weights = np.exp(flat_adv / tau)
+            w_mean = np.mean(weights)
+            w_max = np.max(weights)
+            weight_max_str = f"{w_max:.2f}"
+            weight_mean_str = f"{w_mean:.2f}"
+            
+            if w_max < 5.0:
+                note = "Too Flat (BC-like)"
+            elif w_max > 1000.0:
+                note = "Highly Selective"
+            elif w_max > 1e6:
+                note = "Unstable"
+            else:
+                note = "balanced"
+                # Pick the most aggressive one that doesn't explode (>1000 is okay if clipped)
+                if recommended_config is None or (w_max < 5000):
+                     recommended_config = (tau, 20.0 if w_max > 20 else w_max)
 
-    # Instantiate the model from the training configuration
-    model_config = EgoPlannerConfig(**cfg.model)
-    policy = EgoPlanner(model_config).to(device)
+        print(f"{tau:<12.4f} | {weight_mean_str:<12} | {weight_max_str:<18} | {note}")
 
-    # Prioritize loading EMA weights for superior evaluation performance
-    if 'ema_state_dict' in payload:
-        log.info("Loading Exponential Moving Average (EMA) weights for evaluation.")
-        policy.load_state_dict(payload['ema_state_dict'])
+    print("-" * 60)
+    
+    if recommended_config:
+        rec_tau, rec_max = recommended_config
+        print(f"\n>>> RECOMMENDATION:")
+        print(f"awr_temperature: {rec_tau:.4f}")
+        print(f"awr_max_weight:  {20.0}") 
+        print(f"(This sets tau approx equal to your data's Std Dev)")
     else:
-        log.warning("EMA state not found. Falling back to raw model state_dict.")
-        # Clean the "model." prefix added by Lightning
-        state_dict = {k.replace("model.", ""): v for k, v in payload['state_dict'].items()}
-        incompatible_keys = policy.load_state_dict(state_dict, strict=False)
-        if incompatible_keys.missing_keys: log.warning(f"Missing keys: {incompatible_keys.missing_keys}")
-        if incompatible_keys.unexpected_keys: log.warning(f"Unexpected keys: {incompatible_keys.unexpected_keys}")
-
-    policy.eval()
-    log.info("Policy loaded successfully and set to evaluation mode.")
-    return policy
-
-
-# -----------------------------------------------------------------------------
-# 2. Main Hydra-Driven Evaluation Function
-# -----------------------------------------------------------------------------
-
-@hydra.main(version_base=None, config_path="./configs", config_name="evaluate_ego_planner_config")
-def evaluate(cfg: DictConfig):
-    """Main evaluation function driven by Hydra."""
-    
-    # --- 1. Setup ---
-    pl.seed_everything(cfg.seed)
-    output_dir = Path.cwd() # Hydra manages this directory
-    log.info("--- EGO-Planner SOTA Visual Evaluation ---")
-    log.info(f"Output directory: {output_dir}")
-    log.info("Full Configuration:\n" + OmegaConf.to_yaml(cfg))
-
-    device = torch.device(cfg.device)
-
-    # --- 2. Load Components ---
-    policy = load_policy_from_checkpoint(cfg, cfg.checkpoint_path, device)
-    
-    # The Dataset is now the single source of truth for data and transforms
-    dataset = EgoPlannerDataset(dataset_path=cfg.dataset.path, obs_horizon=cfg.model.obs_horizon,
-                                action_horizon=cfg.model.action_horizon, use_aug=False)
-    dataset._build_episode_indices() # Enable evaluation methods
-
-    scheduler = NoiseScheduler(NoiseSchedulerConfig(**cfg.scheduler)).to(device)
-    
-    # --- 3. Run Evaluation Loop ---
-    num_episodes = len(dataset.episode_start_indices) - 1
-    episodes_to_run = cfg.rollout.episode_indices or list(range(min(cfg.rollout.max_episodes_to_eval, num_episodes)))
-    
-    all_results = []
-    for ep_idx in episodes_to_run:
-        if ep_idx >= num_episodes:
-            log.warning(f"Episode index {ep_idx} out of bounds. Skipping.")
-            continue
-
-        # Initialize the environment with DR disabled for consistency
-        env = PandaEnv(xml_path=cfg.env.xml_path, enable_domain_randomization=False)
-
-        # Initialize video writer for this episode
-        video_path = output_dir / f"ep_{ep_idx}_closed_loop.mp4"
-        frame_test = env.render(camera_name="fixed_camera")
-        video_writer = imageio.get_writer(video_path, fps=cfg.video_fps, quality=8)
-        
-        log.info(f"--- Starting Rollout for Episode {ep_idx} (Seed: {cfg.seed + ep_idx}) ---")
-        
-        # --- 3a. Episode Reset & Setup ---
-        obs, _ = env.reset(seed=cfg.seed + ep_idx)
-        
-        # Get static images for the Strategist from the dataset for consistency
-        initial_sample = dataset.get_episode_sample(ep_idx, 0)
-        initial_image_tensor = initial_sample['initial_image'].unsqueeze(0).to(device)
-        goal_image_tensor = initial_sample['goal_image'].unsqueeze(0).to(device)
-        
-        # Buffer for observation history
-        obs_history_deque = collections.deque(maxlen=cfg.model.obs_horizon)
-        for _ in range(cfg.model.obs_horizon):
-            obs_history_deque.append({
-                'image_primary': dataset.transform_primary(Image.fromarray(obs['image_primary'])),
-                'image_wrist': dataset.transform_wrist(Image.fromarray(obs['image_wrist'])),
-                'proprio': torch.from_numpy(obs['proprio']).float()
-            })
-
-        # --- 3b. Main Rollout Loop ---
-        is_success = False
-        for step in tqdm(range(cfg.rollout.max_steps), desc=f"  Rollout Ep {ep_idx}"):
-            # Prepare batch for model
-            obs_history_batch = {k: torch.stack([h[k] for h in obs_history_deque]).unsqueeze(0).to(device)
-                                 for k in obs_history_deque[0].keys()}
-
-            # --- DEFINITIVE FIX for the "Static Video" bug ---
-            # Call the model with the correct keyword arguments
-            with torch.no_grad():
-                action_chunk = policy.sample(
-                    initial_image=initial_image_tensor,
-                    goal_image=goal_image_tensor,
-                    observation_history=obs_history_batch,
-                    scheduler=scheduler,
-                    num_inference_steps=cfg.inference.sampling_steps,
-                    guidance_scale_plan=cfg.inference.guidance_scale_plan,
-                    guidance_scale_obs=cfg.inference.guidance_scale_obs
-                )
-            
-            action = action_chunk[0, 0].cpu().numpy()
-            
-            # Step environment
-            obs, _, terminated, truncated, info = env.step(action)
-            
-            # Record frame
-            frame_rgb = env.render(camera_name="fixed_camera")
-            video_writer.append_data(frame_rgb)
-            
-            # Update history
-            obs_history_deque.append({
-                'image_primary': dataset.transform_primary(Image.fromarray(obs['image_primary'])),
-                'image_wrist': dataset.transform_wrist(Image.fromarray(obs['image_wrist'])),
-                'proprio': torch.from_numpy(obs['proprio']).float()
-            })
-            
-            if terminated or truncated:
-                is_success = info.get('is_success', False)
-                log.info(f"Episode finished at step {step}. Success: {is_success}")
-                break
-        
-        # --- 3c. Cleanup ---
-        all_results.append({'episode_idx': ep_idx, 'success': is_success, 'steps': step + 1})
-        video_writer.close()
-        env.close()
-        log.info(f"Video saved to {video_path}")
-
-    # --- 4. Final Summary ---
-    if all_results:
-        success_rate = np.mean([r['success'] for r in all_results])
-        log.info(f"\n--- Evaluation Summary ---")
-        log.info(f"Success Rate: {success_rate:.3f} across {len(all_results)} episodes.")
-        # Save summary to file
-        with open(output_dir / "summary.json", "w") as f:
-            json.dump({'success_rate': success_rate, 'results': all_results}, f, indent=2)
-
-    log.info(f"Evaluation complete. All outputs saved to: {output_dir}")
+        print("\n>>> RECOMMENDATION: Data requires manual review. Returns vary too wildly.")
 
 if __name__ == "__main__":
-    evaluate()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", type=str, required=True, help="Path to LMDB")
+    args = parser.parse_args()
+    
+    calibrate(args.db)

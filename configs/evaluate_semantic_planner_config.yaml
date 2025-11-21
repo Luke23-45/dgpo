@@ -4,7 +4,7 @@
 defaults:
   - _self_
 
-checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_044.ckpt" # Path to your trained model .ckpt
+checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_071.ckpt" # Path to your trained model .ckpt
 ik_solver_path: "urdf/panda_mujoco_kinematics.urdf" # Path to URDF
 
 # Environment settings
@@ -12,8 +12,8 @@ env:
   xml_path: "envs/panda_pick_place.xml"
   control_mode: "delta"
   
-seed: 1000
-num_episodes: 4
+seed: 1003
+num_episodes: 10
 max_steps: 400
 
 # Output paths (relative to hydra run dir)
