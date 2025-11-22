@@ -1,5 +1,3 @@
-#FILEL: semantic_planner_dataset_post
-
 """
 Semantic Planner Dataset (Explicit Oracle & History-Aware).
 
@@ -33,15 +31,13 @@ class SemanticPlannerDataset(Dataset):
     def __init__(
         self, 
         dataset_path: str, 
-        history_horizon: int = 10, # Increased default for temporal context
+        history_horizon: int = 10, 
         use_aug: bool = False
     ):
         self.dataset_path = dataset_path
         self.history_horizon = history_horizon
         self.use_aug = use_aug
         
-        # We use the reader to get observation chunks (Images/Proprio)
-        # We manually handle action history slicing
         self.reader = ExpertTrajectoryDataset(
             demo_path=dataset_path, 
             observation_horizon=history_horizon, 
@@ -50,7 +46,6 @@ class SemanticPlannerDataset(Dataset):
         
         self.valid_indices = list(range(len(self.reader)))
         
-        # SOTA: Consistent Augmentation Logic
         self.jitter_params = {
             'brightness': 0.3, 'contrast': 0.3, 'saturation': 0.3, 'hue': 0.05
         }
@@ -65,14 +60,10 @@ class SemanticPlannerDataset(Dataset):
         return len(self.valid_indices)
 
     def _apply_consistent_aug(self, images: List[Image.Image]) -> torch.Tensor:
-        """
-        Applies the SAME random jitter to all frames in the history stack
-        to preserve temporal consistency.
-        """
+        """Applies the SAME random jitter to all frames in the history stack."""
         if not self.use_aug or random.random() > 0.5:
             return torch.stack([self.resize_norm(img) for img in images])
 
-        # Generate random parameters ONCE
         fn_idx, b, c, s, h = transforms.ColorJitter.get_params(
             brightness=(max(0, 1-0.3), 1+0.3), 
             contrast=(max(0, 1-0.3), 1+0.3),
@@ -82,7 +73,6 @@ class SemanticPlannerDataset(Dataset):
 
         processed = []
         for img in images:
-            # Apply consistent transform
             img = transforms.functional.adjust_brightness(img, b)
             img = transforms.functional.adjust_contrast(img, c)
             img = transforms.functional.adjust_saturation(img, s)
@@ -92,27 +82,19 @@ class SemanticPlannerDataset(Dataset):
         return torch.stack(processed)
 
     def _get_future_target(self, ep_idx: int, current_t: int, ep_len: int, phases: np.ndarray, poses: np.ndarray) -> np.ndarray:
-        """
-        Scans future phases to find stable subgoal.
-        """
+        """Scans future phases to find stable subgoal."""
         current_phase = phases[current_t]
         target_t = ep_len - 1
         
-        # Scan forward
         for t in range(current_t + 1, ep_len):
             if phases[t] != current_phase:
-                # Found transition
                 next_phase = phases[t]
                 phase_start = t
-                
-                # Find end of next phase
                 phase_end = ep_len - 1
                 for k in range(phase_start + 1, ep_len):
                     if phases[k] != next_phase:
                         phase_end = k
                         break
-                
-                # Target 80% into next phase
                 duration = phase_end - phase_start
                 target_t = phase_start + int(duration * 0.8)
                 break
@@ -134,7 +116,6 @@ class SemanticPlannerDataset(Dataset):
                 )
 
             # --- 2. Load Full Arrays (Cached) ---
-            # We need random access for history slicing and future targeting
             phases = get_full_arr("gt_phase")
             poses = get_full_arr("ee_pose_world")
             actions = get_full_arr("actions")
@@ -145,18 +126,11 @@ class SemanticPlannerDataset(Dataset):
                 advs = np.ones(ep_len, dtype=np.float32)
 
             # --- 3. Extract History Windows ---
-            # We need history from [t_end - H + 1 : t_end + 1]
-            
             # A. Actions History
-            # Action at index `t` creates state `t+1`. 
-            # For state `t_end`, we need actions that led up to it: `t_end-1`, `t_end-2`...
-            # We shift action history by 1 compared to observation history.
             act_start = t_end - self.history_horizon
             act_end = t_end
             
-            # Handle Padding
             if act_start < 0:
-                # Pad with the first action (or zeros)
                 pad_len = abs(act_start)
                 act_slice = actions[0:act_end]
                 first_act = actions[0]
@@ -166,17 +140,28 @@ class SemanticPlannerDataset(Dataset):
                 action_hist = actions[act_start:act_end]
 
             # B. Observations (Images/Proprio) via Reader Chunking
-            # The reader efficiently handles the [t_end-H+1 : t_end+1] slice
             chunk_data, _ = self.reader[idx]
             imgs_np = chunk_data['image_primary']
             proprio_hist = chunk_data['proprio']
 
             # --- 4. Process Images (Consistent Augmentation) ---
             img_list = [Image.fromarray(img) for img in imgs_np]
-            history_tensor = self._apply_consistent_aug(img_list) # (T, C, H, W)
+            history_tensor = self._apply_consistent_aug(img_list) 
             
-            # Goal Image
-            goal_img_np = self.reader.get_goal_image(ep_idx)
+            # --- FIX: Goal Image Handling with Fallback ---
+            try:
+                # Try to get the explicit goal image
+                goal_img_np = self.reader.get_goal_image(ep_idx)
+            except (KeyError, RuntimeError, ValueError):
+                # FALLBACK: If 'goal_image_primary' is missing from index, 
+                # load the LAST frame of 'image_primary' for this episode.
+                meta_img = ep_meta["modalities"]["image_primary"]
+                full_imgs = self.reader._get_full_modality_array(
+                    meta_img["key"], meta_img["compression"], 
+                    meta_img["dtype"], tuple(meta_img["shape"])
+                )
+                goal_img_np = full_imgs[-1]
+
             goal_tensor = self.resize_norm(Image.fromarray(goal_img_np))
 
             # --- 5. Targets ---
@@ -186,16 +171,11 @@ class SemanticPlannerDataset(Dataset):
             current_adv = advs[t_end]
 
             return {
-                # Inputs
-                'initial_image': history_tensor,       # (T, C, H, W)
-                'goal_image': goal_tensor,             # (C, H, W)
-                'proprio_hist': torch.from_numpy(proprio_hist).float(), # (T, D)
-                'action_hist': torch.from_numpy(action_hist).float(),   # (T, D) - NEW KEY
-                
-                # Context
+                'initial_image': history_tensor,       
+                'goal_image': goal_tensor,             
+                'proprio_hist': torch.from_numpy(proprio_hist).float(), 
+                'action_hist': torch.from_numpy(action_hist).float(),   
                 'task_phase': torch.tensor(int(current_phase), dtype=torch.long),
-                
-                # Targets
                 'ground_truth_subgoal_pose': torch.from_numpy(gt_subgoal).float(),
                 'ground_truth_gripper_state': torch.tensor([float(gt_gripper)], dtype=torch.float32),
                 'advantage': torch.tensor([float(current_adv)], dtype=torch.float32)

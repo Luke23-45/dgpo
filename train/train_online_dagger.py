@@ -30,6 +30,7 @@ from PIL import Image
 from torchvision import transforms
 from tqdm import tqdm
 import collections
+
 # Project Imports
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -73,7 +74,7 @@ class DAggerOrchestrator:
 
         # Teacher (Scripted Expert)
         obj_profile = ObjectProfile(size=np.array([0.04, 0.04, 0.04]), grasp_width_normalized=0.6)
-        expert_cfg = ExpertConfig(failure_timeout_steps=1000) # Generous timeout
+        expert_cfg = ExpertConfig(failure_timeout_steps=1000) 
         self.teacher = ScriptedExpert(obj_profile, expert_cfg)
         
         # --- 2. Initialize Environment ---
@@ -102,7 +103,7 @@ class DAggerOrchestrator:
         self.offline_dataset = SemanticPlannerDataset(
             dataset_path=cfg.dataset.train_path,
             history_horizon=self.history_len,
-            use_aug=True
+            use_aug=False
         )
         
         # Transforms
@@ -117,22 +118,34 @@ class DAggerOrchestrator:
         self.STAGNATION_STEPS = 15
         self.last_executed_action = np.zeros(8) # Track previous action for history
         
+        # Ensure checkpoints dir exists
+        os.makedirs("checkpoints", exist_ok=True)
+
     def _get_student_action(self, phase: int, goal_tensor: torch.Tensor) -> Tuple[np.ndarray, float]:
         """
         Forward pass of the Student Model (Base + Adapter).
+        Correctly slices history for Base (Current Frame) vs Adapter (Sequence).
         """
-        # Get History from Window
+        # Get History from Window (1, T, ...)
         hist = self.window.get_history()
         
+        img_hist = hist['initial_image'].to(self.device) # (1, T, C, H, W)
+        prop_hist = hist['proprio_hist'].to(self.device) # (1, T, D)
+        act_hist = hist['action_hist'].to(self.device)   # (1, T, D)
+        
         batch = {
-            'initial_image': hist['initial_image'].to(self.device), # (1, T, C, H, W)
-            'proprio_hist': hist['proprio_hist'].to(self.device),   # (1, T, 22)
-            'action_hist': hist['action_hist'].to(self.device),     # (1, T, 8)
-            'goal_image': goal_tensor,                              # (1, C, H, W)
+            # Base Planner inputs (Last Frame)
+            'initial_image': img_hist[:, -1], 
+            'goal_image': goal_tensor,
+            'task_phase': torch.tensor([phase], device=self.device),
+            'current_proprio': prop_hist[:, -1],
+            
+            # Adapter inputs (History Sequence)
+            'proprio_hist': prop_hist,
+            'action_hist': act_hist
         }
         
         with torch.no_grad():
-            # The Adapter internally calls the Base Planner
             out = self.student(batch)
             
         pose = out['pose'].squeeze().cpu().numpy()
@@ -148,6 +161,7 @@ class DAggerOrchestrator:
         pos_base = R_bw.apply(pose_world[:3] - base_pos)
         rot_base = R_bw * R.from_quat(pose_world[3:])
         return np.concatenate([pos_base, rot_base.as_quat()])
+
 
     def run(self):
         """Main DAgger Loop: Rollout -> Gate -> Aggregate -> Train"""
@@ -170,7 +184,8 @@ class DAggerOrchestrator:
             obs = self.env.get_expert_obs()
             
             # Prepare Goal
-            goal_img_np = obs['goal_image'] if obs['goal_image'] is not None else np.zeros((224, 224, 3), dtype=np.uint8)
+            # Handle goal image resize via Transform (PIL)
+            goal_img_np = obs['goal_image'] if obs['goal_image'] is not None else np.zeros((256, 256, 3), dtype=np.uint8)
             goal_tensor = self.transform(Image.fromarray(goal_img_np)).unsqueeze(0).to(self.device)
             
             done = False
@@ -182,10 +197,15 @@ class DAggerOrchestrator:
             while not done and episode_steps < self.cfg.dagger.max_steps_per_epoch:
                 # --- 2. Update History ---
                 img_np = obs['image_primary']
+                
+                # [CRITICAL FIX] Resize 256x256 (Env) -> 224x224 (Model)
+                # We resize here so the buffer stores the correct size for both Inference and Training
+                img_resized = cv2.resize(img_np, (224, 224), interpolation=cv2.INTER_AREA)
+                
                 proprio = obs['proprio']
                 
                 # Add (Img, Proprio, PrevAction) to sliding window
-                self.window.add(img_np, proprio, self.last_executed_action)
+                self.window.add(img_resized, proprio, self.last_executed_action)
                 
                 # --- 3. Teacher (Oracle) Query ---
                 teacher_pose, teacher_grip, info = self.teacher.get_target_pose(obs)
@@ -236,7 +256,7 @@ class DAggerOrchestrator:
                 hist = self.window.get_history()
                 
                 sample = {
-                    'initial_image': hist['initial_image'].squeeze(0).cpu(),
+                    'initial_image': hist['initial_image'].squeeze(0).cpu(), # Now correctly (T, C, 224, 224)
                     'proprio_hist': hist['proprio_hist'].squeeze(0).cpu(),
                     'action_hist': hist['action_hist'].squeeze(0).cpu(),
                     'goal_image': goal_tensor.squeeze(0).cpu(),
@@ -266,7 +286,7 @@ class DAggerOrchestrator:
                     delta_joints = np.zeros(7)
                 
                 action = np.concatenate([delta_joints, [final_grip]])
-                self.last_executed_action = action # Cache for next step's history
+                self.last_executed_action = action 
                 
                 obs, _, term, trunc, _ = self.env.step(action)
                 episode_steps += 1
@@ -288,24 +308,25 @@ class DAggerOrchestrator:
                 torch.save(self.student.state_dict(), path)
                 log.info(f"Saved Adapter: {path}")
 
+
     def _train_step(self):
         """
         Performs one Gradient Update using Mixed Data.
         Mix: 50% Online (Corrections) + 50% Offline (Replay).
         """
         if len(self.online_buffer.correction_buffer) < self.cfg.dagger.batch_size // 2:
-            return # Not enough errors yet
+            return 
 
         self.student.train()
         
-        # 1. Sample Online (Heavily bias towards corrections)
+        # 1. Sample Online
         batch_online = self.online_buffer.sample_batch(
             batch_size=self.cfg.dagger.batch_size // 2,
             correction_ratio=0.8,
             device=self.device
         )
         
-        # 2. Sample Offline (Random Replay)
+        # 2. Sample Offline
         indices = np.random.randint(0, len(self.offline_dataset), self.cfg.dagger.batch_size // 2)
         offline_samples = [self.offline_dataset[i] for i in indices if self.offline_dataset[i] is not None]
         
@@ -313,15 +334,68 @@ class DAggerOrchestrator:
         from torch.utils.data import default_collate
         batch_offline = default_collate(offline_samples)
         
+        # Move offline to device
+        for k, v in batch_offline.items():
+            batch_offline[k] = v.to(self.device)
+
         # 3. Merge Batches
         input_batch = {}
-        for k in batch_online.keys():
-            if k in batch_offline:
-                t_on = batch_online[k]
-                t_off = batch_offline[k].to(self.device)
-                input_batch[k] = torch.cat([t_on, t_off], dim=0)
+        keys_to_merge = [
+            'initial_image', 'goal_image', 'proprio_hist', 'action_hist',
+            'task_phase', 'ground_truth_subgoal_pose', 'ground_truth_gripper_state'
+        ]
+
+        for k in keys_to_merge:
+            if k not in batch_online or k not in batch_offline:
+                continue
+                
+            t_on = batch_online[k]
+            t_off = batch_offline[k]
+            
+            # --- ROBUST DIMENSION MATCHING ---
+            
+            # Case 1: Scalars (Online (B, 1) vs Offline (B,))
+            if t_on.ndim == 2 and t_off.ndim == 1:
+                t_off = t_off.unsqueeze(1)
+            elif t_on.ndim == 1 and t_off.ndim == 2:
+                t_on = t_on.unsqueeze(1)
+                
+            # Case 2: History Mismatch (B, T, ...) vs (B, ...)
+            elif t_on.ndim == t_off.ndim + 1:
+                repeat_shape = [1] * t_off.ndim
+                repeat_shape[0] = self.history_len 
+                t_off = t_off.unsqueeze(1).repeat(1, *repeat_shape)
+
+            # Fallback: If dimensions match in rank but not size (e.g. B, 1 vs B, 10)
+            if t_on.ndim == t_off.ndim:
+                 if t_on.shape[1] == 1 and t_off.shape[1] > 1:
+                     t_on = t_on.repeat(1, t_off.shape[1], *([1]*(t_on.ndim-2)))
+                 elif t_off.shape[1] == 1 and t_on.shape[1] > 1:
+                     t_off = t_off.repeat(1, t_on.shape[1], *([1]*(t_off.ndim-2)))
+
+            input_batch[k] = torch.cat([t_on, t_off], dim=0)
+            
+        # --- 4. SANITIZE SCALARS FOR BASE MODEL ---
+        # The Base Planner's embeddings expect (B) or (B, 1), NOT (B, 1, 1)
+        # Squeeze extra dimensions from task_phase if present
+        if input_batch['task_phase'].ndim > 1:
+             input_batch['task_phase'] = input_batch['task_phase'].view(-1) # Flatten to (B,) or (B)
+             
+        # --- 5. PREPARE INPUTS ---
+        # Base Planner Needs: Single Frame (Last)
+        # Adapter Needs: Sequence (All)
         
-        # 4. Update
+        img_seq = input_batch['initial_image']
+        prop_seq = input_batch['proprio_hist']
+        
+        # Overwrite/Add keys for Base Planner compatibility
+        input_batch['initial_image'] = img_seq[:, -1]      # Last Frame
+        input_batch['current_proprio'] = prop_seq[:, -1]   # Last Proprio
+        
+        # Restore history for Adapter
+        input_batch['proprio_hist'] = prop_seq
+        
+        # 6. Update
         self.optimizer.zero_grad()
         out = self.student(input_batch)
         
@@ -331,10 +405,12 @@ class DAggerOrchestrator:
         gt_pose = input_batch['ground_truth_subgoal_pose']
         gt_grip = input_batch['ground_truth_gripper_state']
         
+        # Handle potential extra dims in GT
+        if gt_grip.ndim > 2: gt_grip = gt_grip.view(gt_grip.shape[0], -1)
+        if gt_pose.ndim > 2: gt_pose = gt_pose.view(gt_pose.shape[0], -1)
+        
         loss_pose = F.l1_loss(pred_pose, gt_pose)
         loss_grip = F.binary_cross_entropy_with_logits(pred_grip, gt_grip)
-        
-        # Regularization: Penalize large deltas (Be lazy)
         loss_reg = out['delta_magnitude'] * 0.01
         
         total_loss = loss_pose + loss_grip + loss_reg

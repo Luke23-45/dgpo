@@ -40,7 +40,7 @@ dagger:
   
   # Buffer Size
   # How many recent correction samples to keep in RAM
-  buffer_capacity: 5000
+  buffer_capacity: 4000
   
   # Training Loop Settings
   num_epochs: 20                # Number of full "Rollout -> Train" cycles
