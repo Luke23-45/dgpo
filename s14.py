@@ -1,148 +1,225 @@
-# FILE: scripts/verify_dataset_integrity.py
-# (SOTA Diagnostic Tool)
+# FILE: evaluate_hybrid_planner.py
+# (Diagnostic: Neural Motion + Heuristic Grasping)
 
 """
-Dataset Integrity Validator.
+Hybrid Evaluation System.
 
-Run this BEFORE training to ensure:
-1. The LMDB data is uncorrupted.
-2. The Advantage-Weighted Regression (AWR) statistics are valid.
-3. The Semantic Phase labels are present and logical.
-4. The Gripper interaction labels are balanced.
+Diagnoses the vision backbone by decoupling the Grasp Logic.
+- Neural Network: Controls the Arm (7D Pose).
+- Geometric Rules: Control the Gripper (Open/Close).
+
+If this script succeeds, it proves the Vision Model understands spatial structure,
+and the only failure point in previous tests was the Gripper Decision Head.
 """
 
-import argparse
 import logging
+import os
 import sys
+import cv2
+import hydra
+import mujoco
 import numpy as np
 import torch
+import pytorch_lightning as pl
+from omegaconf import DictConfig
+from PIL import Image
+from torchvision import transforms
 from tqdm import tqdm
 from pathlib import Path
+from contextlib import contextmanager
+from scipy.spatial.transform import Rotation as R
 
-# Add project root to path
+# --- Imports ---
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
 
-from utils.semantic_planner_dataset import SemanticPlannerDataset
+from envs.panda_env import PandaEnv
+from models.semantic_planner import SemanticPlanner
+from train.train_semantic_planner import SemanticPlannerLightningModule
+from utils.ik_solver import IKSolver
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-log = logging.getLogger("DataCheck")
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("HybridEval")
 
-def check_tensor_stats(name, tensor):
-    """Helper to print tensor stats."""
-    if isinstance(tensor, torch.Tensor):
-        data = tensor.float().numpy()
-    else:
-        data = np.array(tensor)
-    
-    return {
-        "shape": data.shape,
-        "min": float(np.min(data)),
-        "max": float(np.max(data)),
-        "mean": float(np.mean(data)),
-        "std": float(np.std(data))
-    }
+# --- Heuristic Policy ---
+class GeometricGraspPolicy:
+    """Deterministic rules for opening/closing the gripper."""
+    def __init__(self):
+        self.is_holding = False
+        self.GRASP_THRESH = 0.03  # 3cm trigger
+        self.DROP_THRESH = 0.05   # 5cm trigger
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, required=True, help="Path to training.lmdb")
-    parser.add_argument("--samples", type=int, default=2000, help="Number of random samples to check")
-    args = parser.parse_args()
+    def reset(self):
+        self.is_holding = False
 
-    # 1. Load Dataset
-    log.info(f"Loading Dataset from: {args.dataset}")
-    try:
-        # Disable augmentation for pure data inspection
-        ds = SemanticPlannerDataset(args.dataset, use_aug=False)
-    except Exception as e:
-        log.error(f"CRITICAL: Failed to initialize dataset class. Error: {e}")
-        sys.exit(1)
+    def compute_command(self, obs: dict) -> float:
+        # State
+        ee_pos = obs['ee_pose_world'][:3]
+        obj_pos = obs['object_pos_world']
+        goal_pos = obs['goal_pos_world']
+        
+        dist_obj = np.linalg.norm(ee_pos - obj_pos)
+        dist_goal = np.linalg.norm(obj_pos - goal_pos)
+        
+        cmd = 1.0 # Default Open
 
-    total_len = len(ds)
-    log.info(f"Dataset Size: {total_len} frames")
-
-    # 2. Random Sampling Loop
-    log.info(f"Inspecting {args.samples} random samples...")
-    indices = np.random.choice(total_len, args.samples, replace=False)
-    
-    advantages = []
-    gripper_states = []
-    phases = []
-    pose_deltas = []
-
-    for idx in tqdm(indices):
-        try:
-            sample = ds[idx]
-            if sample is None:
-                log.error(f"Sample {idx} returned None! Data corruption detected.")
-                continue
-
-            # Collect Stats
-            advantages.append(sample['advantage'].item())
-            gripper_states.append(sample['ground_truth_gripper_state'].item())
-            phases.append(sample['task_phase'].item())
-
-            # Check Geometric Logic
-            # Calculate distance between Current Proprio (State) and Ground Truth Subgoal (Target)
-            # Note: Proprio is [qpos, qvel...], we need EE pose comparison.
-            # Since dataset gives us tensors, we'll roughly estimate activity by checking if target != 0
+        if not self.is_holding:
+            if dist_obj < self.GRASP_THRESH:
+                cmd = -1.0 # Close
+                # Assume success for next step if close
+                self.is_holding = True 
+        else:
+            cmd = -1.0 # Keep Closed
+            # Release conditions
+            if dist_goal < self.DROP_THRESH and obs['object_pos_world'][2] > 0.41:
+                cmd = 1.0 # Open
+                self.is_holding = False
             
-            target_pose = sample['ground_truth_subgoal_pose']
-            # Sanity check: Target should not be all zeros
-            if torch.sum(torch.abs(target_pose)) < 1e-3:
-                log.warning(f"Sample {idx}: Zero-Vector Subgoal Pose detected.")
+            # Lost object check
+            if obs['is_grasped'][0] < 0.1:
+                self.is_holding = False
+        
+        return cmd
 
-        except Exception as e:
-            log.error(f"Error processing sample {idx}: {e}")
-
-    # 3. Report Findings
-
-    # --- A. Advantage Analysis ---
-    adv_np = np.array(advantages)
-    log.info("-" * 40)
-    log.info("1. ADVANTAGE DISTRIBUTION (AWR)")
-    log.info(f"   Mean: {np.mean(adv_np):.4f} (Should be approx 0.0)")
-    log.info(f"   Std:  {np.std(adv_np):.4f}")
-    log.info(f"   Min:  {np.min(adv_np):.4f}")
-    log.info(f"   Max:  {np.max(adv_np):.4f}")
+# --- Simple Smoother ---
+class PoseSmoother:
+    def __init__(self, alpha=0.5):
+        self.alpha = alpha
+        self.pose = None
     
-    # Warning if Advantages are broken
-    if np.max(adv_np) < 1.0:
-        log.warning("   ⚠️  Max Advantage is very low. Model might not differentiate good vs bad actions.")
-    else:
-        log.info("   ✅ Advantage spread looks healthy.")
+    def reset(self):
+        self.pose = None
+        
+    def update(self, raw_pose):
+        if self.pose is None:
+            self.pose = raw_pose.copy()
+        else:
+            self.pose[:3] = self.alpha * raw_pose[:3] + (1-self.alpha)*self.pose[:3]
+            # Slerp or simplistic quat mix
+            self.pose[3:] = self.alpha * raw_pose[3:] + (1-self.alpha)*self.pose[3:]
+            norm = np.linalg.norm(self.pose[3:])
+            if norm > 1e-6: self.pose[3:] /= norm
+        return self.pose
 
-    # --- B. Gripper Analysis ---
-    grip_np = np.array(gripper_states)
-    closed_ratio = np.sum(grip_np > 0.5) / len(grip_np)
-    log.info("-" * 40)
-    log.info("2. GRIPPER CLASS BALANCE")
-    log.info(f"   % Closed (1.0): {closed_ratio*100:.2f}%")
-    log.info(f"   % Open   (0.0): {(1-closed_ratio)*100:.2f}%")
+# --- Virtual Goal (Standard) ---
+@contextmanager
+def render_virtual_goal(env: PandaEnv, goal_pos: np.ndarray):
+    saved = env.get_mj_state()
+    try:
+        # Move object
+        obj_addr = env.model.jnt_qposadr[env.object_joint_id]
+        curr_quat = env.data.qpos[obj_addr+3 : obj_addr+7].copy()
+        env.data.qpos[obj_addr:obj_addr+3] = goal_pos
+        env.data.qpos[obj_addr+3:obj_addr+7] = curr_quat
+        
+        # Move robot (Home)
+        env.data.qpos[:7] = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
+        env.data.qpos[7:9] = 0.04
+        
+        mujoco.mj_forward(env.model, env.data)
+        yield
+    finally:
+        env.set_mj_state(saved)
+
+# --- Main Runner ---
+@hydra.main(version_base=None, config_path="./configs", config_name="evaluate_semantic_planner_config")
+def main(cfg: DictConfig):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    if closed_ratio < 0.05:
-        log.error("   ❌ CRITICAL: < 5% Positive Gripper Labels. The model will collapse to 'Always Open'.")
-        log.error("      Fix: Re-run 'preprocess_advantages.py' or check expert logic.")
-    elif closed_ratio > 0.40:
-         log.warning("   ⚠️  Unusually high grasp ratio. Ensure 'is_grasped' logic isn't inverted.")
-    else:
-        log.info("   ✅ Class balance is within expected range for Pick & Place (10-30%).")
-
-    # --- C. Phase Analysis ---
-    phase_counts = np.bincount(phases, minlength=5)
-    log.info("-" * 40)
-    log.info("3. TASK PHASES")
-    for i, count in enumerate(phase_counts):
-        log.info(f"   Phase {i}: {count} samples ({count/len(phases)*100:.1f}%)")
+    # 1. Load Model
+    pl_module = SemanticPlannerLightningModule.load_from_checkpoint(
+        cfg.checkpoint_path, map_location=device
+    )
+    model = pl_module.model.eval().to(device)
+    train_cfg = pl_module.cfg
     
-    if phase_counts[1] == 0: # Grasp Phase
-         log.error("   ❌ CRITICAL: No 'Grasp' (Phase 1) samples found. The Phase transition logic is broken.")
-
-    log.info("-" * 40)
-    log.info("VERIFICATION COMPLETE.")
+    # 2. Setup Env
+    env = PandaEnv(xml_path=train_cfg.dataset.get("xml_path", "envs/panda_pick_place.xml"), control_mode='delta')
+    ik_solver = IKSolver(urdf_path=cfg.ik_solver_path)
+    grasper = GeometricGraspPolicy()
+    smoother = PoseSmoother()
+    
+    # Calib
+    sim_steps = 20
+    dt = env.model.opt.timestep * sim_steps
+    max_dq = (env.ACTION_SCALING_FACTOR / dt) * 3.0 # 3x Boost
+    
+    transform = transforms.Compose([
+        transforms.Resize((224, 224), antialias=True),
+        transforms.ToTensor()
+    ])
+    
+    video_file = "hybrid_eval.mp4"
+    writer = cv2.VideoWriter(video_file, cv2.VideoWriter_fourcc(*'mp4v'), 30, (256, 256))
+    
+    success_count = 0
+    
+    for ep in tqdm(range(cfg.num_episodes)):
+        seed = cfg.seed + ep
+        env.reset(seed=seed)
+        obs = env.get_expert_obs()
+        grasper.reset()
+        smoother.reset()
+        
+        # Goal Image
+        with render_virtual_goal(env, obs['goal_pos_world']):
+            g_img = env.render()
+        goal_t = transform(Image.fromarray(g_img)).unsqueeze(0).to(device)
+        
+        done = False
+        
+        for step in range(cfg.max_steps):
+            # 1. Heuristic Control
+            gripper_cmd = grasper.compute_command(obs)
+            
+            # 2. Neural Planning (Trajectory)
+            img_t = transform(Image.fromarray(obs['image_primary'])).unsqueeze(0).to(device)
+            prop_t = torch.from_numpy(obs['proprio']).float().unsqueeze(0).to(device)
+            
+            # Feed 'Task Phase' to model based on Heuristic State
+            # If holding -> Transport (2). If not -> Reach (0).
+            phase = 2 if grasper.is_holding else 0
+            
+            with torch.no_grad():
+                pred = model({
+                    'initial_image': img_t, 'goal_image': goal_t,
+                    'task_phase': torch.tensor([phase], device=device),
+                    'current_proprio': prop_t
+                })
+                
+            raw_pose = pred['pose'].squeeze().cpu().numpy()
+            target_pose = smoother.update(raw_pose)
+            
+            # 3. Execution
+            try:
+                d_arm = ik_solver.compute_delta_action(target_pose, env.model, env.data, 
+                                                     env.ee_site_id, np.arange(7), dt, max_dq)
+            except: d_arm = np.zeros(7)
+            
+            action = np.concatenate([d_arm, [gripper_cmd]])
+            obs, _, _, _, _ = env.step(action)
+            obs = env.get_expert_obs() # Ground Truth Update
+            
+            # Render
+            frame = cv2.cvtColor(env.render(), cv2.COLOR_RGB2BGR)
+            cv2.putText(frame, f"Mode: {'HOLD' if grasper.is_holding else 'REACH'}", (10,20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+            writer.write(frame)
+            
+            # Check Success
+            dist = np.linalg.norm(obs['object_pos_world'] - obs['goal_pos_world'])
+            if dist < 0.05 and obs['object_pos_world'][2] > 0.41:
+                success_count += 1
+                done = True
+                break
+                
+        if done: log.info(f"Ep {ep}: Success")
+        else: log.info(f"Ep {ep}: Fail")
+        
+    writer.release()
+    env.close()
+    log.info(f"Final Success: {success_count}/{cfg.num_episodes}")
 
 if __name__ == "__main__":
     main()

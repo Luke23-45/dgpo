@@ -516,7 +516,7 @@ def main(cfg: DictConfig) -> None:
         
         try:
             # Load raw checkpoint
-            checkpoint = torch.load(resume_path, map_location=model.device)
+            checkpoint = torch.load(resume_path, map_location=model.device, weights_only=False)
             state_dict = checkpoint['state_dict']
             
             # [CRITICAL FIX] Filter out keys with size mismatches (Token Embeddings)
@@ -533,14 +533,21 @@ def main(cfg: DictConfig) -> None:
                     # Key doesn't exist in new model (e.g. old buffers), ignore
                     pass
             
-            # Inject filtered weights
+
             keys = model.load_state_dict(filtered_state_dict, strict=False)
             
             logger.info(f"Weights Loaded. Missing Keys (Expected for v8 new tokens): {keys.missing_keys}")
-            logger.info("Optimizer State: DISCARDED (AdamW will re-initialize).")
             
-            # We set ckpt_arg to None because we manually loaded the weights.
-            ckpt_arg = None 
+            # --- [THE FIX] ---
+            # If the architecture matches (no missing keys), we generally want to RESUME training state.
+            # If we are migrating architectures (missing keys exist), we usually want to RESET (Warm Start).
+            
+            if len(keys.missing_keys) == 0 and len(keys.unexpected_keys) == 0:
+                logger.info("Architecture match detected. Triggering FULL RESUME (Epoch + Optimizer).")
+                ckpt_arg = resume_path  # <--- Pass path to trainer.fit to restore Epoch/Optimizer
+            else:
+                logger.info("Architecture mismatch detected (Migration). Performing WARM START (Epoch 0).")
+                ckpt_arg = None
             
         except Exception as e:
             logger.error(f"Surgical migration failed: {e}. Aborting.")

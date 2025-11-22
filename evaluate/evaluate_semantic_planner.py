@@ -56,7 +56,7 @@ from envs.panda_env import PandaEnv
 from models.semantic_planner import SemanticPlanner
 from train.train_semantic_planner import SemanticPlannerLightningModule
 from utils.ik_solver import IKSolver
-
+from scipy.spatial.transform import Rotation as R
 # --- Configuration & Logging ---
 logging.basicConfig(
     level=logging.INFO,
@@ -148,21 +148,20 @@ class MetricsLogger:
 class StateEstimator:
     """
     Finite State Machine (FSM) for Task Phase Inference.
-    
-    Uses HYSTERESIS (Schmidt Trigger Logic) to prevent 'Phase Flicker'
-    when the robot hovers near a decision boundary.
+    Uses HYSTERESIS to prevent 'Phase Flicker' and handles Grasp Triggering.
     """
     def __init__(self):
         self.current_phase = 0
         self.prev_is_grasped = False
         
-        # --- Tuned Thresholds ---
-        # Hover Height of expert is 0.10m. We must trigger Grasp BEFORE that.
-        # Enter Grasp if < 15cm. Exit Grasp only if > 20cm.
-        self.thresh_grasp_enter = 0.15 
+        # Distances to Object (Meters)
+        # Phase 0 -> 1: When we get close (12cm)
+        self.thresh_grasp_enter = 0.12 
+        # Phase 1 -> 0: If we drift away (20cm)
         self.thresh_grasp_exit  = 0.20
         
-        self.thresh_goal_enter = 0.10
+        # Distance to Goal (Meters)
+        self.thresh_goal_enter = 0.05
 
     def reset(self):
         self.current_phase = 0
@@ -170,11 +169,11 @@ class StateEstimator:
 
     def update(self, obs: Dict[str, Any]) -> int:
         """
-        Phases: 0:Reach, 1:Grasp, 2:Transport, 3:Place, 4:Retract
+        Phases: 0:Reach, 1:Grasp/Lift, 2:Transport, 3:Place, 4:Retract
         """
+        # Fix: PandaEnv returns a 1-element array for this key
         is_grasped = obs['is_grasped'][0] > 0.5
         
-        # Extract geometry
         ee_pos = obs['ee_pose_world'][:3]
         obj_pos = obs['object_pos_world']
         goal_pos = obs['goal_pos_world']
@@ -182,35 +181,37 @@ class StateEstimator:
         dist_ee_obj = np.linalg.norm(ee_pos - obj_pos)
         dist_obj_goal = np.linalg.norm(obj_pos - goal_pos)
         
-        # FSM Transitions
-        if not is_grasped:
-            if self.prev_is_grasped:
-                # Edge Case: Dropped Object / Released at Goal
-                if dist_obj_goal < self.thresh_goal_enter:
-                    self.current_phase = 4 # Success -> Retract
-                else:
-                    self.current_phase = 0 # Failure -> Reach
-            else:
-                # Normal Approach Logic
-                if self.current_phase == 0: # Reaching
-                    if dist_ee_obj < self.thresh_grasp_enter:
-                        self.current_phase = 1
-                elif self.current_phase == 1: # Pre-Grasp
-                    if dist_ee_obj > self.thresh_grasp_exit:
-                        self.current_phase = 0
-                elif self.current_phase >= 2:
-                    # If we lost the object in later phases, restart
-                    self.current_phase = 0
-                    
-        else: # Is Grasped
+        # --- TRANSITION LOGIC (Fixed Deadlock) ---
+        if is_grasped:
+            self.prev_is_grasped = True
             if dist_obj_goal < self.thresh_goal_enter:
                 self.current_phase = 3 # Place
             else:
                 self.current_phase = 2 # Transport
-        
-        self.prev_is_grasped = is_grasped
-        return self.current_phase
+        else:
+            # Not physically grasped
+            if self.prev_is_grasped:
+                # Dropped or Placed
+                if dist_obj_goal < self.thresh_goal_enter:
+                    self.current_phase = 4 # Success / Retract
+                else:
+                    self.current_phase = 0 # Failure / Restart Reach
+                self.prev_is_grasped = False
+            else:
+                # Standard Approach
+                if self.current_phase == 0: # Reach
+                    # Force transition to Grasp Phase (1) when close enough
+                    if dist_ee_obj < self.thresh_grasp_enter:
+                        self.current_phase = 1
+                elif self.current_phase == 1: # Grasp Attempt
+                    # Only revert to Reach if we drift far away
+                    if dist_ee_obj > self.thresh_grasp_exit:
+                        self.current_phase = 0
+                elif self.current_phase >= 2:
+                    # Lost object mid-air
+                    self.current_phase = 0
 
+        return self.current_phase
 
 # ==============================================================================
 # 3. CORE COMPONENT: TRAJECTORY SMOOTHER
@@ -284,36 +285,116 @@ class TrajectorySmoother:
 # 4. UTILITY: VIRTUAL GOAL RENDERING
 # ==============================================================================
 
+
+def _mujoco_to_scipy(quat_wxyz: np.ndarray) -> np.ndarray:
+    """Helper: Convert MuJoCo WXYZ -> Scipy XYZW."""
+    return np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])
+
+def calculate_retract_joints(env: PandaEnv, ik_solver: IKSolver, target_pos_world: np.ndarray, object_quat_wxyz: np.ndarray) -> np.ndarray:
+    """
+    Calculates joint angles for the robot to hover above the goal,
+    ALIGNED with the object's orientation (Expert behavior).
+    """
+    # 1. Define Ideal Position (Hover)
+    hover_z = 0.55 
+    target_pos = np.array([target_pos_world[0], target_pos_world[1], hover_z])
+    
+    # 2. Define Ideal Orientation (Aligned with Cube)
+    # The Expert aligns the gripper faces with the cube faces.
+    # Object Frame: Z is Up.
+    # Gripper Frame: Z is Approach (Down).
+    # To match faces: We take Object Rotation and rotate 180 deg around X-axis (flip upside down).
+    q_obj = _mujoco_to_scipy(object_quat_wxyz)
+    r_obj = R.from_quat(q_obj)
+    
+    # Apply 180 flip to point gripper down while keeping Yaw alignment
+    r_target = r_obj * R.from_euler('x', 180, degrees=True)
+    target_matrix = r_target.as_matrix()
+
+    # 3. Transform World -> Robot Base Frame
+    base_pos, base_quat_xyzw = env.get_base_pose()
+    
+    # Create transformation matrices
+    R_base_world = R.from_quat(base_quat_xyzw).as_matrix()
+    T_base_world = np.eye(4)
+    T_base_world[:3, :3] = R_base_world
+    T_base_world[:3, 3] = base_pos
+    
+    # Invert to get World -> Base
+    T_world_base = np.linalg.inv(T_base_world)
+    
+    # Transform Target Position
+    target_pos_homo = np.append(target_pos, 1.0)
+    target_pos_in_base = (T_world_base @ target_pos_homo)[:3]
+    
+    # Transform Target Orientation
+    target_rot_in_base = T_world_base[:3, :3] @ target_matrix
+
+    # 4. Solve Inverse Kinematics
+    current_joints = env.data.qpos[:7].copy()
+    initial_guess = [0.0] * len(ik_solver.chain.links)
+    for i, val in enumerate(current_joints):
+        if i < len(ik_solver._active_idx):
+            initial_guess[ik_solver._active_idx[i]] = val
+
+    full_joints = ik_solver.chain.inverse_kinematics(
+        target_position=target_pos_in_base,
+        target_orientation=target_rot_in_base,
+        orientation_mode="all",
+        initial_position=initial_guess
+    )
+    
+    final_joints = np.array([full_joints[i] for i in ik_solver._active_idx])
+    low, high = env.get_action_space_limits()
+    return np.clip(final_joints, low[:7], high[:7])
+
 @contextmanager
-def render_virtual_goal(env: PandaEnv, goal_pos: np.ndarray):
+def render_virtual_goal(env: PandaEnv, ik_solver: IKSolver, goal_pos_world: np.ndarray):
     """
-    A physics-engine trick to 'hallucinate' the goal state.
-    1. Save current joint state.
-    2. Teleport object to goal position.
-    3. Forward Kinematics (without stepping time).
-    4. Render Image.
-    5. Restore joint state.
+    Context manager that teleports BOTH the object AND the robot
+    to a mathematically perfect 'Task Complete' state.
     """
-    # Backup
     saved_qpos = env.data.qpos.copy()
     saved_qvel = env.data.qvel.copy()
-    
+    saved_ctrl = env.data.ctrl.copy()
+
     try:
-        # Manipulate State
-        obj_qpos_adr = env.model.jnt_qposadr[env.object_joint_id]
-        # Preserve orientation, move position
-        current_quat = env.data.qpos[obj_qpos_adr+3:obj_qpos_adr+7].copy()
-        env.data.qpos[obj_qpos_adr:obj_qpos_adr+3] = goal_pos
-        env.data.qpos[obj_qpos_adr+3:obj_qpos_adr+7] = current_quat
+        # --- A. Teleport Object ---
+        obj_addr = env.model.jnt_qposadr[env.object_joint_id]
+        current_obj_quat = env.data.qpos[obj_addr+3 : obj_addr+7].copy()
+        
+        # Perfect placement on table (Z ~ 0.42)
+        perfect_obj_pos = goal_pos_world.copy()
+        if perfect_obj_pos[2] < 0.41: 
+            perfect_obj_pos[2] = 0.42 
+            
+        env.data.qpos[obj_addr : obj_addr+3] = perfect_obj_pos
+        env.data.qpos[obj_addr+3 : obj_addr+7] = current_obj_quat 
+
+        # --- B. Teleport Robot (Aligned with Object) ---
+        # Pass the object's orientation to the calculator
+        target_joints = calculate_retract_joints(env, ik_solver, perfect_obj_pos, current_obj_quat)
+        
+        env.data.qpos[:7] = target_joints
+        
+        # --- C. Set Gripper to Open ---
+        env.data.qpos[7] = 0.04
+        env.data.qpos[8] = 0.04
+
+        # --- D. Stabilize ---
+        env.data.qvel[:] = 0.0
+        env.data.ctrl[:7] = target_joints
+        env.data.ctrl[7] = 0.04
         
         mujoco.mj_forward(env.model, env.data)
+        
         yield
+
     finally:
-        # Restore
         env.data.qpos[:] = saved_qpos
         env.data.qvel[:] = saved_qvel
+        env.data.ctrl[:] = saved_ctrl
         mujoco.mj_forward(env.model, env.data)
-
 
 # ==============================================================================
 # 5. THE EVALUATOR ENGINE
@@ -327,46 +408,53 @@ class AWSPEvaluator:
         self.cfg = cfg
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # A. Load Components
-        self.model, self.train_cfg = self._load_model()
-        self.env = self._init_env()
-        self.ik_solver = IKSolver(urdf_path=cfg.ik_solver_path)
+        # 1. Load Model
+        log.info(f"Loading Checkpoint: {self.cfg.checkpoint_path}")
+        pl_module = SemanticPlannerLightningModule.load_from_checkpoint(
+            self.cfg.checkpoint_path, map_location=self.device, strict=True
+        )
+        self.model = pl_module.model.eval().to(self.device)
+        self.train_cfg = pl_module.cfg
         
-        # B. Calibrate Control Frequencies
-        # We must match the exact simulation timing used in training data
-        self.sim_substeps = 20
-        self.effective_dt = self.env.model.opt.timestep * self.sim_substeps
+        # 2. Init Environment
+        self.env = self._init_env()
+        
+        # 3. Init IK Solver
+        ik_path = self.cfg.get("urdf_path", "urdf/panda_mujoco_kinematics.urdf")
+        self.ik_solver = IKSolver(urdf_path=ik_path)
+        
+        # 4. CRITICAL: Calibrate Control Frequencies
+        # PandaEnv (production version) steps physics 20 times per control step.
+        # We MUST hardcode this to match panda_env.py logic.
+        SIM_SUBSTEPS = 20 
+        self.effective_dt = self.env.model.opt.timestep * SIM_SUBSTEPS
+        
+        # Calculate Max Joint Velocity based on Env Scaling
+        # This ensures the IK solver doesn't request speeds the Sim cuts in half.
         self.max_dq = self.env.ACTION_SCALING_FACTOR / self.effective_dt
         
         log.info(f"Control Calibration: dt={self.effective_dt:.4f}s | Max Joint Vel (dq)={self.max_dq:.2f}")
 
-        # C. Setup Image Transforms
+        # 5. Components
         self.transform = transforms.Compose([
             transforms.Resize((224, 224), antialias=True),
             transforms.ToTensor()
         ])
-
-        # D. Logic Components
         self.state_estimator = StateEstimator()
         self.smoother = TrajectorySmoother(alpha_pos=0.5, alpha_grip=0.2)
 
-    def _load_model(self) -> Tuple[SemanticPlanner, DictConfig]:
-        log.info(f"Loading Checkpoint: {self.cfg.checkpoint_path}")
-        if not os.path.exists(self.cfg.checkpoint_path):
-            raise FileNotFoundError(f"Checkpoint missing: {self.cfg.checkpoint_path}")
-            
-        pl_module = SemanticPlannerLightningModule.load_from_checkpoint(
-            self.cfg.checkpoint_path, map_location=self.device, strict=True
-        )
-        return pl_module.model.eval().to(self.device), pl_module.cfg
-
     def _init_env(self) -> PandaEnv:
-        # Use config paths or fallback
-        xml = self.train_cfg.dataset.get('xml_path', 'envs/panda_pick_place.xml')
-        log.info(f"Creating PandaEnv from {xml}...")
+        # PRIORITY: Use Eval Config XML -> Fallback to Train Config -> Default
+        # This fixes the "Config Disconnect" error
+        xml_path = self.cfg.get("xml_path", None)
+        if xml_path is None:
+            xml_path = self.train_cfg.dataset.get('xml_path', 'envs/panda_pick_place.xml')
+            
+        log.info(f"Creating PandaEnv from: {xml_path}")
         return PandaEnv(
-            xml_path=xml,
-            control_mode='delta'
+            xml_path=xml_path,
+            control_mode='delta',
+            render_mode="rgb_array"
         )
 
     def run(self):
@@ -395,12 +483,17 @@ class AWSPEvaluator:
             for ep_idx in tqdm(range(self.cfg.num_episodes), desc="Simulating"):
                 # 1. Episode Reset
                 seed = self.cfg.seed + ep_idx if not self.cfg.eval_static_scene else self.cfg.seed
-                obs, _ = self.env.reset(seed=seed)
+                
+                # PATCH: Reset environment, then IMMEDIATELY fetch expert observation
+                # so the Oracle has access to ground truth positions.
+                self.env.reset(seed=seed)
+                obs = self.env.get_expert_obs() 
+
                 self.state_estimator.reset()
                 self.smoother.reset()
 
                 # 2. Dream the Goal
-                with render_virtual_goal(self.env, obs['goal_pos_world']):
+                with render_virtual_goal(self.env,self.ik_solver,obs['goal_pos_world']):
                     goal_img_np = self.env.render()
                 goal_tensor = self.transform(Image.fromarray(goal_img_np)).unsqueeze(0).to(self.device)
 
@@ -449,6 +542,7 @@ class AWSPEvaluator:
                     action = np.concatenate([delta_joints, [gripper_cmd]])
 
                     # --- Physics Step ---
+                    
                     obs, _, terminated, truncated, info = self.env.step(action)
 
                     # --- Metrics & Success Check ---

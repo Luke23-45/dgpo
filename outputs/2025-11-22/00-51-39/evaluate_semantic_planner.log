@@ -1,0 +1,16 @@
+[2025-11-22 00:51:39,446][AWSP_Eval][INFO] - Loading Checkpoint: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_047.ckpt
+[2025-11-22 00:51:41,652][models.semantic_planner][INFO] - [SemanticPlanner] Initializing v8.0 (Disentangled) with config: SemanticPlannerConfig(proprio_dim=22, vision_backbone_model='google/siglip-base-patch16-224', vision_feature_dim=768, fusion_transformer_layers=4, fusion_transformer_heads=8, dim_feedforward_ratio=4, num_task_phases=5, dropout=0.1, phase_dropout_prob=0.3)
+[2025-11-22 00:51:41,652][models.semantic_planner][INFO] - Loading Vision Backbone: google/siglip-base-patch16-224
+[2025-11-22 00:51:44,045][models.semantic_planner][INFO] - Initializing custom modules (Skipping Vision Backbone)...
+[2025-11-22 00:51:44,045][models.semantic_planner][INFO] - Skipped initialization for: vision_backbone
+[2025-11-22 00:51:44,373][models.semantic_planner][INFO] - [SemanticPlanner] Initialization Complete.
+[2025-11-22 00:51:47,155][AWSP_Eval][INFO] - Creating PandaEnv from: envs/panda_pick_place.xml
+[2025-11-22 00:51:52,925][utils.ik_solver][INFO] - Kinematic chain loaded and configured.
+[2025-11-22 00:51:52,926][AWSP_Eval][INFO] - Control Calibration: dt=0.0100s | Max Joint Vel (dq)=50.00
+[2025-11-22 00:51:52,928][AWSP_Eval][INFO] - Writing Video -> C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\2025-11-22\00-51-39\evaluation_video.mp4
+[2025-11-22 00:51:52,929][AWSP_Eval][INFO] - Writing CSV -> C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\2025-11-22\00-51-39\evaluation_metrics.csv
+[2025-11-22 00:54:21,017][AWSP_Eval][INFO] - Shutting down evaluation resources...
+[2025-11-22 00:54:21,143][AWSP_Eval][INFO] - ----------------------------------------
+[2025-11-22 00:54:21,144][AWSP_Eval][INFO] - EVALUATION SUMMARY: 0.0% Success Rate
+[2025-11-22 00:54:21,144][AWSP_Eval][INFO] - Logs: C:\Users\Hellx\Documents\Programming\python\Project\redhot\outputs\2025-11-22\00-51-39\evaluation_metrics.csv
+[2025-11-22 00:54:21,145][AWSP_Eval][INFO] - ----------------------------------------

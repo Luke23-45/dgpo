@@ -1,0 +1,11 @@
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_047.ckpt
+ik_solver_path: urdf/panda_mujoco_kinematics.urdf
+env:
+  xml_path: envs/panda_pick_place.xml
+  control_mode: delta
+seed: 1003
+num_episodes: 4
+max_steps: 400
+output_video_path: evaluation_video.mp4
+output_csv_path: evaluation_metrics.csv
+eval_static_scene: false

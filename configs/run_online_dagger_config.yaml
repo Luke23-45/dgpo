@@ -1,0 +1,67 @@
+# FILE: configs/run_online_dagger_config.yaml
+# (Definitive, SOTA, Online Learning Configuration)
+
+defaults:
+  - _self_
+
+# Global Seed (Different from pre-training to ensure fresh rollouts)
+seed: 100
+
+# --- Paths ---
+# [CRITICAL] Point this to your best Pre-Trained Checkpoint
+model_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_049.ckpt" 
+
+# The original Expert data (Acts as the "Anchor" to prevent catastrophic forgetting)
+static_dataset_path: "/content/training_data_local/training.lmdb"
+
+# Physics Asset
+ik_solver_path: "urdf/panda_mujoco_kinematics.urdf"
+
+# --- DAgger Orchestration Settings ---
+dagger:
+  num_rounds: 5                 # Number of Rollout -> Train cycles
+  
+  # Interaction Phase
+  rollout_episodes_per_round: 20 # Episodes the Student drives per round
+                                 # 20 episodes * 300 steps = ~6000 new frames max
+  
+  # Memory
+  buffer_capacity: 10000         # Max frames in RAM (Ring Buffer). 
+                                 # Prevents OOM. Oldest corrections are dropped first.
+  
+  # Data Mixing (The Secret Sauce)
+  mix_ratio: 0.3                 # Probability of sampling from Online Buffer.
+                                 # 30% of every batch will be specific corrections.
+                                 # 70% will be perfect expert data.
+
+  # Advantage Injection
+  # We hardcode a high advantage for corrections because the Expert represents the Ideal Policy.
+  # AWR Weight w = exp(10.0 / 5.0) = e^2 = ~7.4. This ensures the model pays attention.
+  correction_advantage: 10.0     
+
+  # Update Phase
+  epochs_per_round: 5            # Short, aggressive fine-tuning bursts.
+
+# --- Training Hyperparameters (Fine-Tuning Mode) ---
+training:
+  batch_size: 64                 # Smaller batch size is fine for fine-tuning
+  num_workers: 2                 # DataLoader workers
+  
+  # Learning Rate is 10x lower than pre-training (1e-4 -> 1e-5)
+  # This prevents destroying the features learned during pre-training.
+  lr: 1e-5
+  weight_decay: 1e-6
+
+  # AWR Parameters (Consistent with pre-training)
+  awr_temperature: 5.0
+  awr_max_weight: 20.0
+  
+  loss_weights:
+    lambda_gripper: 2.0          # Maintain high priority on gripper correctness
+
+# --- Logging ---
+logging:
+  use_wandb: true
+  wandb_project: "AWSP-DAgger"
+  wandb_mode: "offline"
+  run_name: "dagger_alignment_v1"
