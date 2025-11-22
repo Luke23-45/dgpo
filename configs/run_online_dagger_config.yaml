@@ -9,11 +9,11 @@ seed: 100
 
 # --- Paths ---
 # [CRITICAL] Point this to your best Pre-Trained Checkpoint
-model_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_049.ckpt" 
-
+model_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_067.ckpt" 
+# model_checkpoint: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_047.ckpt"
 # The original Expert data (Acts as the "Anchor" to prevent catastrophic forgetting)
-static_dataset_path: "/content/training_data_local/training.lmdb"
-
+static_dataset_path: "/content/drive/MyDrive/pda/data/training_ready/training_data.lmdb"
+# static_dataset_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training_data.lmdb"
 # Physics Asset
 ik_solver_path: "urdf/panda_mujoco_kinematics.urdf"
 
@@ -22,7 +22,7 @@ dagger:
   num_rounds: 5                 # Number of Rollout -> Train cycles
   
   # Interaction Phase
-  rollout_episodes_per_round: 20 # Episodes the Student drives per round
+  rollout_episodes_per_round: 10 # Episodes the Student drives per round
                                  # 20 episodes * 300 steps = ~6000 new frames max
   
   # Memory

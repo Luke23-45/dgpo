@@ -21,7 +21,7 @@ import mujoco
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from utils.scripted_expert import ScriptedExpert, ObjectProfile
+from utils.scripted_expert import ScriptedExpert, ObjectProfile, ExpertConfig
 # --- Project Imports ---
 import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -47,13 +47,26 @@ def main(args: argparse.Namespace):
         size=np.array([0.04, 0.04, 0.04]),
         grasp_width_normalized=0.6 # Close most of the way but not fully
     )
+
+    expert_config = ExpertConfig(
+        failure_timeout_steps=100_000,      # Prevent global watchdog timeout
+        ignore_timeouts=True,               # Tell expert to warn instead of reset (if supported)
+        move_to_pre_grasp_duration=100_000, # Prevent MOVE_TO_PRE_GRASP timeout
+        prepare_gripper_duration=100_000,
+        descend_to_grasp_duration=100_000,
+        lift_duration_steps=100_000,
+        move_to_goal_duration=100_000,
+        prepare_place_duration=100_000,
+        descend_to_place_duration=100_000,
+        retract_duration_steps=100_000
+    )
     # --- 1. Initialize Core Components ---
     log.info("Initializing components...")
     env = PandaEnv(xml_path=args.xml_path,control_mode='delta')
     model = env.model
 
 
-    expert = ScriptedExpert(object_profile=object_to_grasp)
+    expert = ScriptedExpert(object_profile=object_to_grasp, cfg=expert_config)
     ik_solver = IKSolver(urdf_path=args.urdf_path)
     log.info("Components initialized.")
     
@@ -102,7 +115,7 @@ def main(args: argparse.Namespace):
             expert_obs = env.get_expert_obs()
 
             # Get the target pose and gripper command from our stateful expert
-            target_pose, gripper_action = expert.get_target_pose(expert_obs)
+            target_pose, gripper_action,info = expert.get_target_pose(expert_obs)
 
             log.info(f"--- Step {step_num} | Expert State: {expert.get_state()} ---")
             # log.info(f"   Object Position (World): {np.round(expert_obs['object_pos_world'], 3)}")

@@ -36,7 +36,7 @@ training:
   batch_size: 192 
   val_batch_size: 192
 
-  check_val_every_n_epoch: 90
+  check_val_every_n_epoch: 900
 
   backup_every_n_epochs: 4
 
@@ -65,7 +65,7 @@ training:
   loss_weights:
     lambda_gripper: 2.0      
 
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_055.ckpt"
+  resume_from_checkpoint: "/content/dgpo/checkpoints/last.ckpt"
 
 # --- Optimizer ---
 optimizer:

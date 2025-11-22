@@ -162,6 +162,8 @@ class DAggerCollector:
                 expert_obs = self.env.get_expert_obs()
                 
                 # Expert Logic
+                # [PATCH] The expert now returns (target_pose, gripper_action, info) directly.
+                # This matches the updated ScriptedExpert signature.
                 gt_pose, gt_grip_act, gt_info = self.teacher.get_target_pose(expert_obs)
                 
                 # Convert Expert Action (Float -1/1) to State (1.0/0.0)
@@ -203,13 +205,18 @@ class DAggerCollector:
                 student_grip_cmd = -1.0 if raw_logit > 0.0 else 1.0
                 
                 # Solve IK for Student Pose
+                # [PATCH] Use the robust compute_delta_action with calibrated max_dq
                 try:
                     delta_joints = self.ik_solver.compute_delta_action(
                         target_ee_pose=raw_pose,
-                        model=self.env.model, data=self.env.data, ee_site_id=self.env.ee_site_id,
-                        joint_qpos_indices=np.arange(7), effective_dt=self.effective_dt, max_dq=self.max_dq
+                        model=self.env.model,
+                        data=self.env.data,
+                        ee_site_id=self.env.ee_site_id,
+                        joint_qpos_indices=np.arange(7),
+                        effective_dt=self.effective_dt,
+                        max_dq=self.max_dq # Uses self.max_dq derived in __init__
                     )
-                except:
+                except Exception:
                     delta_joints = np.zeros(7)
 
                 action = np.concatenate([delta_joints, [student_grip_cmd]])
@@ -264,7 +271,9 @@ def main(cfg: DictConfig):
 
     # B. Expert (Teacher)
     expert_config = ExpertConfig() # Use defaults or load from hydra
+
     obj_profile = ObjectProfile(size=np.array([0.04, 0.04, 0.04]), grasp_width_normalized=0.6)
+
     teacher = ScriptedExpert(object_profile=obj_profile, cfg=expert_config)
 
     # C. Environment & IK

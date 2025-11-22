@@ -1,14 +1,28 @@
-# FILE: debug_semantic_planner.py
-# (Diagnostic Tool for AWSP - Semantic Planner)
+"""
+SOTA Semantic Planner Evaluation System (vFinal).
 
+This script implements a Production-Grade "Grey-Box" evaluation suite.
+It bridges the gap between Deep Learning predictions and Physical Control
+by enforcing strict coordinate transforms, phase consistency, and AR visualization.
+
+Architecture:
+1.  **Hybrid State Estimator**: Fuses geometric thresholds with physical sensor data 
+    (gripper width) to prevent Phase-Lock.
+2.  **Coordinate Transformer**: Converts Model Predictions (World) -> IK Targets (Base).
+3.  **AR Visualizer**: Projects 3D neural predictions onto 2D camera frames for 
+    instant visual debugging.
+"""
+
+from __future__ import annotations
+
+import csv
 import logging
 import os
 import sys
-import csv
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import hydra
@@ -20,6 +34,7 @@ from omegaconf import DictConfig
 from PIL import Image
 from torchvision import transforms
 from tqdm import tqdm
+from scipy.spatial.transform import Rotation as R
 
 # --- Project Imports ---
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,322 +42,429 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from envs.panda_env import PandaEnv
+from models.semantic_planner import SemanticPlanner
 from train.train_semantic_planner import SemanticPlannerLightningModule
 from utils.ik_solver import IKSolver
 
 # --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
-    format="%(message)s", # Simplified format for readability
+    format="%(asctime)s [%(levelname)s] [SOTA-Eval] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-log = logging.getLogger("DEBUG")
+log = logging.getLogger("SOTA_Eval")
+
 
 # ==============================================================================
-# 1. LOGIC COMPONENTS
+# 1. UTILITY: AR VISUALIZATION (3D -> 2D Projection)
 # ==============================================================================
 
-class DebugStateEstimator:
+def project_point_to_image(
+    pos_world: np.ndarray, 
+    camera_params: Dict[str, Any]
+) -> Optional[Tuple[int, int]]:
+    """
+    Projects a 3D World Point onto the 2D Camera Image Plane.
+    Used to draw the "Green Dot" (Target) and "Red Dot" (Actual EE).
+    """
+    try:
+        # 1. Unpack Camera Extrinsics
+        cam_pos = np.array(camera_params["pos"])
+        cam_quat_xyzw = np.array(camera_params["quat_xyzw"])
+        
+        # World -> Camera Rotation
+        R_wc = R.from_quat(cam_quat_xyzw).as_matrix()
+        R_cw = R_wc.T
+        
+        # 2. Transform Point to Camera Frame
+        # Vector from Camera to Point
+        p_cam = R_cw @ (pos_world - cam_pos)
+        
+        # MuJoCo Camera looks down -Z axis. Points behind camera have Z > 0 (after transform sometimes)
+        # Standard convention: Z should be negative for points in front.
+        # Let's verify MuJoCo convention: Look -Z, Up +Y, Right +X.
+        
+        x, y, z = p_cam
+        
+        # Z-Buffer check (is point in front of camera?)
+        if z > -0.01: 
+            return None # Behind camera
+
+        # 3. Intrinsics Projection (Pinhole Model)
+        fovy = camera_params["fovy"] # Degrees
+        height = camera_params["height"]
+        width = camera_params["width"]
+        
+        # Focal Length calculation
+        # f = (h / 2) / tan(fovy / 2)
+        f = (height / 2.0) / np.tan(np.deg2rad(fovy) / 2.0)
+        
+        # Project
+        u = (x / -z) * f + (width / 2.0)
+        v = (y / -z) * f + (height / 2.0) # Assuming square pixels aspect ratio correction handled by f
+        
+        # Bounds check
+        if 0 <= u < width and 0 <= v < height:
+            return (int(u), int(v))
+        return None
+        
+    except Exception:
+        return None
+
+
+# ==============================================================================
+# 2. ROBUST STATE ESTIMATOR (The "Brain")
+# ==============================================================================
+
+class RobustStateEstimator:
+    """
+    A Hybrid FSM that combines Geometric Thresholds with Physical Sensor Data.
+    This prevents the 'Hanging' issue where the robot gets stuck in Reach phase.
+    """
+    PHASE_REACH = 0
+    PHASE_GRASP = 1
+    PHASE_TRANSPORT = 2
+    PHASE_PLACE = 3
+    PHASE_RETRACT = 4
+
     def __init__(self):
-        self.current_phase = 0
+        self.current_phase = self.PHASE_REACH
         self.prev_is_grasped = False
-        # Thresholds (Meters)
-        self.thresh_grasp_enter = 0.10
-        self.thresh_grasp_exit  = 0.20
-        self.thresh_goal_enter = 0.05
+        
+        # Tuned Thresholds (Meters)
+        self.DIST_ENTER_GRASP = 0.10  # Enter Grasp phase when close
+        self.DIST_EXIT_GRASP = 0.20   # Revert to Reach if we slip far away
+        self.DIST_AT_GOAL = 0.07      # Enter Place phase
+        self.Z_LIFT_HEIGHT = 0.45     # Table is ~0.42. If Obj > 0.45, it is lifted.
 
     def reset(self):
-        self.current_phase = 0
+        self.current_phase = self.PHASE_REACH
         self.prev_is_grasped = False
 
     def update(self, obs: Dict[str, Any]) -> int:
-        is_grasped = obs['is_grasped'][0] > 0.5
+        """
+        Determines the Task Phase ID (0-4) based on world state.
+        """
+        # 1. Extract Physical Telemetry
+        is_physically_grasped = obs['is_grasped'][0] > 0.5
+        
         ee_pos = obs['ee_pose_world'][:3]
         obj_pos = obs['object_pos_world']
         goal_pos = obs['goal_pos_world']
         
         dist_ee_obj = np.linalg.norm(ee_pos - obj_pos)
         dist_obj_goal = np.linalg.norm(obj_pos - goal_pos)
-        
-        # State Transition Logic
-        if is_grasped:
+        obj_z = obj_pos[2]
+
+        # 2. Phase Logic
+        if is_physically_grasped:
             self.prev_is_grasped = True
-            if dist_obj_goal < self.thresh_goal_enter:
-                self.current_phase = 3 # Place
+            
+            # If we are holding it, we are either Transporting or Placing
+            if dist_obj_goal < self.DIST_AT_GOAL:
+                self.current_phase = self.PHASE_PLACE
             else:
-                self.current_phase = 2 # Transport
+                # Force Transport phase if holding, regardless of height initially
+                self.current_phase = self.PHASE_TRANSPORT
+        
         else:
+            # Not holding
             if self.prev_is_grasped:
-                if dist_obj_goal < self.thresh_goal_enter:
-                    self.current_phase = 4 # Success
+                # We WERE holding it. Did we succeed or drop it?
+                if dist_obj_goal < self.DIST_AT_GOAL:
+                    self.current_phase = self.PHASE_RETRACT # Success
                 else:
-                    self.current_phase = 0 # Failure -> Restart
+                    # We dropped it mid-air. Restart.
+                    self.current_phase = self.PHASE_REACH
                 self.prev_is_grasped = False
             else:
-                if self.current_phase == 0:
-                    if dist_ee_obj < self.thresh_grasp_enter:
-                        self.current_phase = 1 # Attempt Grasp
-                elif self.current_phase == 1:
-                    if dist_ee_obj > self.thresh_grasp_exit:
-                        self.current_phase = 0 # Lost it, go back to reach
+                # Standard approach sequence
+                if self.current_phase == self.PHASE_REACH:
+                    if dist_ee_obj < self.DIST_ENTER_GRASP:
+                        self.current_phase = self.PHASE_GRASP
+                
+                elif self.current_phase == self.PHASE_GRASP:
+                    if dist_ee_obj > self.DIST_EXIT_GRASP:
+                        self.current_phase = self.PHASE_REACH # Retry approach
 
-        return self.current_phase, dist_ee_obj
+        return self.current_phase
+
+
+# ==============================================================================
+# 3. TRAJECTORY SMOOTHER (The "Filter")
+# ==============================================================================
 
 class TrajectorySmoother:
-    def __init__(self, alpha_pos=0.5, alpha_grip=0.2):
+    """
+    Applies Exponential Moving Average (EMA) to Pose and
+    Strict Hysteresis to Gripper commands to prevent jitter.
+    """
+    def __init__(self, alpha_pos=0.6, alpha_grip=0.3):
         self.alpha_pos = alpha_pos
         self.alpha_grip = alpha_grip
-        self.reset()
+        self.smooth_pose = None
+        self.smooth_grip_logit = None
+        self.gripper_command = 1.0 # Default Open
+        self.lock_timer = 0
 
     def reset(self):
         self.smooth_pose = None
         self.smooth_grip_logit = None
         self.gripper_command = 1.0
-        self.sticky_timer = 0
-
+        self.lock_timer = 0
 
     def update(self, raw_pose: np.ndarray, raw_logit: float) -> Tuple[np.ndarray, float]:
-        # 1. EMA Position Smoothing
+        # 1. Pose Smoothing
         if self.smooth_pose is None:
             self.smooth_pose = raw_pose.copy()
             self.smooth_grip_logit = raw_logit
         else:
+            # Linear interp for Pos
             self.smooth_pose[:3] = self.alpha_pos * raw_pose[:3] + (1 - self.alpha_pos) * self.smooth_pose[:3]
+            # Linear interp for Quat (Approximation is fine for small steps)
             self.smooth_pose[3:] = self.alpha_pos * raw_pose[3:] + (1 - self.alpha_pos) * self.smooth_pose[3:]
-            norm = np.linalg.norm(self.smooth_pose[3:])
-            if norm > 1e-6: self.smooth_pose[3:] /= norm
+            # Re-normalize quaternion
+            self.smooth_pose[3:] /= np.linalg.norm(self.smooth_pose[3:])
             
             self.smooth_grip_logit = self.alpha_grip * raw_logit + (1 - self.alpha_grip) * self.smooth_grip_logit
+
+        # 2. Gripper Latching (Hysteresis)
+        CLOSE_THRESH = 0.0 # Logit > 0 means p > 0.5
+        OPEN_THRESH = -0.5
         
-        # 2. INTELLIGENT LATCHING (The Hot Potato Fix)
-        if self.sticky_timer > 0:
-            self.sticky_timer -= 1
-            # We hold the previous command (Locked)
+        if self.lock_timer > 0:
+            self.lock_timer -= 1
         else:
-            # SWITCH LOGIC
-            
-            # If currently OPEN (1.0) and model says CLOSE (> 0.0)
-            if self.gripper_command == 1.0 and raw_logit > 0.5:
-                self.gripper_command = -1.0 # Close!
-                self.sticky_timer = 45      # LOCK for 30 steps (~1.5 seconds) to guarantee grasp
-                
-            # If currently CLOSED (-1.0) and model says OPEN (< -2.0)
-            # Note the strict threshold (-2.0) to prevent accidental drops
-            elif self.gripper_command == -1.0 and raw_logit < -2.0:
-                self.gripper_command = 1.0 # Open
-                self.sticky_timer = 10
-            
-            # Default: maintain state if signal is weak/noisy
-            
-        return self.smooth_pose, self.gripper_command
+            if self.gripper_command > 0: # Open
+                if self.smooth_grip_logit > CLOSE_THRESH:
+                    self.gripper_command = -1.0
+                    self.lock_timer = 10 # Lock for stability
+            else: # Closed
+                if self.smooth_grip_logit < OPEN_THRESH:
+                    self.gripper_command = 1.0
+                    self.lock_timer = 10
+
+        return self.smooth_pose.copy(), self.gripper_command
+
 
 # ==============================================================================
-# 2. DEBUG RUNNER
+# 4. MAIN EVALUATOR CLASS
 # ==============================================================================
 
-class DebugEvaluator:
+class SOTAEvaluator:
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # --- Load Model ---
-        log.info("--------------------------------------------------")
-        log.info(f"LOADING MODEL: {self.cfg.checkpoint_path}")
-        if not os.path.exists(self.cfg.checkpoint_path):
-            log.error("!!! CHECKPOINT FILE NOT FOUND !!!")
-            sys.exit(1)
-
+        log.info(f"Loading Model from: {cfg.checkpoint_path}")
         pl_module = SemanticPlannerLightningModule.load_from_checkpoint(
-            self.cfg.checkpoint_path, map_location=self.device
+            cfg.checkpoint_path, map_location=self.device
         )
         self.model = pl_module.model.eval().to(self.device)
-        self.train_cfg = pl_module.cfg
         
-        # --- Load Env ---
-        xml_path = self.cfg.get("xml_path", "envs/panda_pick_place.xml")
-        log.info(f"LOADING ENV: {xml_path}")
-        self.env = PandaEnv(xml_path=xml_path, control_mode='delta')
+        # --- Load Environment ---
+        # Fallback to xml in checkpoint config if not provided
+        xml_path = cfg.get("xml_path", pl_module.cfg.dataset.get("xml_path", "envs/panda_pick_place.xml"))
+        log.info(f"Initializing Env: {xml_path}")
         
-        # --- Load IK ---
-        ik_path = self.cfg.get("urdf_path", "urdf/panda_mujoco_kinematics.urdf")
-        self.ik_solver = IKSolver(urdf_path=ik_path)
-
-        # --- Calibration ---
-        # Matching the hardcoded N_SUBSTEPS=20 in panda_env.py
-        SIM_SUBSTEPS = 20 
+        self.env = PandaEnv(xml_path=xml_path, control_mode='delta', render_mode="rgb_array")
+        
+        # --- Load IK Solver ---
+        urdf_path = cfg.get("urdf_path", "urdf/panda_mujoco_kinematics.urdf")
+        self.ik_solver = IKSolver(urdf_path=urdf_path)
+        
+        # --- Calibrate Control ---
+        # Hardcoded matching panda_env.py internals
+        SIM_SUBSTEPS = 20
         self.effective_dt = self.env.model.opt.timestep * SIM_SUBSTEPS
         self.max_dq = self.env.ACTION_SCALING_FACTOR / self.effective_dt
-        
-        # --- Utils ---
+        log.info(f"Control Calibrated: dt={self.effective_dt}, max_dq={self.max_dq}")
+
+        # --- Components ---
+        self.estimator = RobustStateEstimator()
+        self.smoother = TrajectorySmoother()
         self.transform = transforms.Compose([
             transforms.Resize((224, 224), antialias=True),
             transforms.ToTensor()
         ])
-        self.state_estimator = DebugStateEstimator()
-        self.smoother = TrajectorySmoother()
+
+    def _transform_world_to_base(self, target_pose_world: np.ndarray) -> np.ndarray:
+        """
+        CRITICAL FIX: Transforms the Model's World-Frame prediction into the 
+        Robot Base-Frame required by the IK Solver.
+        """
+        base_pos, base_quat_xyzw = self.env.get_base_pose()
         
-        np.set_printoptions(precision=3, suppress=True)
+        # Create transforms
+        R_base_world = R.from_quat(base_quat_xyzw).inv()
+        
+        # Position: R_bw * (P_w - P_base)
+        pos_base = R_base_world.apply(target_pose_world[:3] - base_pos)
+        
+        # Orientation: R_bw * R_w
+        rot_world = R.from_quat(target_pose_world[3:])
+        rot_base = R_base_world * rot_world
+        
+        return np.concatenate([pos_base, rot_base.as_quat()])
 
     @contextmanager
-    def virtual_goal_context(self, goal_pos):
-        saved_qpos = self.env.data.qpos.copy()
-        saved_qvel = self.env.data.qvel.copy()
+    def _dream_goal(self, goal_pos: np.ndarray):
+        """Teleports objects to create the 'Goal Image' input."""
+        saved_state = self.env.get_mj_state()
         try:
+            # Teleport Object to Goal
             obj_addr = self.env.model.jnt_qposadr[self.env.object_joint_id]
-            curr_quat = self.env.data.qpos[obj_addr+3:obj_addr+7].copy()
-            self.env.data.qpos[obj_addr:obj_addr+3] = goal_pos
-            self.env.data.qpos[obj_addr+3:obj_addr+7] = curr_quat
+            q_old = self.env.data.qpos[obj_addr+3:obj_addr+7].copy()
+            
+            # Safely place on table
+            safe_goal = goal_pos.copy()
+            if safe_goal[2] < 0.415: safe_goal[2] = 0.415
+            
+            self.env.data.qpos[obj_addr:obj_addr+3] = safe_goal
+            self.env.data.qpos[obj_addr+3:obj_addr+7] = q_old
+            
+            # Teleport Robot Home (so it doesn't obscure goal)
+            self.env.data.qpos[:7] = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
+            self.env.data.qpos[7:9] = 0.04
+            
             mujoco.mj_forward(self.env.model, self.env.data)
             yield
         finally:
-            self.env.data.qpos[:] = saved_qpos
-            self.env.data.qvel[:] = saved_qvel
-            mujoco.mj_forward(self.env.model, self.env.data)
+            self.env.set_mj_state(saved_state)
 
-    def run_diagnostic(self):
-        """Runs a SINGLE episode with verbose output."""
-        video_path = "debug_run.mp4"
+    def run(self):
+        out_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
+        video_path = out_dir / self.cfg.output_video_path
+        csv_path = out_dir / self.cfg.output_csv_path
         
-        # 1. Setup Video
-        obs = self.env.reset(seed=self.cfg.seed)[0]
-        h, w, _ = obs['image_primary'].shape
-        writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), 30, (w, h))
+        # Video Setup
+        dummy = self.env.render()
+        h, w, _ = dummy.shape
+        writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*'mp4v'), 30, (w, h))
         
-        log.info("--------------------------------------------------")
-        log.info(f"STARTING DIAGNOSTIC EPISODE (Seed {self.cfg.seed})")
-        log.info("--------------------------------------------------")
+        # CSV Setup
+        csv_file = open(csv_path, 'w', newline='')
+        csv_writer = csv.writer(csv_file)
+        csv_writer.writerow(["ep", "step", "phase", "success", "dist_goal", "z_height"])
         
-        # 2. Reset Components
-        self.state_estimator.reset()
-        self.smoother.reset()
-        # IMPORTANT: Get expert obs for Ground Truth keys
-        obs = self.env.get_expert_obs()
+        success_count = 0
         
-        # 3. Dream Goal
-        with self.virtual_goal_context(obs['goal_pos_world']):
-            goal_img_np = self.env.render(camera_name="fixed_camera")
-        goal_tensor = self.transform(Image.fromarray(goal_img_np)).unsqueeze(0).to(self.device)
-        
-        ep_steps = 250 # Short run
-        
-        for step in range(ep_steps):
+        for ep_idx in tqdm(range(self.cfg.num_episodes), desc="Evaluating"):
+            seed = self.cfg.seed + ep_idx
+            self.env.reset(seed=seed)
+            self.estimator.reset()
+            self.smoother.reset()
             
-            # --- LOGIC: Update Phase ---
-            phase, dist_ee_obj = self.state_estimator.update(obs)
-            
-            # --- PERCEPTION ---
-            img_tensor = self.transform(Image.fromarray(obs['image_primary'])).unsqueeze(0).to(self.device)
-            proprio_tensor = torch.from_numpy(obs['proprio']).float().unsqueeze(0).to(self.device)
-            
-            batch = {
-                'initial_image': img_tensor,
-                'goal_image': goal_tensor,
-                'task_phase': torch.tensor([phase], device=self.device),
-                'current_proprio': proprio_tensor
-            }
-            
-            # --- MODEL INFERENCE ---
-            with torch.no_grad():
-                out = self.model(batch)
-                
-            raw_pose = out['pose'].squeeze().cpu().numpy() # [x,y,z,qx,qy,qz,qw]
-            raw_logit = out['gripper_logit'].item()
-            
-            # --- SMOOTHING ---
-            target_pose, gripper_cmd = self.smoother.update(raw_pose, raw_logit)
-            
-            # --- DEBUG LOGGING (Every 10 steps or on Phase Change) ---
-            if step % 5 == 0:
-                self.print_diagnostics(step, phase, obs, raw_pose, raw_logit, gripper_cmd, dist_ee_obj)
-
-            # --- CONTROL ---
-            try:
-                delta_joints = self.ik_solver.compute_delta_action(
-                    target_ee_pose=target_pose,
-                    model=self.env.model,
-                    data=self.env.data,
-                    ee_site_id=self.env.ee_site_id,
-                    joint_qpos_indices=np.arange(7),
-                    effective_dt=self.effective_dt,
-                    max_dq=self.max_dq
-                )
-                
-                # PATCH: BOOST GAIN to fix "Large Drift"
-                # We artificially double the speed to overcome MuJoCo damping
-                delta_joints = delta_joints * 1.5
-                delta_joints = np.clip(delta_joints, -1.0, 1.0)
-                
-            except Exception as e:
-                log.error(f"IK CRASH: {e}")
-                delta_joints = np.zeros(7)
-                
-            action = np.concatenate([delta_joints, [gripper_cmd]])
-            
-            # --- PHYSICS ---
-            self.env.step(action)
             obs = self.env.get_expert_obs()
             
-            # --- VISUALIZATION ---
-            frame = self.env.render(camera_name="fixed_camera")
-            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            # 1. Dream Goal Image
+            with self._dream_goal(obs['goal_pos_world']):
+                goal_img_np = self.env.render()
             
-            # Draw HUD
-            status = f"Ph:{phase} | Grip:{gripper_cmd:.0f} | Logit:{raw_logit:.2f}"
-            cv2.putText(bgr, status, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 1)
+            # Preprocess inputs
+            goal_tensor = self.transform(Image.fromarray(goal_img_np)).unsqueeze(0).to(self.device)
             
-            # Draw Coordinates (Target vs Actual)
-            cur_pos = obs['ee_pose_world'][:3]
-            pos_txt = f"Tgt:[{target_pose[0]:.2f},{target_pose[1]:.2f},{target_pose[2]:.2f}]"
-            act_txt = f"Act:[{cur_pos[0]:.2f},{cur_pos[1]:.2f},{cur_pos[2]:.2f}]"
-            cv2.putText(bgr, pos_txt, (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
-            cv2.putText(bgr, act_txt, (10, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,0,255), 1)
+            done = False
+            success = False
             
-            writer.write(bgr)
+            for step in range(self.cfg.max_steps):
+                # 2. State Estimation
+                phase = self.estimator.update(obs)
+                
+                # 3. Inference
+                img_tensor = self.transform(Image.fromarray(obs['image_primary'])).unsqueeze(0).to(self.device)
+                proprio_tensor = torch.from_numpy(obs['proprio']).float().unsqueeze(0).to(self.device)
+                
+                with torch.no_grad():
+                    out = self.model({
+                        'initial_image': img_tensor,
+                        'goal_image': goal_tensor,
+                        'task_phase': torch.tensor([phase], device=self.device),
+                        'current_proprio': proprio_tensor
+                    })
+                
+                raw_pose = out['pose'].squeeze().cpu().numpy()
+                raw_logit = out['gripper_logit'].item()
+                
+                # 4. Smoothing & Latching
+                target_pose_world, gripper_cmd = self.smoother.update(raw_pose, raw_logit)
+                
+                # 5. Safety Clamps (Physics Guardrails)
+                # Prevent diving through the table
+                TABLE_Z = 0.41
+                if target_pose_world[2] < TABLE_Z: 
+                    target_pose_world[2] = TABLE_Z
+                
+                # 6. Coordinate Transform (World -> Base)
+                target_pose_base = self._transform_world_to_base(target_pose_world)
+                
+                # 7. IK Solving
+                try:
+                    current_joints = obs['proprio'][:7] # Use purely proprioceptive joints
+                    delta_joints = self.ik_solver.compute_delta_action(
+                        target_ee_pose=target_pose_base,
+                        model=self.env.model,
+                        data=self.env.data,
+                        ee_site_id=self.env.ee_site_id,
+                        joint_qpos_indices=np.arange(7),
+                        effective_dt=self.effective_dt,
+                        max_dq=self.max_dq
+                    )
+                except Exception:
+                    # Fallback: Mild retreat
+                    delta_joints = np.zeros(7)
+                    delta_joints[1] = -0.07 # Retract shoulder slightly
+
+                # 8. Step
+                action = np.concatenate([delta_joints, [gripper_cmd]])
+                obs, _, _, _, _ = self.env.step(action)
+                
+                # 9. Success Check
+                dist = np.linalg.norm(obs['object_pos_world'] - obs['goal_pos_world'])
+                if dist < 0.07 and obs['object_pos_world'][2] > 0.42 and obs['is_grasped'][0] > 0.5:
+                    success = True
+                
+                # 10. AR Visualization (The "Green Dot" Debugger)
+                frame = cv2.cvtColor(self.env.render(), cv2.COLOR_RGB2BGR)
+                
+                # Project Target (Green)
+                cam_params = obs['camera_params']
+                uv_target = project_point_to_image(target_pose_world[:3], cam_params)
+                if uv_target:
+                    cv2.circle(frame, uv_target, 6, (0, 255, 0), -1) # Green Dot = Network Plan
+                
+                # Project Actual EE (Red)
+                uv_ee = project_point_to_image(obs['ee_pose_world'][:3], cam_params)
+                if uv_ee:
+                    cv2.circle(frame, uv_ee, 4, (0, 0, 255), -1) # Red Dot = Reality
+                
+                # HUD
+                phases = ["REACH", "GRASP", "TRANS", "PLACE", "DONE"]
+                cv2.putText(frame, f"Phase: {phases[min(phase, 4)]}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                cv2.putText(frame, f"Grip: {gripper_cmd:.1f}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+                
+                writer.write(frame)
+                csv_writer.writerow([ep_idx, step, phase, int(success), dist, obs['object_pos_world'][2]])
+                
+                if success:
+                    break
+            
+            if success: success_count += 1
             
         writer.release()
+        csv_file.close()
         self.env.close()
-        log.info(f"Diagnostic Video Saved: {video_path}")
-
-    def print_diagnostics(self, step, phase, obs, raw_pose, raw_logit, cmd, dist_ee_obj):
-        ee_pos = obs['ee_pose_world'][:3]
-        obj_pos = obs['object_pos_world']
         
-        print(f"\n[Step {step:03d}] PHASE: {phase} | Dist to Obj: {dist_ee_obj:.3f}m")
-        print(f"  >> Robot Actual: {ee_pos}")
-        print(f"  >> Model Target: {raw_pose[:3]}")
-        print(f"  >> Grip Logit:   {raw_logit:.4f} (Command: {cmd})")
-        
-        # --- INTELLIGENT WARNINGS ---
-        
-        # 1. Stuck Phase?
-        if phase == 0 and dist_ee_obj < 0.15:
-             print("  *** WARNING: Robot is CLOSE (hovering?), but Phase 0 didn't switch to 1!")
-             print("      Check StateEstimator thresholds.")
-
-        # 2. Confused Gripper?
-        if phase == 1: # Grasp Phase
-            if raw_logit < 1.0:
-                print("  *** WARNING: Phase is 1 (GRASP), but Model predicts OPEN (Logit < 1.0).")
-                print("      The model is hesitating to close the hand.")
-
-        # 3. Hallucination? (Target outside table)
-        if raw_pose[2] < 0.30 or raw_pose[2] > 0.80:
-             print("  *** WARNING: Model Target Z is erratic (Outside workspace).")
-
-        # 4. Frozen Robot?
-        dist_delta = np.linalg.norm(raw_pose[:3] - ee_pos)
-        if dist_delta > 0.20:
-             print(f"  *** WARNING: Large Drift! Robot is {dist_delta:.2f}m away from target.")
-             print("      IK Solver might be scaling actions too small.")
-
-# ==============================================================================
-# 3. MAIN
-# ==============================================================================
+        log.info("="*40)
+        log.info(f"FINAL RESULTS: {success_count}/{self.cfg.num_episodes} Successes ({(success_count/self.cfg.num_episodes)*100:.1f}%)")
+        log.info(f"Video saved to: {video_path}")
+        log.info("="*40)
 
 @hydra.main(version_base=None, config_path="./configs", config_name="evaluate_semantic_planner_config")
 def main(cfg: DictConfig):
-    debugger = DebugEvaluator(cfg)
-    debugger.run_diagnostic()
+    evaluator = SOTAEvaluator(cfg)
+    evaluator.run()
 
 if __name__ == "__main__":
     main()

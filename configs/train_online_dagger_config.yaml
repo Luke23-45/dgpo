@@ -1,0 +1,59 @@
+# configs/train_online_dagger_config.yaml
+
+# --- Global Settings ---
+seed: 813
+# Where to save logs and checkpoints (Hydra manages this)
+hydra:
+  run:
+    dir: logs/dagger/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# --- Paths ---
+# 1. The Pre-Trained Student (Frozen Base)
+# CRITICAL: Point this to your BEST pre-trained v8.0 Semantic Planner checkpoint
+checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_100.ckpt" 
+
+# 2. Robot Assets
+xml_path: "envs/panda_pick_place.xml"
+urdf_path: "urdf/panda_mujoco_kinematics.urdf"
+
+# --- Dataset Configuration ---
+dataset:
+  # Path to your EXISTING offline dataset (Expert Trajectories)
+  # Used for "Replay Mixing" to prevent catastrophic forgetting
+  train_path: "/content/drive/MyDrive/pda/data/training_ready/training_data.lmdb"
+
+# --- Model Configuration ---
+model:
+  # Context length for the Temporal Transformer
+  # Must be >= 10 to effectively detect "Stagnation" (velocity drops)
+  history_horizon: 10 
+  
+  # Dimensions (Must match the pre-trained checkpoint)
+  proprio_dim: 22
+  action_dim: 8
+
+# --- DAgger / Online Training Hyperparameters ---
+dagger:
+  # Learning Rate for the Adapter (Residual Head)
+  # We use a slightly higher LR than base training because the parameter space is small
+  learning_rate: 1e-4
+  
+  # Buffer Size
+  # How many recent correction samples to keep in RAM
+  buffer_capacity: 5000
+  
+  # Training Loop Settings
+  num_epochs: 20                # Number of full "Rollout -> Train" cycles
+  max_steps_per_epoch: 2000     # Max simulation steps per epoch (safety limit)
+  
+  # Optimization Frequency
+  # "Train 1 gradient step every 50 physics steps"
+  # This ratio (1:50) minimizes simulation lag while keeping the model updated
+  train_every_n_steps: 50
+  
+  # Batch Size
+  # Effective Batch = 32 (16 Online Corrections + 16 Offline Replay)
+  batch_size: 32
+  
+  # Checkpointing
+  save_every_n_epochs: 1

@@ -1,175 +1,179 @@
 # FILE: utils/online_buffer.py
-# (Definitive, SOTA, RAM-Optimized Replay Buffer)
 
 """
-Online Replay Buffer for DAgger (Dataset Aggregation).
-
-This module implements a high-performance, RAM-efficient buffer to store
-and serve "Correction" data generated during the online phase of training.
+Online Data Management for Interactive Imitation Learning.
+Implements efficient Sliding Window buffers for history-aware inference
+and Prioritized Replay Buffers for DAgger training.
 
 Key Features:
-1.  **Ring Buffer Semantics**: Uses `deque(maxlen=N)` to automatically discard
-    stale data when capacity is reached, preventing memory leaks.
-2.  **Lazy Transformation**: Stores raw uint8 numpy arrays to minimize memory footprint,
-    applying Torch transforms only on-the-fly during `__getitem__`.
-3.  **Synthetic Advantage**: Allows injecting a high static advantage value for
-    correction samples to force the AWR loss to learn them.
-4.  **Schema Compliance**: Output dictionary perfectly mimics `SemanticPlannerDataset`.
+- Zero-Copy History Management: Uses `collections.deque` for O(1) updates.
+- Dual-Stream Storage: Separates 'Success' and 'Correction' data.
+- RAM Optimization: Stores images as uint8 numpy arrays, converts to float tensors on sampling.
 """
 
-from __future__ import annotations
-
+import collections
 import logging
-import pickle
-from collections import deque
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+import random
+from typing import Dict, List, Tuple, Any
 
 import numpy as np
 import torch
-from PIL import Image
-from torch.utils.data import Dataset
-from torchvision import transforms
 
-# Setup Logger
 log = logging.getLogger(__name__)
 
-class OnlineReplayBuffer(Dataset):
+class SlidingWindowBuffer:
     """
-    A First-In-First-Out (FIFO) Replay Buffer compatible with PyTorch DataLoaders.
-    Stores transition tuples (State, ExpertAction) for Online Learning.
+    Real-time History Buffer for Inference.
+    Maintains the last `horizon` frames for the agent's context.
     """
+    def __init__(self, horizon: int, proprio_dim: int, action_dim: int):
+        self.horizon = horizon
+        self.proprio_dim = proprio_dim
+        self.action_dim = action_dim
+        
+        # Deques for O(1) push/pop
+        self.img_queue = collections.deque(maxlen=horizon)
+        self.proprio_queue = collections.deque(maxlen=horizon)
+        self.action_queue = collections.deque(maxlen=horizon)
+        
+    def reset(self):
+        self.img_queue.clear()
+        self.proprio_queue.clear()
+        self.action_queue.clear()
 
-    def __init__(self, 
-                 capacity: int = 10000, 
-                 resize_size: Tuple[int, int] = (224, 224),
-                 default_advantage: float = 10.0):
+    def add(self, image: np.ndarray, proprio: np.ndarray, action: np.ndarray):
         """
+        Adds a single timestep.
         Args:
-            capacity: Max number of frames to store. Oldest are dropped first.
-            resize_size: Target image size for the Vision Transformer.
-            default_advantage: The scalar 'score' assigned to expert corrections.
-                               Should be high enough to generate large AWR weights.
+            image: (H, W, C) uint8
+            proprio: (D_prop,) float32
+            action: (D_act,) float32 - The action taken at this step
         """
-        self.capacity = capacity
-        self.default_advantage = default_advantage
-        
-        # The Core Storage
-        self.buffer = deque(maxlen=capacity)
-        
-        # Transform Pipeline (Matches SemanticPlannerDataset)
-        self.transform = transforms.Compose([
-            transforms.Resize(resize_size, antialias=True),
-            transforms.ToTensor()
-            # Note: No random augmentation here by default to preserve
-            # the exact pixel geometry of the specific correction case.
-        ])
-        
-        log.info(f"OnlineReplayBuffer initialized. Capacity: {capacity} frames.")
+        self.img_queue.append(image)
+        self.proprio_queue.append(proprio)
+        self.action_queue.append(action)
 
-    def __len__(self) -> int:
-        return len(self.buffer)
+    def get_history(self) -> Dict[str, torch.Tensor]:
+        """
+        Returns stacked history tensors ready for Model Inference.
+        Padding: Repeats the first frame if history < horizon.
+        """
+        if len(self.img_queue) == 0:
+            raise RuntimeError("Cannot get history from empty buffer.")
 
-    def add(self, 
-            initial_image: np.ndarray, 
-            goal_image: np.ndarray,
-            task_phase: int,
-            current_proprio: np.ndarray,
-            gt_pose: np.ndarray,
-            gt_gripper: float,
-            advantage: Optional[float] = None):
-        """
-        Add a single timestep 'Correction' to the buffer.
+        # 1. Snapshot current state
+        imgs = list(self.img_queue)
+        props = list(self.proprio_queue)
+        acts = list(self.action_queue)
         
-        Args:
-            initial_image: (H, W, 3) uint8 (Current View)
-            goal_image: (H, W, 3) uint8 (Target View)
-            task_phase: int (0-5)
-            current_proprio: (D,) float32 (Current joint state)
-            gt_pose: (7,) float32 (Expert's intended Pose)
-            gt_gripper: float (0.0 or 1.0) (Expert's intended Gripper)
-            advantage: Override for the advantage score (default: self.default_advantage)
-        """
-        
-        # Data Sanitization & Compression
-        # We ensure data is stored as standard Python/Numpy types to avoid
-        # keeping Torch computation graphs alive in RAM (Memory Leak protection).
-        
-        sample = {
-            # Inputs
-            'initial_image': initial_image.astype(np.uint8),
-            'goal_image': goal_image.astype(np.uint8),
-            'task_phase': int(task_phase),
-            'current_proprio': current_proprio.astype(np.float32),
+        current_len = len(imgs)
+        missing = self.horizon - current_len
+
+        # 2. Auto-Padding (Repeat First Frame)
+        if missing > 0:
+            imgs = [imgs[0]] * missing + imgs
+            props = [props[0]] * missing + props
+            # For actions, padding with zeros or first action is a design choice.
+            # Repeating first action is usually safer for continuity.
+            acts = [acts[0]] * missing + acts
             
-            # Targets (The Expert Correction)
-            'gt_pose': gt_pose.astype(np.float32),
-            'gt_gripper': float(gt_gripper),
+        # 3. Stack & Format
+        # Image: (T, H, W, C) -> (T, C, H, W) -> Float -> Normalize
+        img_stack = np.stack(imgs)
+        if img_stack.shape[-1] == 3: # HWC -> CHW
+            img_stack = np.transpose(img_stack, (0, 3, 1, 2))
             
-            # Metadata
-            'advantage': float(advantage) if advantage is not None else self.default_advantage
-        }
-        
-        self.buffer.append(sample)
+        # Create Tensors
+        # Note: We don't need gradients for inference input
+        img_tensor = torch.from_numpy(img_stack).float().div_(255.0)
+        prop_tensor = torch.from_numpy(np.stack(props)).float()
+        act_tensor = torch.from_numpy(np.stack(acts)).float()
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        Retrieve a sample formatted for the SemanticPlanner model.
-        """
-        sample = self.buffer[idx]
-        
-        # 1. Process Images (On-the-fly)
-        # Convert numpy -> PIL -> Tensor
-        initial_img_pil = Image.fromarray(sample['initial_image'])
-        goal_img_pil = Image.fromarray(sample['goal_image'])
-        
-        initial_img_t = self.transform(initial_img_pil)
-        goal_img_t = self.transform(goal_img_pil)
-        
-        # 2. Convert Metadata to Tensors
-        # We explicitly create new tensors to ensure memory isolation
-        task_phase_t = torch.tensor(sample['task_phase'], dtype=torch.long)
-        proprio_t = torch.tensor(sample['current_proprio'], dtype=torch.float32)
-        
-        gt_pose_t = torch.tensor(sample['gt_pose'], dtype=torch.float32)
-        gt_gripper_t = torch.tensor([sample['gt_gripper']], dtype=torch.float32)
-        advantage_t = torch.tensor([sample['advantage']], dtype=torch.float32)
-        
-        # 3. Assemble Output
-        # Keys must match SemanticPlannerDataset.__getitem__ EXACTLY
+        # Add Batch Dimension (B=1)
         return {
-            # Inputs
-            'initial_image': initial_img_t,
-            'goal_image': goal_img_t,
-            'task_phase': task_phase_t,
-            'current_proprio': proprio_t,
-            
-            # Targets
-            'ground_truth_subgoal_pose': gt_pose_t,
-            'ground_truth_gripper_state': gt_gripper_t,
-            
-            # AWR Weight
-            'advantage': advantage_t
+            "initial_image": img_tensor.unsqueeze(0), # (1, T, C, H, W) - Model takes last or seq
+            "proprio_hist": prop_tensor.unsqueeze(0), # (1, T, D_prop)
+            "action_hist": act_tensor.unsqueeze(0)    # (1, T, D_act)
         }
 
-    def save_to_disk(self, path: str):
-        """Persist buffer to disk for debugging or resumption."""
-        path_obj = Path(path)
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
-        with open(path_obj, 'wb') as f:
-            pickle.dump(list(self.buffer), f)
-        log.info(f"Saved {len(self)} samples to {path}")
 
-    def load_from_disk(self, path: str):
-        """Load a buffer from disk."""
-        path_obj = Path(path)
-        if not path_obj.exists():
-            log.warning(f"Buffer path {path} not found. Starting empty.")
-            return
+class OnlineReplayBuffer:
+    """
+    Dual-Stream Replay Buffer for DAgger.
+    Optimized for RAM: Stores images as uint8 (CPU), converts to float (GPU) on sample.
+    """
+    def __init__(self, capacity: int = 10000):
+        self.capacity = capacity
+        self.success_buffer: List[Dict] = []
+        self.correction_buffer: List[Dict] = []
+        self.total_added = 0
+    
+    def add(self, sample: Dict[str, Any], is_correction: bool):
+        """
+        Stores a training sample.
+        Crucial: Expects inputs to be CPU numpy arrays or CPU tensors to save VRAM.
+        """
+        target_list = self.correction_buffer if is_correction else self.success_buffer
         
-        with open(path_obj, 'rb') as f:
-            data_list = pickle.load(f)
+        # FIFO Eviction (Split capacity between buffers)
+        limit = self.capacity // 2
+        if len(target_list) >= limit:
+            target_list.pop(0)
+            
+        # Lightweight processing before storage (ensure CPU)
+        processed_sample = {}
+        for k, v in sample.items():
+            if isinstance(v, torch.Tensor):
+                v = v.detach().cpu()
+                # Compress Images: Float (0-1) -> Uint8 (0-255)
+                if k in ["initial_image", "goal_image"] and v.dtype == torch.float32:
+                    v = (v * 255.0).to(torch.uint8)
+            processed_sample[k] = v
+            
+        target_list.append(processed_sample)
+        self.total_added += 1
+
+    def sample_batch(self, batch_size: int, correction_ratio: float = 0.5, device: str = 'cpu') -> Dict[str, torch.Tensor]:
+        """
+        Samples a mixed batch, decompresses images, and moves to device.
+        """
+        n_correct = int(batch_size * correction_ratio)
+        n_success = batch_size - n_correct
+
+        # Handle empty buffer edge cases
+        if not self.correction_buffer:
+            n_success = batch_size
+            n_correct = 0
+        elif not self.success_buffer:
+            n_success = 0
+            n_correct = batch_size
+            
+        if n_correct == 0 and n_success == 0:
+            return {}
+
+        # Sampling
+        batch_samples = []
+        if n_correct > 0:
+            batch_samples.extend(random.choices(self.correction_buffer, k=n_correct))
+        if n_success > 0:
+            batch_samples.extend(random.choices(self.success_buffer, k=n_success))
+
+        # Collate & Decompress
+        collated = {}
+        # Get keys from first sample
+        keys = batch_samples[0].keys()
         
-        self.buffer.clear()
-        self.buffer.extend(data_list)
-        log.info(f"Loaded {len(self)} samples from {path}")
+        for key in keys:
+            # Stack into (B, ...)
+            tensor_stack = torch.stack([s[key] for s in batch_samples])
+            
+            # Decompress Images: Uint8 -> Float
+            if key in ["initial_image", "goal_image"] and tensor_stack.dtype == torch.uint8:
+                tensor_stack = tensor_stack.float().div_(255.0)
+            
+            collated[key] = tensor_stack.to(device)
+            
+        return collated
+        
+    def __len__(self):
+        return len(self.success_buffer) + len(self.correction_buffer)
