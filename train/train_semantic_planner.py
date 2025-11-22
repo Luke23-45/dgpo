@@ -1,8 +1,7 @@
 # FILE: train/train_semantic_planner.py
 # (Definitive, SOTA, Production-Grade Implementation)
 
-"""
-Training Script for the Advantage-Weighted Semantic Planner (AWSP).
+r""" Training Script for the Advantage-Weighted Semantic Planner (AWSP).
 
 This script implements the **Advantage-Weighted Regression (AWR)** training loop
 for the hierarchical 'Strategist' model. Unlike standard Behavior Cloning, this
@@ -164,6 +163,7 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         - Rotation Error (Geodesic degrees)
         - Gripper Accuracy
     """
+
     def __init__(self, cfg: DictConfig):
         super().__init__()
         self.save_hyperparameters(cfg)
@@ -179,8 +179,7 @@ class SemanticPlannerLightningModule(pl.LightningModule):
             dim_feedforward_ratio=cfg.model.get("dim_feedforward_ratio", 4),
             num_task_phases=cfg.model.num_task_phases,
             dropout=cfg.model.dropout,
-            phase_dropout_prob=cfg.model.get("phase_dropout_prob", 0.0),
-            # --- NEW ---
+            # --- FIX: Removed phase_dropout_prob line to prevent TypeError ---
             chunk_size=cfg.model.get("chunk_size", 10)
         )
         
@@ -195,15 +194,10 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         self.lambda_phase = cfg.training.loss_weights.get("lambda_phase", 0.1)
 
         # 4. Loss Functions
-        # Pose: reduction='none' for AWR weighting. Mean over Batch/Chunk dims handled later.
         self.pose_criterion = nn.L1Loss(reduction='none') 
-        # Phase: Standard Cross Entropy
         self.phase_criterion = nn.CrossEntropyLoss()
 
         self.register_buffer('grip_pos_weight', torch.tensor([3.0]))
-        
-        
-
 
     def _compute_awr_weights(self, advantages: torch.Tensor) -> torch.Tensor:
         """
@@ -291,9 +285,11 @@ class SemanticPlannerLightningModule(pl.LightningModule):
 
         # 7. Logging
         self.log("train/loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/loss_pose", pose_loss, on_step=True, on_epoch=True)
-        self.log("train/loss_grip", grip_loss, on_step=True, on_epoch=True)
-        self.log("train/loss_phase", phase_loss, on_step=True, on_epoch=True)
+
+        self.log("train/loss_pose", pose_loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/loss_grip", grip_loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/loss_phase", phase_loss, on_step=True, on_epoch=True, prog_bar=True)
+
         self.log("train/weights_mean", weights.mean(), on_step=False, on_epoch=True)
         
         # Calculate Phase Accuracy
@@ -557,74 +553,10 @@ def main(cfg: DictConfig) -> None:
     ckpt_arg = None 
 
     if resume_path and os.path.exists(resume_path):
-        logger.info(f"--- MIGRATION MODE: Loading v8.0 checkpoint from {resume_path} ---")
-        
-        try:
-            checkpoint = torch.load(resume_path, map_location=model.device)
-            state_dict = checkpoint['state_dict']
-            model_state = model.state_dict()
-            
-            new_state_dict = {}
-            
-            for k, v in state_dict.items():
-                # 1. If key exists and shape matches, keep it (Backbone, Encoder)
-                if k in model_state and v.shape == model_state[k].shape:
-                    new_state_dict[k] = v
-                    
-                # 2. INTELLIGENT MIGRATION: Pose Head (1 -> K steps)
-                # Old: (Out=7, In=D) -> New: (Out=K*7, In=D)
-                elif "pose_head" in k and "weight" in k and k in model_state:
-                    old_out, in_dim = v.shape
-                    new_out, _ = model_state[k].shape
-                    if new_out % old_out == 0:
-                        factor = new_out // old_out
-                        # Replicate weights: predicts same pose K times initially
-                        logger.info(f"--> Warm-starting {k} by replicating weights {factor}x")
-                        new_state_dict[k] = v.repeat(factor, 1)
-                
-                elif "pose_head" in k and "bias" in k and k in model_state:
-                    old_out = v.shape[0]
-                    new_out = model_state[k].shape[0]
-                    if new_out % old_out == 0:
-                        factor = new_out // old_out
-                        logger.info(f"--> Warm-starting {k} bias")
-                        new_state_dict[k] = v.repeat(factor)
-
-                # 3. INTELLIGENT MIGRATION: Gripper Head (1 -> K steps)
-                elif "gripper_head" in k and "weight" in k and k in model_state:
-                    old_out, in_dim = v.shape
-                    new_out, _ = model_state[k].shape
-                    if new_out % old_out == 0:
-                        factor = new_out // old_out
-                        logger.info(f"--> Warm-starting {k} by replicating weights {factor}x")
-                        new_state_dict[k] = v.repeat(factor, 1)
-
-                elif "gripper_head" in k and "bias" in k and k in model_state:
-                    old_out = v.shape[0]
-                    new_out = model_state[k].shape[0]
-                    factor = new_out // old_out
-                    new_state_dict[k] = v.repeat(factor)
-                
-                else:
-                    if k in model_state:
-                        logger.warning(f"Skipping mismatched key without heuristic: {k}")
-
-            # Load the constructed state dict
-            keys = model.load_state_dict(new_state_dict, strict=False)
-            
-            logger.info(f"Migration Complete.")
-            logger.info(f"Initialized (Warm): {len(new_state_dict)} layers")
-            logger.info(f"Initialized (Random): {keys.missing_keys}")
-            
-            # IMPORTANT: We force a WARM START (Epoch 0) because the optimizer state 
-            # from v8.0 is incompatible with the new parameters.
-            ckpt_arg = None 
-            
-        except Exception as e:
-            logger.error(f"Migration failed: {e}")
-            raise e
+        logger.info(f"Resuming training from checkpoint: {resume_path}")
+        ckpt_arg = resume_path
     else:
-        logger.info("No checkpoint found. Starting fresh.")
+        logger.info("No resume checkpoint found. Starting fresh.")
 
     try:
         logger.info("Starting trainer.fit()...")

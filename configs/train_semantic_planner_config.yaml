@@ -33,8 +33,8 @@ dataset:
 
 # --- Training Loop Configuration ---
 training:
-  batch_size: 192 
-  val_batch_size: 192
+  batch_size: 64 
+  val_batch_size: 64
 
   check_val_every_n_epoch: 900
 
@@ -65,7 +65,7 @@ training:
   loss_weights:
     lambda_gripper: 2.0      
 
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_100.ckpt" 
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_007.ckpt" 
 
 # --- Optimizer ---
 optimizer:
@@ -83,7 +83,7 @@ trainer:
   
   # Note: max_epochs and gradient_clip_val are passed manually by the script 
   # from the 'training' block above to ensure consistency.
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 2
   log_every_n_steps: 10
   num_sanity_val_steps: 2
 

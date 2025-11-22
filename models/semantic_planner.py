@@ -1,28 +1,30 @@
 # FILE: models/semantic_planner.py
-# (Definitive, SOTA, Disentangled Architecture v8.0)
+# (Definitive, SOTA, Disentangled Architecture v9.0 - Action Chunking)
 
 """
-The Advantage-Weighted Semantic Planner (AWSP Strategist).
+The Advantage-Weighted Semantic Planner (AWSP Strategist v9.0).
 
 This module implements the **Semantic Planner**, a deterministic, goal-conditioned
-regression model.
+trajectory generator.
 
-Architectural Revolution (v8.0 - Disentangled Queries):
-1.  **Dual-Query Mechanism**: Instead of a single [CLS] token, we initialize
-    TWO distinct query tokens: `Pose_Query` and `Grip_Query`.
-2.  **Gradient Decoupling**: By forcing the transformer to output two separate
-    latent vectors, we ensure that the heavy gradients from the Pose loss do not
-    wash out the delicate gradients from the Gripper loss.
-3.  **Specialized Attention**: The `Grip_Query` is free to learn to attend specifically
-    to the gripper fingers/object contact points, while `Pose_Query` attends to
-    the global object geometry.
+Architectural Revolution (v9.0 - Action Chunking & Self-Awareness):
+1.  **Action Chunking**: The model predicts a trajectory of `k` future steps
+    (Pose + Gripper) rather than a single step. This enforces temporal consistency
+    and solves the "drift" problem inherent in BC.
+2.  **Phase Self-Supervision**: The model PREDICTS the phase. This acts as an
+    auxiliary loss to force semantic understanding in the vision encoder.
+    CRITICAL: Phase is NOT an input. This removes "Causal Confusion".
+3.  **Temporal Vision**: Fuses (t-1), (t), and (Goal) frames to infer velocity
+    and progress.
+4.  **Triple-Query Mechanism**: Decouples gradients for Trajectory (Pose),
+    Actuation (Gripper), and Semantics (Phase).
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -36,17 +38,24 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SemanticPlannerConfig:
     """
-    Hyperparameter configuration for the Semantic Planner.
+    Hyperparameter configuration for the Semantic Planner v9.0.
     """
+    # Architecture Dimensions
     proprio_dim: int = 22
     vision_backbone_model: str = "google/siglip-base-patch16-224"
     vision_feature_dim: int = 768
-    fusion_transformer_layers: int = 4
+    
+    # Transformer Config
+    fusion_transformer_layers: int = 6  # Increased depth for temporal reasoning
     fusion_transformer_heads: int = 8
     dim_feedforward_ratio: int = 4
-    num_task_phases: int = 5
     dropout: float = 0.1
-    phase_dropout_prob: float = 0.0
+    
+    # v9.0 Specifics
+    chunk_size: int = 10        # Number of future steps to predict (k)
+    num_task_phases: int = 5    # For classification head output
+    
+    # Note: phase_dropout_prob is removed as Phase is no longer an input
 
 
 def _init_weights(module: nn.Module):
@@ -85,16 +94,22 @@ class ResidualMLPBlock(nn.Module):
 
 class SemanticPlanner(nn.Module):
     """
-    The Disentangled Advantage-Weighted Semantic Planner.
+    The Disentangled Advantage-Weighted Semantic Planner (v9.0).
     
-    Uses a Dual-Query Transformer architecture with safe initialization protocols
-    to preserve pre-trained vision backbone weights.
+    Inputs:
+        - Prev Image (t-1), Curr Image (t), Goal Image (T)
+        - Proprioception (t)
+    
+    Outputs:
+        - Pose Trajectory Chunk (k steps)
+        - Gripper Trajectory Chunk (k steps)
+        - Predicted Phase Class
     """
 
     def __init__(self, cfg: SemanticPlannerConfig):
         super().__init__()
         self.cfg = cfg
-        logger.info(f"[SemanticPlanner] Initializing v8.0 (Disentangled) with config: {cfg}")
+        logger.info(f"[SemanticPlanner] Initializing v9.0 (Strategist) with config: {cfg}")
 
         # --- 1. Vision Backbone (Frozen) ---
         logger.info(f"Loading Vision Backbone: {cfg.vision_backbone_model}")
@@ -104,12 +119,11 @@ class SemanticPlanner(nn.Module):
 
         backbone_cfg = self.vision_backbone.config
         
-        # Infer patch count (safely default to 196 if config missing)
+        # Infer patch count
         self.num_patches = 196
         if hasattr(backbone_cfg, "image_size") and hasattr(backbone_cfg, "patch_size"):
             self.num_patches = (backbone_cfg.image_size // backbone_cfg.patch_size) ** 2
         
-        # Sanity check dimension
         if backbone_cfg.hidden_size != cfg.vision_feature_dim:
              raise ValueError(f"Config mismatch: Model dim {cfg.vision_feature_dim} != Backbone dim {backbone_cfg.hidden_size}")
 
@@ -123,22 +137,23 @@ class SemanticPlanner(nn.Module):
             nn.Linear(cfg.vision_feature_dim, cfg.vision_feature_dim),
         )
         
-        # Task Phase Embedding
-        self.task_phase_embedding = nn.Embedding(cfg.num_task_phases, cfg.vision_feature_dim)
+        # NOTE: task_phase_embedding removed. Phase is now an Output, not Input.
         
-        # --- 3. Embeddings (Updated for Dual Queries) ---
+        # --- 3. Embeddings ---
         
-        # Spatial Positional Embedding: Shared between Start/Goal
+        # Spatial Positional Embedding: Shared across all images
         self.spatial_pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, cfg.vision_feature_dim))
         
-        # Token Types: 0:Start, 1:Goal, 2:Context, 4:PoseQ, 5:GripQ
-        self.token_type_embeddings = nn.Embedding(6, cfg.vision_feature_dim)
+        # Token Types (Temporal/Modal Distinction)
+        # 0:PrevImg, 1:CurrImg, 2:GoalImg, 3:Proprio, 4:TrajQ, 5:GripQ, 6:PhaseQ
+        self.token_type_embeddings = nn.Embedding(7, cfg.vision_feature_dim)
 
-        # [SOTA CHANGE] Split the Plan Token into Two Learnable Queries
-        self.pose_query_token = nn.Parameter(torch.randn(1, 1, cfg.vision_feature_dim))
+        # --- 4. Triple-Query Mechanism (Learned Latents) ---
+        self.traj_query_token = nn.Parameter(torch.randn(1, 1, cfg.vision_feature_dim))
         self.grip_query_token = nn.Parameter(torch.randn(1, 1, cfg.vision_feature_dim))
+        self.phase_query_token = nn.Parameter(torch.randn(1, 1, cfg.vision_feature_dim))
 
-        # --- 4. Fusion Transformer ---
+        # --- 5. Fusion Transformer ---
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=cfg.vision_feature_dim,
             nhead=cfg.fusion_transformer_heads,
@@ -146,175 +161,157 @@ class SemanticPlanner(nn.Module):
             dropout=cfg.dropout,
             activation='gelu',
             batch_first=True,
-            norm_first=True # Pre-LN is critical for stability
+            norm_first=True
         )
         self.fusion_transformer = nn.TransformerEncoder(
             encoder_layer, 
             num_layers=cfg.fusion_transformer_layers
         )
 
-        # --- 5. Deep Output Heads (Decoupled) ---
+        # --- 6. Output Heads (Action Chunking) ---
         
-        # Pose Head: Regresses from the Pose Latent Vector
-        self.pose_head = nn.Sequential(
+        # A. Trajectory Head (Pose)
+        # Output: chunk_size * 7 (3 Pos + 4 Quat)
+        self.traj_head = nn.Sequential(
             nn.LayerNorm(cfg.vision_feature_dim),
             nn.Linear(cfg.vision_feature_dim, cfg.vision_feature_dim),
             nn.GELU(),
             ResidualMLPBlock(cfg.vision_feature_dim, cfg.dropout),
             ResidualMLPBlock(cfg.vision_feature_dim, cfg.dropout),
             nn.LayerNorm(cfg.vision_feature_dim),
-            nn.Linear(cfg.vision_feature_dim, 7) 
+            nn.Linear(cfg.vision_feature_dim, cfg.chunk_size * 7) 
         )
 
-        # Gripper Head: Regresses from the Grip Latent Vector
+        # B. Gripper Head
+        # Output: chunk_size * 1 (Logit)
         self.gripper_head = nn.Sequential(
             nn.LayerNorm(cfg.vision_feature_dim),
             nn.Linear(cfg.vision_feature_dim, cfg.vision_feature_dim // 2),
             nn.GELU(),
             ResidualMLPBlock(cfg.vision_feature_dim // 2, cfg.dropout), 
-            nn.Linear(cfg.vision_feature_dim // 2, 1)
+            nn.Linear(cfg.vision_feature_dim // 2, cfg.chunk_size * 1)
+        )
+        
+        # C. Phase Classification Head (Auxiliary)
+        # Output: num_task_phases (Logits)
+        self.phase_head = nn.Sequential(
+            nn.LayerNorm(cfg.vision_feature_dim),
+            ResidualMLPBlock(cfg.vision_feature_dim, cfg.dropout),
+            nn.Linear(cfg.vision_feature_dim, cfg.num_task_phases)
         )
 
-        # --- 6. Initialization (CRITICAL FIX) ---
-        # We must NOT use self.apply() globally because it would re-init 
-        # the Vision Backbone (wiping pre-trained weights).
-        
+        # --- 7. Initialization ---
         logger.info("Initializing custom modules (Skipping Vision Backbone)...")
-        
-        # Iterate over direct children and skip the backbone
         for name, module in self.named_children():
-            if "vision_backbone" in name:
-                logger.info(f"Skipped initialization for: {name}")
-                continue
+            if "vision_backbone" in name: continue
             module.apply(_init_weights)
 
-        # Explicitly initialize Top-Level Parameters (Orphans)
+        # Initialize orphans
         nn.init.trunc_normal_(self.spatial_pos_embedding, std=0.02)
-        nn.init.trunc_normal_(self.pose_query_token, std=0.02)
+        nn.init.trunc_normal_(self.traj_query_token, std=0.02)
         nn.init.trunc_normal_(self.grip_query_token, std=0.02)
+        nn.init.trunc_normal_(self.phase_query_token, std=0.02)
         
-        logger.info("[SemanticPlanner] Initialization Complete.")
+        logger.info("[SemanticPlanner v9.0] Initialization Complete.")
 
     def train(self, mode: bool = True):
-        """
-        [SOTA FIX] Override train mode to ensure Backbone stays FROZEN.
-        PyTorch Lightning calls model.train() every epoch, which recursively
-        activates Dropout in the backbone even if requires_grad=False.
-        This override forces the backbone to stay in eval mode.
-        """
+        """Force backbone to remain in eval mode during training."""
         super().train(mode)
         if mode:
-            # Revert backbone to eval to disable dropout/batchnorm updates
             self.vision_backbone.eval()
         return self
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
-        Forward pass with robust shape handling.
+        Forward pass generating action chunks and phase predictions.
         """
-        initial_image = batch['initial_image']
+        # Unpack Inputs (Strict v9.0 keys)
+        prev_image = batch['prev_image']
+        curr_image = batch['curr_image']
         goal_image = batch['goal_image']
-        task_phase = batch['task_phase']
-        current_proprio = batch['current_proprio']
-
-        B, device = initial_image.shape[0], initial_image.device
-
-        # --- 1. Construct Context (Proprio + Phase) ---
+        curr_proprio = batch['curr_proprio']
         
-        # Get Phase Embeddings
-        phase_embed = self.task_phase_embedding(task_phase)
+        B, device = curr_image.shape[0], curr_image.device
 
-        # [IMPLEMENTATION] Phase Dropout
-        if self.training and self.cfg.phase_dropout_prob > 0.0:
-            keep_prob = 1.0 - self.cfg.phase_dropout_prob
-            mask = torch.bernoulli(torch.full((B, 1), keep_prob, device=device))
-            phase_embed = phase_embed * mask
-
-        proprio_embed = self.proprio_encoder(current_proprio)
-
-        # Fuse Phase + Proprio
-        context_embedding = phase_embed + proprio_embed
-        context_embedding = context_embedding + self.token_type_embeddings(torch.tensor(2, device=device))
+        # --- 1. Vision Encoding (Temporal Batching) ---
+        # To save compute, we stack images along batch dim: (3*B, C, H, W)
+        stacked_images = torch.cat([prev_image, curr_image, goal_image], dim=0)
         
-        # --- 2. Create Disentangled Queries ---
-        
-        # Expand learnable tokens: (1, 1, D) -> (B, 1, D)
-        pose_q = self.pose_query_token.expand(B, -1, -1)
-        grip_q = self.grip_query_token.expand(B, -1, -1)
-        
-        # Fuse Context into Queries
-        context_expanded = context_embedding.unsqueeze(1)
-        pose_q = pose_q + context_expanded
-        grip_q = grip_q + context_expanded
-        
-        # Add Distinct Token Types
-        pose_q = pose_q + self.token_type_embeddings(torch.tensor(4, device=device))
-        grip_q = grip_q + self.token_type_embeddings(torch.tensor(5, device=device))
-
-        # --- 3. Visual Encoding ---
         with torch.no_grad():
-            start_out = self.vision_backbone(initial_image.float())
-            goal_out = self.vision_backbone(goal_image.float())
+            backbone_out = self.vision_backbone(stacked_images.float())
         
-        start_tokens = start_out.last_hidden_state
-        goal_tokens = goal_out.last_hidden_state
-
-        # --- [CRITICAL FIX] Dynamic Shape Handling ---
-        # Some ViTs return (197) tokens (CLS + Patches), others (196).
-        # We must align strictly with self.spatial_pos_embedding (196).
-        seq_len = start_tokens.shape[1]
+        # Handle tokens (Standard SigLIP: 196 patches)
+        visual_tokens = backbone_out.last_hidden_state
+        seq_len = visual_tokens.shape[1]
         
+        # Robust slicing (in case of CLS/Registers)
         if seq_len != self.num_patches:
             if seq_len > self.num_patches:
-                # If backbone adds CLS/Register tokens, take the LAST N tokens 
-                # (Standard ViT: CLS is index 0, patches [1:])
-                # Taking negative slice is safe regardless of where extra tokens are, 
-                # assuming patches are the majority block.
-                start_tokens = start_tokens[:, -self.num_patches:, :]
-                goal_tokens = goal_tokens[:, -self.num_patches:, :]
+                visual_tokens = visual_tokens[:, -self.num_patches:, :]
             else:
-                raise ValueError(
-                    f"Vision Backbone output ({seq_len}) < Expected Patches ({self.num_patches}). "
-                    "Check image size/patch size config."
-                )
+                raise ValueError(f"Backbone output {seq_len} < expected {self.num_patches}")
 
-        # --- 4. Inject Geometry & Modality Types ---
-        # Add Spatial Embeddings (Shared geometry)
-        start_tokens = start_tokens + self.spatial_pos_embedding
-        goal_tokens = goal_tokens + self.spatial_pos_embedding
+        # Apply Spatial Positional Embedding (Shared)
+        visual_tokens = visual_tokens + self.spatial_pos_embedding
 
-        # Add Token Types (0 & 1)
-        start_tokens = start_tokens + self.token_type_embeddings(torch.tensor(0, device=device))
-        goal_tokens = goal_tokens + self.token_type_embeddings(torch.tensor(1, device=device))
+        # Split back into (B, N, D)
+        prev_tokens, curr_tokens, goal_tokens = torch.chunk(visual_tokens, 3, dim=0)
 
-        # --- 5. Fusion ---
-        # Sequence: [Pose_Query, Grip_Query, Start_Patches..., Goal_Patches...]
-        fused_input = torch.cat([pose_q, grip_q, start_tokens, goal_tokens], dim=1)
+        # Apply Token Type Embeddings
+        prev_tokens = prev_tokens + self.token_type_embeddings(torch.tensor(0, device=device))
+        curr_tokens = curr_tokens + self.token_type_embeddings(torch.tensor(1, device=device))
+        goal_tokens = goal_tokens + self.token_type_embeddings(torch.tensor(2, device=device))
 
-        # Transformer Output
+        # --- 2. Proprio Encoding ---
+        # Normalize proprio to [B, 1, D] token
+        proprio_embed = self.proprio_encoder(curr_proprio).unsqueeze(1) 
+        proprio_embed = proprio_embed + self.token_type_embeddings(torch.tensor(3, device=device))
+
+        # --- 3. Query Initialization ---
+        traj_q = self.traj_query_token.expand(B, -1, -1) + self.token_type_embeddings(torch.tensor(4, device=device))
+        grip_q = self.grip_query_token.expand(B, -1, -1) + self.token_type_embeddings(torch.tensor(5, device=device))
+        phase_q = self.phase_query_token.expand(B, -1, -1) + self.token_type_embeddings(torch.tensor(6, device=device))
+
+        # --- 4. Fusion ---
+        # Sequence: [TrajQ, GripQ, PhaseQ, Proprio, Prev, Curr, Goal]
+        # This ordering allows queries to attend to all context
+        fused_input = torch.cat([
+            traj_q, grip_q, phase_q, 
+            proprio_embed, 
+            prev_tokens, curr_tokens, goal_tokens
+        ], dim=1)
+
+        # Transformer Pass
         fused_output = self.fusion_transformer(fused_input)
 
-        # --- 6. Decoupled Latent Extraction ---
-        # Index 0 = Pose Latent, Index 1 = Grip Latent
-        pose_vector = fused_output[:, 0, :] 
-        grip_vector = fused_output[:, 1, :] 
+        # Extract Query Outputs (First 3 tokens)
+        z_traj = fused_output[:, 0, :]
+        z_grip = fused_output[:, 1, :]
+        z_phase = fused_output[:, 2, :]
 
-        # --- 7. Prediction Heads ---
+        # --- 5. Decode Heads (Action Chunking) ---
         
-        # A. Pose Regression
-        raw_pose = self.pose_head(pose_vector)
-        pos_xyz = raw_pose[:, :3]
+        # A. Trajectory Chunk
+        raw_traj = self.traj_head(z_traj) # (B, K*7)
+        # Reshape to (B, K, 7)
+        pred_traj = raw_traj.view(B, self.cfg.chunk_size, 7)
         
-        quat_raw = raw_pose[:, 3:]
+        # Normalize Quaternions within the chunk
+        pos_xyz = pred_traj[..., :3]
+        quat_raw = pred_traj[..., 3:]
         quat_norm = F.normalize(quat_raw, p=2, dim=-1, eps=1e-6)
         
-        predicted_pose = torch.cat([pos_xyz, quat_norm], dim=1)
+        final_traj_chunk = torch.cat([pos_xyz, quat_norm], dim=-1)
 
-        # B. Gripper Classification
-        predicted_gripper_logit = self.gripper_head(grip_vector)
+        # B. Gripper Chunk
+        raw_grip = self.gripper_head(z_grip) # (B, K*1)
+        final_grip_chunk = raw_grip.view(B, self.cfg.chunk_size, 1)
 
+        # C. Phase Classification
+        phase_logits = self.phase_head(z_phase) # (B, Num_Phases)
 
         return {
-            'pose': predicted_pose,
-            'gripper_logit': predicted_gripper_logit
+            'pose_chunk': final_traj_chunk,      # (B, K, 7)
+            'gripper_chunk': final_grip_chunk,   # (B, K, 1)
+            'phase_logits': phase_logits         # (B, N_Phases)
         }
