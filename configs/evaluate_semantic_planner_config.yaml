@@ -4,7 +4,7 @@
 defaults:
   - _self_
 
-checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_100.ckpt" # Path to your trained model .ckpt
+checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_031.ckpt" # Path to your trained model .ckpt
 
 #checkpoint_path: ""
 ik_solver_path: "urdf/panda_mujoco_kinematics.urdf" # Path to URDF
@@ -14,12 +14,12 @@ env:
   xml_path: "envs/panda_pick_place.xml"
   control_mode: "delta"
   
-seed: 10513
-num_episodes: 10
+seed: 10530
+num_episodes: 2
 max_steps: 400
 
 # Output paths (relative to hydra run dir)
-output_video_path: "evaluation_video.mp4"
+output_video_path: "evaluation_videaaaaaaaaaaaaaaaaaaaaaaaaaaao.mp4"
 output_csv_path: "evaluation_metrics.csv"
 
 # If true, uses the same seed for every episode (good for debugging specific failures)

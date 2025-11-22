@@ -1,0 +1,9 @@
+[2025-11-23 02:38:39,904][models.semantic_planner][INFO] - [SemanticPlanner] Initializing v9.0 (Strategist) with config: SemanticPlannerConfig(proprio_dim=22, vision_backbone_model='google/siglip-base-patch16-224', vision_feature_dim=768, fusion_transformer_layers=4, fusion_transformer_heads=8, dim_feedforward_ratio=4, dropout=0.1, chunk_size=10, num_task_phases=5)
+[2025-11-23 02:38:39,904][models.semantic_planner][INFO] - Loading Vision Backbone: google/siglip-base-patch16-224
+[2025-11-23 02:38:40,935][models.semantic_planner][INFO] - Initializing custom modules (Skipping Vision Backbone)...
+[2025-11-23 02:38:41,143][models.semantic_planner][INFO] - [SemanticPlanner v9.0] Initialization Complete.
+[2025-11-23 02:38:43,863][utils.ik_solver][INFO] - Kinematic chain loaded and configured.
+[2025-11-23 02:38:43,865][ModelDiagnosis][INFO] - 
+==================================================
+[2025-11-23 02:38:43,866][ModelDiagnosis][INFO] -    STARTING LIVE DIAGNOSIS (1 Episode)
+[2025-11-23 02:38:43,866][ModelDiagnosis][INFO] - ==================================================

@@ -431,7 +431,7 @@ class AWSPEvaluator:
         
         # Calculate Max Joint Velocity based on Env Scaling
         # This ensures the IK solver doesn't request speeds the Sim cuts in half.
-        self.max_dq = self.env.ACTION_SCALING_FACTOR / self.effective_dt
+        self.max_dq = 5.0
         
         log.info(f"Control Calibration: dt={self.effective_dt:.4f}s | Max Joint Vel (dq)={self.max_dq:.2f}")
 

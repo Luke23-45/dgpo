@@ -1,0 +1,10 @@
+[2025-11-23 02:43:53,372][AWSP_Eval][INFO] - Loading v8.0 Model: C:/Users/Hellx/Documents/Programming/python/Project/redhot/checkpoints/backup/backup_epoch_031.ckpt
+[2025-11-23 02:43:53,834][models.semantic_planner][INFO] - [SemanticPlanner] Initializing v9.0 (Strategist) with config: SemanticPlannerConfig(proprio_dim=22, vision_backbone_model='google/siglip-base-patch16-224', vision_feature_dim=768, fusion_transformer_layers=4, fusion_transformer_heads=8, dim_feedforward_ratio=4, dropout=0.1, chunk_size=10, num_task_phases=5)
+[2025-11-23 02:43:53,835][models.semantic_planner][INFO] - Loading Vision Backbone: google/siglip-base-patch16-224
+[2025-11-23 02:43:54,859][models.semantic_planner][INFO] - Initializing custom modules (Skipping Vision Backbone)...
+[2025-11-23 02:43:55,078][models.semantic_planner][INFO] - [SemanticPlanner v9.0] Initialization Complete.
+[2025-11-23 02:43:57,841][utils.ik_solver][INFO] - Kinematic chain loaded and configured.
+[2025-11-23 02:43:57,842][AWSP_Eval][INFO] - Control Calibrated: Max DQ = 100.00 rad/s
+[2025-11-23 02:44:00,268][AWSP_Eval][INFO] - ========================================
+[2025-11-23 02:44:00,268][AWSP_Eval][INFO] - FINAL SUCCESS RATE: 0.0%
+[2025-11-23 02:44:00,269][AWSP_Eval][INFO] - ========================================
