@@ -1,225 +1,189 @@
-# FILE: evaluate_hybrid_planner.py
-# (Diagnostic: Neural Motion + Heuristic Grasping)
-
-"""
-Hybrid Evaluation System.
-
-Diagnoses the vision backbone by decoupling the Grasp Logic.
-- Neural Network: Controls the Arm (7D Pose).
-- Geometric Rules: Control the Gripper (Open/Close).
-
-If this script succeeds, it proves the Vision Model understands spatial structure,
-and the only failure point in previous tests was the Gripper Decision Head.
-"""
+# FILE: evaluate_semantic_planner.py
+# (Optimized for v8.0 Disentangled Architecture)
 
 import logging
-import os
 import sys
 import cv2
 import hydra
-import mujoco
 import numpy as np
 import torch
-import pytorch_lightning as pl
-from omegaconf import DictConfig
+from pathlib import Path
 from PIL import Image
+from omegaconf import DictConfig
 from torchvision import transforms
 from tqdm import tqdm
-from pathlib import Path
-from contextlib import contextmanager
 from scipy.spatial.transform import Rotation as R
 
-# --- Imports ---
+# --- Project Imports ---
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from envs.panda_env import PandaEnv
-from models.semantic_planner import SemanticPlanner
 from train.train_semantic_planner import SemanticPlannerLightningModule
 from utils.ik_solver import IKSolver
 
+log = logging.getLogger("AWSP_Eval")
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("HybridEval")
 
-# --- Heuristic Policy ---
-class GeometricGraspPolicy:
-    """Deterministic rules for opening/closing the gripper."""
+# 1. STATE ESTIMATOR (The Oracle for v8.0)
+class StateEstimator:
     def __init__(self):
-        self.is_holding = False
-        self.GRASP_THRESH = 0.03  # 3cm trigger
-        self.DROP_THRESH = 0.05   # 5cm trigger
-
+        self.current_phase = 0
+        self.prev_is_grasped = False
     def reset(self):
-        self.is_holding = False
+        self.current_phase = 0
+        self.prev_is_grasped = False
+    def update(self, obs):
+        # Simple Hysteresis Machine
+        is_grasped = obs['is_grasped'][0] > 0.5
+        dist_obj = np.linalg.norm(obs['ee_pose_world'][:3] - obs['object_pos_world'])
+        dist_goal = np.linalg.norm(obs['object_pos_world'] - obs['goal_pos_world'])
 
-    def compute_command(self, obs: dict) -> float:
-        # State
-        ee_pos = obs['ee_pose_world'][:3]
-        obj_pos = obs['object_pos_world']
-        goal_pos = obs['goal_pos_world']
-        
-        dist_obj = np.linalg.norm(ee_pos - obj_pos)
-        dist_goal = np.linalg.norm(obj_pos - goal_pos)
-        
-        cmd = 1.0 # Default Open
-
-        if not self.is_holding:
-            if dist_obj < self.GRASP_THRESH:
-                cmd = -1.0 # Close
-                # Assume success for next step if close
-                self.is_holding = True 
+        if is_grasped:
+            self.prev_is_grasped = True
+            self.current_phase = 3 if dist_goal < 0.05 else 2 # 3=Place, 2=Transport
         else:
-            cmd = -1.0 # Keep Closed
-            # Release conditions
-            if dist_goal < self.DROP_THRESH and obs['object_pos_world'][2] > 0.41:
-                cmd = 1.0 # Open
-                self.is_holding = False
-            
-            # Lost object check
-            if obs['is_grasped'][0] < 0.1:
-                self.is_holding = False
-        
-        return cmd
+            if self.prev_is_grasped:
+                self.current_phase = 4 if dist_goal < 0.05 else 0 # 4=Done, 0=Retry
+                self.prev_is_grasped = False
+            else:
+                # 1=Grasp if close, 0=Reach otherwise
+                self.current_phase = 1 if dist_obj < 0.12 else 0
+        return self.current_phase
 
-# --- Simple Smoother ---
-class PoseSmoother:
-    def __init__(self, alpha=0.5):
-        self.alpha = alpha
+# 2. TRAJECTORY SMOOTHER (Essential for v8.0 stability)
+class TrajectorySmoother:
+    def __init__(self):
         self.pose = None
-    
+        self.grip = 0.0
     def reset(self):
         self.pose = None
-        
-    def update(self, raw_pose):
+        self.grip = 0.0
+    def update(self, raw_pose, raw_grip):
         if self.pose is None:
-            self.pose = raw_pose.copy()
+            self.pose = raw_pose
+            self.grip = raw_grip
         else:
-            self.pose[:3] = self.alpha * raw_pose[:3] + (1-self.alpha)*self.pose[:3]
-            # Slerp or simplistic quat mix
-            self.pose[3:] = self.alpha * raw_pose[3:] + (1-self.alpha)*self.pose[3:]
-            norm = np.linalg.norm(self.pose[3:])
-            if norm > 1e-6: self.pose[3:] /= norm
-        return self.pose
+            # Heavy smoothing on Pose (0.6), Light on Gripper (0.3)
+            self.pose = 0.6 * raw_pose + 0.4 * self.pose
+            self.grip = 0.3 * raw_grip + 0.7 * self.grip
+        return self.pose, self.grip
 
-# --- Virtual Goal (Standard) ---
-@contextmanager
-def render_virtual_goal(env: PandaEnv, goal_pos: np.ndarray):
-    saved = env.get_mj_state()
-    try:
-        # Move object
-        obj_addr = env.model.jnt_qposadr[env.object_joint_id]
-        curr_quat = env.data.qpos[obj_addr+3 : obj_addr+7].copy()
-        env.data.qpos[obj_addr:obj_addr+3] = goal_pos
-        env.data.qpos[obj_addr+3:obj_addr+7] = curr_quat
+# 3. EVALUATOR
+class AWSPEvaluator:
+    def __init__(self, cfg: DictConfig):
+        self.cfg = cfg
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Move robot (Home)
-        env.data.qpos[:7] = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
-        env.data.qpos[7:9] = 0.04
+        # Load Model
+        log.info(f"Loading v8.0 Model: {self.cfg.checkpoint_path}")
+        pl_module = SemanticPlannerLightningModule.load_from_checkpoint(
+            self.cfg.checkpoint_path, map_location=self.device
+        )
+        self.model = pl_module.model.eval().to(self.device)
         
-        mujoco.mj_forward(env.model, env.data)
-        yield
-    finally:
-        env.set_mj_state(saved)
+        # Env & IK
+        xml = self.cfg.get("xml_path", 'envs/panda_pick_place.xml')
+        self.env = PandaEnv(xml_path=xml, control_mode='delta', render_mode="rgb_array")
+        self.ik_solver = IKSolver(urdf_path="urdf/panda_mujoco_kinematics.urdf")
+        
+        # PHYSICS FIX: Dynamic Speed Limit
+        sim_steps = 20
+        self.dt = self.env.model.opt.timestep * sim_steps
+        self.max_dq = (self.env.ACTION_SCALING_FACTOR / self.dt) * 2.0
+        
+        # VISION FIX: Normalization
+        self.tf = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5]*3, std=[0.5]*3)
+        ])
+        
+        self.oracle = StateEstimator()
+        self.smoother = TrajectorySmoother()
 
-# --- Main Runner ---
+    def run(self):
+        out = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir) / "eval.mp4"
+        video = cv2.VideoWriter(str(out), cv2.VideoWriter_fourcc(*'mp4v'), 30, (640, 480))
+        
+        successes = []
+        for ep in tqdm(range(self.cfg.num_episodes)):
+            self.env.reset(seed=self.cfg.seed + ep)
+            obs = self.env.get_expert_obs()
+            self.oracle.reset()
+            self.smoother.reset()
+            
+            # Virtual Goal
+            goal_img = self.tf(Image.fromarray(self._get_goal_render(obs))).unsqueeze(0).to(self.device)
+            
+            done = False
+            for step in range(self.cfg.max_steps):
+                # 1. Get Phase (The Cheat Code)
+                phase = self.oracle.update(obs)
+                
+                # 2. Prepare Batch (v8.0 Style)
+                img = self.tf(Image.fromarray(obs['image_primary'])).unsqueeze(0).to(self.device)
+                prop = torch.from_numpy(obs['proprio']).float().unsqueeze(0).to(self.device)
+                
+                batch = {
+                    'initial_image': img,
+                    'goal_image': goal_tensor if 'goal_tensor' in locals() else goal_img,
+                    'task_phase': torch.tensor([phase], device=self.device),
+                    'current_proprio': prop
+                }
+                
+                # 3. Inference
+                with torch.no_grad():
+                    res = self.model(batch)
+                
+                # 4. Smooth & Control
+                target, grip_logit = self.smoother.update(res['pose'].cpu().numpy()[0], res['gripper_logit'].item())
+                grip_cmd = -1.0 if grip_logit > 2.0 else 1.0 # Hysteresis threshold
+                
+                try:
+                    d_joints = self.ik_solver.compute_delta_action(
+                        target_ee_pose=target,
+                        model=self.env.model, data=self.env.data, ee_site_id=self.env.ee_site_id,
+                        joint_qpos_indices=np.arange(7), effective_dt=self.dt, max_dq=self.max_dq
+                    )
+                except: d_joints = np.zeros(7)
+                
+                obs, _, _, _, _ = self.env.step(np.concatenate([d_joints, [grip_cmd]]))
+                
+                # 5. Success Check
+                if np.linalg.norm(obs['object_pos_world'] - obs['goal_pos_world']) < 0.05 and obs['is_grasped'][0] > 0.5:
+                    done = True
+                    
+                # Render
+                img = self.env.render()
+                if video.isOpened():
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                    cv2.putText(img, f"Phase: {phase}", (10,30), 0, 0.6, (0,255,0), 2)
+                    video.write(img)
+                
+                if done: break
+            successes.append(done)
+        
+        video.release()
+        self.env.close()
+        print(f"Success Rate: {sum(successes)/len(successes)*100:.1f}%")
+
+    def _get_goal_render(self, obs):
+        # Quick dirty goal render
+        bak = (self.env.data.qpos.copy(), self.env.data.qvel.copy(), self.env.data.ctrl.copy())
+        try:
+            oa = self.env.model.jnt_qposadr[self.env.object_joint_id]
+            gp = obs['goal_pos_world'].copy(); gp[2] = 0.42
+            self.env.data.qpos[oa:oa+3] = gp
+            self.env.data.qpos[:7] = [0, -0.78, 0, -2.35, 0, 1.57, 0.78] # Stash robot
+            mujoco.mj_forward(self.env.model, self.env.data)
+            return self.env.render()
+        finally:
+            self.env.data.qpos[:], self.env.data.qvel[:], self.env.data.ctrl[:] = bak
+            mujoco.mj_forward(self.env.model, self.env.data)
+
 @hydra.main(version_base=None, config_path="./configs", config_name="evaluate_semantic_planner_config")
-def main(cfg: DictConfig):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # 1. Load Model
-    pl_module = SemanticPlannerLightningModule.load_from_checkpoint(
-        cfg.checkpoint_path, map_location=device
-    )
-    model = pl_module.model.eval().to(device)
-    train_cfg = pl_module.cfg
-    
-    # 2. Setup Env
-    env = PandaEnv(xml_path=train_cfg.dataset.get("xml_path", "envs/panda_pick_place.xml"), control_mode='delta')
-    ik_solver = IKSolver(urdf_path=cfg.ik_solver_path)
-    grasper = GeometricGraspPolicy()
-    smoother = PoseSmoother()
-    
-    # Calib
-    sim_steps = 20
-    dt = env.model.opt.timestep * sim_steps
-    max_dq = (env.ACTION_SCALING_FACTOR / dt) * 3.0 # 3x Boost
-    
-    transform = transforms.Compose([
-        transforms.Resize((224, 224), antialias=True),
-        transforms.ToTensor()
-    ])
-    
-    video_file = "hybrid_eval.mp4"
-    writer = cv2.VideoWriter(video_file, cv2.VideoWriter_fourcc(*'mp4v'), 30, (256, 256))
-    
-    success_count = 0
-    
-    for ep in tqdm(range(cfg.num_episodes)):
-        seed = cfg.seed + ep
-        env.reset(seed=seed)
-        obs = env.get_expert_obs()
-        grasper.reset()
-        smoother.reset()
-        
-        # Goal Image
-        with render_virtual_goal(env, obs['goal_pos_world']):
-            g_img = env.render()
-        goal_t = transform(Image.fromarray(g_img)).unsqueeze(0).to(device)
-        
-        done = False
-        
-        for step in range(cfg.max_steps):
-            # 1. Heuristic Control
-            gripper_cmd = grasper.compute_command(obs)
-            
-            # 2. Neural Planning (Trajectory)
-            img_t = transform(Image.fromarray(obs['image_primary'])).unsqueeze(0).to(device)
-            prop_t = torch.from_numpy(obs['proprio']).float().unsqueeze(0).to(device)
-            
-            # Feed 'Task Phase' to model based on Heuristic State
-            # If holding -> Transport (2). If not -> Reach (0).
-            phase = 2 if grasper.is_holding else 0
-            
-            with torch.no_grad():
-                pred = model({
-                    'initial_image': img_t, 'goal_image': goal_t,
-                    'task_phase': torch.tensor([phase], device=device),
-                    'current_proprio': prop_t
-                })
-                
-            raw_pose = pred['pose'].squeeze().cpu().numpy()
-            target_pose = smoother.update(raw_pose)
-            
-            # 3. Execution
-            try:
-                d_arm = ik_solver.compute_delta_action(target_pose, env.model, env.data, 
-                                                     env.ee_site_id, np.arange(7), dt, max_dq)
-            except: d_arm = np.zeros(7)
-            
-            action = np.concatenate([d_arm, [gripper_cmd]])
-            obs, _, _, _, _ = env.step(action)
-            obs = env.get_expert_obs() # Ground Truth Update
-            
-            # Render
-            frame = cv2.cvtColor(env.render(), cv2.COLOR_RGB2BGR)
-            cv2.putText(frame, f"Mode: {'HOLD' if grasper.is_holding else 'REACH'}", (10,20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
-            writer.write(frame)
-            
-            # Check Success
-            dist = np.linalg.norm(obs['object_pos_world'] - obs['goal_pos_world'])
-            if dist < 0.05 and obs['object_pos_world'][2] > 0.41:
-                success_count += 1
-                done = True
-                break
-                
-        if done: log.info(f"Ep {ep}: Success")
-        else: log.info(f"Ep {ep}: Fail")
-        
-    writer.release()
-    env.close()
-    log.info(f"Final Success: {success_count}/{cfg.num_episodes}")
+def main(cfg): AWSPEvaluator(cfg).run()
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

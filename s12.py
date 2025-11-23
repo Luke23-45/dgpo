@@ -41,7 +41,7 @@ log = logging.getLogger("AWSP_Eval")
 # 1. TRAJECTORY SMOOTHER (Stabilizes Jitter)
 # ==============================================================================
 class TrajectorySmoother:
-    def __init__(self, alpha_pos=0.5, alpha_grip=0.3):
+    def __init__(self, alpha_pos=0.15, alpha_grip=0.1):
         self.alpha_pos = alpha_pos
         self.alpha_grip = alpha_grip
         self.smooth_pose = None
@@ -254,11 +254,20 @@ class AWSPEvaluator:
                         target_pose = out['pose'].cpu().numpy()[0]
                         raw_grip = out['gripper_logit'].item()
                     elif self.arch_type == "v9.0":
-                        # Receding Horizon: Pick index 5 from chunk of 10
+                        # Receding Horizon:
                         chunk = out['pose_chunk'].cpu().numpy()[0] # (K, 7)
-                        idx = min(5, len(chunk)-1)
-                        target_pose = chunk[idx]
-                        # Grip is usually index 0 for immediate action
+                        
+                        # --- [PATCH START] CHUNK AVERAGING ---
+                        # Instead of idx = min(5, ...), we average steps 2, 3, and 4.
+                        # This provides a statistically stable target vector.
+                        target_pose = np.mean(chunk[2:5], axis=0) 
+                        
+                        # Renormalize Quaternion after averaging (averaging rotates can distort them)
+                        norm = np.linalg.norm(target_pose[3:])
+                        if norm > 1e-6:
+                            target_pose[3:] /= norm
+                        # --- [PATCH END] ---
+
                         raw_grip = out['gripper_chunk'].cpu().numpy()[0][0].item()
 
                     # --- D. SMOOTHING & CONTROL ---
@@ -273,8 +282,15 @@ class AWSPEvaluator:
                             max_dq=self.max_dq
                         )
                     except Exception:
+                        print("Fault of ik solver or not")
                         delta_joints = np.zeros(7)
-
+                    VELOCITY_GAIN = 0.25 
+                    delta_joints = delta_joints * VELOCITY_GAIN
+                    
+                    # 2. Hard Velocity Limit (Safety Clamp)
+                    # Ensure no single joint moves faster than 0.5 rad/s to prevent physics explosions
+                    MAX_JOINT_VEL = 0.5
+                    delta_joints = np.clip(delta_joints, -MAX_JOINT_VEL, MAX_JOINT_VEL)
                     action = np.concatenate([delta_joints, [gripper_cmd]])
                     obs, _, terminated, truncated, _ = self.env.step(action)
 

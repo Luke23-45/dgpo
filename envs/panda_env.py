@@ -210,7 +210,7 @@ class PandaEnv(gym.Env):
         self.post = post_config or RenderPostConfig()
         
         # 3. Initialize Episode Bookkeeping and RNG
-        self.max_episode_steps = 400
+        self.max_episode_steps = 4000
         self.timestep = 0
         self.np_random, _ = seeding.np_random(None)
         self.enable_domain_randomization = enable_domain_randomization

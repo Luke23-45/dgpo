@@ -15,8 +15,8 @@ env:
   control_mode: "delta"
   
 seed: 10530
-num_episodes: 2
-max_steps: 400
+num_episodes: 1
+max_steps: 4000
 
 # Output paths (relative to hydra run dir)
 output_video_path: "evaluation_videaaaaaaaaaaaaaaaaaaaaaaaaaaao.mp4"

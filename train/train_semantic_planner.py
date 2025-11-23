@@ -1,3 +1,4 @@
+
 # FILE: train/train_semantic_planner.py
 # (Definitive, SOTA, Production-Grade Implementation)
 
@@ -94,26 +95,19 @@ class SemanticPlannerDataModule(pl.LightningDataModule):
         # Only use persistent workers if we have actual workers to avoid obscure DataLoader errors
         self.persistent_workers = self.num_workers > 0
 
-
-
     def setup(self, stage: Optional[str] = None):
         if stage == "fit" or stage is None:
             logger.info(f"Loading Training Dataset from: {self.cfg.dataset.train_path}")
             self.train_dataset = SemanticPlannerDataset(
                 dataset_path=self.cfg.dataset.train_path,
-                use_aug=self.cfg.dataset.get("use_aug", True),
-                # --- NEW: Pass v9.0 Params ---
-                chunk_size=self.cfg.model.get("chunk_size", 10),
-                proprio_noise=self.cfg.dataset.get("proprio_noise", 0.02)
+                use_aug=self.cfg.dataset.get("use_aug", True)
             )
 
             if self.cfg.dataset.get("val_path"):
                 logger.info(f"Loading Validation Dataset from: {self.cfg.dataset.val_path}")
                 self.val_dataset = SemanticPlannerDataset(
                     dataset_path=self.cfg.dataset.val_path,
-                    use_aug=False,
-                    chunk_size=self.cfg.model.get("chunk_size", 10),
-                    proprio_noise=0.0 # No noise for validation
+                    use_aug=False  # Strict validation (no augmentation)
                 )
 
     def train_dataloader(self) -> DataLoader:
@@ -164,12 +158,14 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         - Rotation Error (Geodesic degrees)
         - Gripper Accuracy
     """
+
     def __init__(self, cfg: DictConfig):
         super().__init__()
         self.save_hyperparameters(cfg)
         self.cfg = cfg
 
-        # 1. Strict Configuration Construction (v9.0 Update)
+        # 1. Strict Configuration Construction
+        # We explicitly map Hydra config to the Dataclass to ensure type safety.
         model_config = SemanticPlannerConfig(
             proprio_dim=cfg.model.proprio_dim,
             vision_backbone_model=cfg.model.vision_backbone_model,
@@ -179,9 +175,7 @@ class SemanticPlannerLightningModule(pl.LightningModule):
             dim_feedforward_ratio=cfg.model.get("dim_feedforward_ratio", 4),
             num_task_phases=cfg.model.num_task_phases,
             dropout=cfg.model.dropout,
-            phase_dropout_prob=cfg.model.get("phase_dropout_prob", 0.0),
-            # --- NEW ---
-            chunk_size=cfg.model.get("chunk_size", 10)
+            phase_dropout_prob=cfg.model.get("phase_dropout_prob", 0.0) 
         )
         
         # 2. Model Instantiation
@@ -191,14 +185,9 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         self.awr_temperature = cfg.training.awr_temperature
         self.awr_max_weight = cfg.training.get("awr_max_weight", 20.0)
         self.lambda_gripper = cfg.training.loss_weights.lambda_gripper
-        # New Weight for Auxiliary Phase Loss
-        self.lambda_phase = cfg.training.loss_weights.get("lambda_phase", 0.1)
 
-        # 4. Loss Functions
-        # Pose: reduction='none' for AWR weighting. Mean over Batch/Chunk dims handled later.
+        # 4. Loss Functions (reduction='none' allows per-sample weighting)
         self.pose_criterion = nn.L1Loss(reduction='none') 
-        # Phase: Standard Cross Entropy
-        self.phase_criterion = nn.CrossEntropyLoss()
 
         self.register_buffer('grip_pos_weight', torch.tensor([3.0]))
         
@@ -239,117 +228,83 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         return torch.rad2deg(angle_rad).mean()
 
 
-# [IN CLASS SemanticPlannerLightningModule]
-
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> Optional[torch.Tensor]:
         if not batch: return None
 
         # 1. Forward Pass
-        # Inputs: prev_image, curr_image, goal_image, curr_proprio
         outputs = self.model(batch)
-        
-        pred_pose_chunk = outputs['pose_chunk']       # (B, K, 7)
-        pred_grip_chunk = outputs['gripper_chunk']    # (B, K, 1)
-        pred_phase_logits = outputs['phase_logits']   # (B, N_Phases)
+        pred_pose = outputs['pose']
+        pred_grip = outputs['gripper_logit']
 
         # 2. Ground Truths
-        gt_pose_chunk = batch['gt_pose_chunk']        # (B, K, 7)
-        gt_grip_chunk = batch['gt_grip_chunk']        # (B, K, 1)
-        gt_phase = batch['gt_phase_label']            # (B,)
-        advantage = batch['advantage']                # (B, 1)
+        gt_pose = batch['ground_truth_subgoal_pose']
+        gt_grip = batch['ground_truth_gripper_state'].float() 
+        advantage = batch['advantage']
 
-        # 3. AWR Weights (Based on Advantage)
-        # Broadcast weights to match chunk dimension: (B, 1, 1)
-        weights = self._compute_awr_weights(advantage.squeeze(-1))
-        weights_expanded = weights.unsqueeze(1) 
-
-        # 4. Compute Trajectory Losses (Advantage Weighted)
+        # 3. Compute Raw Losses (Per Sample)
+        loss_pose_sample = self.pose_criterion(pred_pose, gt_pose).mean(dim=-1)
         
-        # A. Pose Loss (L1)
-        # Calculate raw L1 per element, then mean over (K, 7) dimensions
-        raw_pose_loss = self.pose_criterion(pred_pose_chunk, gt_pose_chunk) # (B, K, 7)
-        # Weighted mean over batch, standard mean over trajectory
-        pose_loss = (raw_pose_loss.mean(dim=[1, 2]) * weights.squeeze()).mean()
+        # Functional Call guarantees device match with self.grip_pos_weight
+        loss_grip_sample = F.binary_cross_entropy_with_logits(
+            pred_grip, gt_grip, pos_weight=self.grip_pos_weight, reduction='none'
+        ).squeeze(-1)
 
-        # B. Gripper Loss (BCE)
-        # Reshape for BCE: (B*K, 1)
-        B, K, _ = pred_grip_chunk.shape
-        raw_grip_loss = F.binary_cross_entropy_with_logits(
-            pred_grip_chunk, gt_grip_chunk, 
-            pos_weight=self.grip_pos_weight, 
-            reduction='none'
-        ) # (B, K, 1)
-        # Average over chunk, weight by advantage
-        grip_loss = (raw_grip_loss.mean(dim=[1, 2]) * weights.squeeze()).mean()
+        # 4. Compute Weights
+        weights = self._compute_awr_weights(advantage.squeeze(-1))
 
-        # 5. Compute Phase Loss (Auxiliary / Supervised)
-        # NOTE: Phase loss is NOT weighted by advantage. It is ground truth.
-        phase_loss = self.phase_criterion(pred_phase_logits, gt_phase)
+        # 5. Weighted Aggregation
+        loss_total_sample = loss_pose_sample + (self.lambda_gripper * loss_grip_sample)
+        weighted_loss = (loss_total_sample * weights).mean()
 
-        # 6. Total Loss
-        total_loss = pose_loss + (self.lambda_gripper * grip_loss) + (self.lambda_phase * phase_loss)
-
-        # 7. Logging
-        self.log("train/loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/loss_pose", pose_loss, on_step=True, on_epoch=True)
-        self.log("train/loss_grip", grip_loss, on_step=True, on_epoch=True)
-        self.log("train/loss_phase", phase_loss, on_step=True, on_epoch=True)
+        # 6. Logging
+        self.log("train/loss", weighted_loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log("train/weights_mean", weights.mean(), on_step=False, on_epoch=True)
         
-        # Calculate Phase Accuracy
-        phase_preds = torch.argmax(pred_phase_logits, dim=1)
-        phase_acc = (phase_preds == gt_phase).float().mean()
-        self.log("train/phase_acc", phase_acc, on_step=False, on_epoch=True, prog_bar=True)
-
-        return total_loss
+        # [UPDATED] Log the component errors (Pose & Gripper) to the progress bar
+        self.log("train/loss_pose", loss_pose_sample.mean(), on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/loss_grip", loss_grip_sample.mean(), on_step=True, on_epoch=True, prog_bar=True)
 
 
+        return weighted_loss
 
 
-# [IN CLASS SemanticPlannerLightningModule]
+
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         if not batch: return
 
         with torch.no_grad():
             outputs = self.model(batch)
-            pred_pose_chunk = outputs['pose_chunk']
-            pred_grip_chunk = outputs['gripper_chunk']
-            pred_phase_logits = outputs['phase_logits']
+            pred_pose = outputs['pose']
+            pred_grip = outputs['gripper_logit']
 
-            gt_pose_chunk = batch['gt_pose_chunk']
-            gt_grip_chunk = batch['gt_grip_chunk']
-            gt_phase = batch['gt_phase_label']
+            gt_pose = batch['ground_truth_subgoal_pose']
+            gt_grip = batch['ground_truth_gripper_state'].float()
 
-            # 1. Unweighted Losses (Standard Validation)
-            loss_pose = F.l1_loss(pred_pose_chunk, gt_pose_chunk)
-            loss_grip = F.binary_cross_entropy_with_logits(pred_grip_chunk, gt_grip_chunk)
-            loss_phase = self.phase_criterion(pred_phase_logits, gt_phase)
+            # 1. Standard Unweighted Loss
+            loss_pose = F.l1_loss(pred_pose, gt_pose)
+            loss_grip = F.binary_cross_entropy_with_logits(pred_grip, gt_grip)
             
-            total_val_loss = loss_pose + (self.lambda_gripper * loss_grip) + (self.lambda_phase * loss_phase)
+            # Weighted total for the progress bar
+            total_val_loss = loss_pose + (self.lambda_gripper * loss_grip)
 
-            # 2. Physical Metrics (Evaluate first step of chunk for immediate accuracy)
-            # We evaluate the immediate next action (t+1)
-            pred_next_pose = pred_pose_chunk[:, 0, :]
-            gt_next_pose = gt_pose_chunk[:, 0, :]
+            # 2. Physical Metrics
+            pos_error_m = torch.norm(pred_pose[:, :3] - gt_pose[:, :3], dim=-1).mean()
+            rot_error_deg = self._compute_geodesic_loss(pred_pose[:, 3:], gt_pose[:, 3:])
             
-            pos_error_m = torch.norm(pred_next_pose[:, :3] - gt_next_pose[:, :3], dim=-1).mean()
-            rot_error_deg = self._compute_geodesic_loss(pred_next_pose[:, 3:], gt_next_pose[:, 3:])
-            
-            # Gripper Accuracy (Whole Chunk)
-            pred_cls = (torch.sigmoid(pred_grip_chunk) > 0.5).float()
-            grip_acc = (pred_cls == gt_grip_chunk).float().mean()
-
-            # Phase Accuracy
-            phase_preds = torch.argmax(pred_phase_logits, dim=1)
-            phase_acc = (phase_preds == gt_phase).float().mean()
+            pred_cls = (torch.sigmoid(pred_grip) > 0.5).float()
+            grip_acc = (pred_cls == gt_grip).float().mean()
 
             # 3. Logging
             self.log("val/loss", total_val_loss, on_epoch=True, sync_dist=True, prog_bar=True)
-            self.log("val/pos_error_m", pos_error_m, on_epoch=True, sync_dist=True, prog_bar=True)
+            # [NEW] Log components separately
+            self.log("val/loss_pose", loss_pose, on_epoch=True, sync_dist=True)
+            self.log("val/loss_grip", loss_grip, on_epoch=True, sync_dist=True)
+            
+            self.log("val/pos_error_m", pos_error_m, on_epoch=True, sync_dist=True)
             self.log("val/rot_error_deg", rot_error_deg, on_epoch=True, sync_dist=True)
             self.log("val/gripper_acc", grip_acc, on_epoch=True, sync_dist=True)
-            self.log("val/phase_acc", phase_acc, on_epoch=True, sync_dist=True)
+
 
     def configure_optimizers(self):
         """
@@ -552,80 +507,57 @@ def main(cfg: DictConfig) -> None:
         check_val_every_n_epoch=cfg.training.get("check_val_every_n_epoch", 1),
     )
 
-
+    # --- 6. SURGICAL MIGRATION LOGIC (The Critical Fix) ---
+# --- 6. SURGICAL MIGRATION LOGIC (The Critical Fix) ---
     resume_path = cfg.training.get("resume_from_checkpoint")
-    ckpt_arg = None 
+    ckpt_arg = None # Default: Start fresh
 
     if resume_path and os.path.exists(resume_path):
-        logger.info(f"--- MIGRATION MODE: Loading v8.0 checkpoint from {resume_path} ---")
+        logger.info(f"--- DETECTED CHECKPOINT: {resume_path} ---")
+        logger.info("Performing Surgical Weight Injection for v7 -> v8 Architecture Update...")
         
         try:
-            checkpoint = torch.load(resume_path, map_location=model.device)
+            # Load raw checkpoint
+            checkpoint = torch.load(resume_path, map_location=model.device, weights_only=False)
             state_dict = checkpoint['state_dict']
-            model_state = model.state_dict()
             
-            new_state_dict = {}
+            # [CRITICAL FIX] Filter out keys with size mismatches (Token Embeddings)
+            model_state = model.state_dict()
+            filtered_state_dict = {}
             
             for k, v in state_dict.items():
-                # 1. If key exists and shape matches, keep it (Backbone, Encoder)
-                if k in model_state and v.shape == model_state[k].shape:
-                    new_state_dict[k] = v
-                    
-                # 2. INTELLIGENT MIGRATION: Pose Head (1 -> K steps)
-                # Old: (Out=7, In=D) -> New: (Out=K*7, In=D)
-                elif "pose_head" in k and "weight" in k and k in model_state:
-                    old_out, in_dim = v.shape
-                    new_out, _ = model_state[k].shape
-                    if new_out % old_out == 0:
-                        factor = new_out // old_out
-                        # Replicate weights: predicts same pose K times initially
-                        logger.info(f"--> Warm-starting {k} by replicating weights {factor}x")
-                        new_state_dict[k] = v.repeat(factor, 1)
-                
-                elif "pose_head" in k and "bias" in k and k in model_state:
-                    old_out = v.shape[0]
-                    new_out = model_state[k].shape[0]
-                    if new_out % old_out == 0:
-                        factor = new_out // old_out
-                        logger.info(f"--> Warm-starting {k} bias")
-                        new_state_dict[k] = v.repeat(factor)
-
-                # 3. INTELLIGENT MIGRATION: Gripper Head (1 -> K steps)
-                elif "gripper_head" in k and "weight" in k and k in model_state:
-                    old_out, in_dim = v.shape
-                    new_out, _ = model_state[k].shape
-                    if new_out % old_out == 0:
-                        factor = new_out // old_out
-                        logger.info(f"--> Warm-starting {k} by replicating weights {factor}x")
-                        new_state_dict[k] = v.repeat(factor, 1)
-
-                elif "gripper_head" in k and "bias" in k and k in model_state:
-                    old_out = v.shape[0]
-                    new_out = model_state[k].shape[0]
-                    factor = new_out // old_out
-                    new_state_dict[k] = v.repeat(factor)
-                
+                if k in model_state:
+                    if v.shape != model_state[k].shape:
+                        logger.warning(f"Skipping shape mismatch for key: {k} | Ckpt: {v.shape} vs Model: {model_state[k].shape}")
+                        continue
+                    filtered_state_dict[k] = v
                 else:
-                    if k in model_state:
-                        logger.warning(f"Skipping mismatched key without heuristic: {k}")
+                    # Key doesn't exist in new model (e.g. old buffers), ignore
+                    pass
+            
 
-            # Load the constructed state dict
-            keys = model.load_state_dict(new_state_dict, strict=False)
+            keys = model.load_state_dict(filtered_state_dict, strict=False)
             
-            logger.info(f"Migration Complete.")
-            logger.info(f"Initialized (Warm): {len(new_state_dict)} layers")
-            logger.info(f"Initialized (Random): {keys.missing_keys}")
+            logger.info(f"Weights Loaded. Missing Keys (Expected for v8 new tokens): {keys.missing_keys}")
             
-            # IMPORTANT: We force a WARM START (Epoch 0) because the optimizer state 
-            # from v8.0 is incompatible with the new parameters.
-            ckpt_arg = None 
+            # --- [THE FIX] ---
+            # If the architecture matches (no missing keys), we generally want to RESUME training state.
+            # If we are migrating architectures (missing keys exist), we usually want to RESET (Warm Start).
+            
+            if len(keys.missing_keys) == 0 and len(keys.unexpected_keys) == 0:
+                logger.info("Architecture match detected. Triggering FULL RESUME (Epoch + Optimizer).")
+                ckpt_arg = resume_path  # <--- Pass path to trainer.fit to restore Epoch/Optimizer
+            else:
+                logger.info("Architecture mismatch detected (Migration). Performing WARM START (Epoch 0).")
+                ckpt_arg = None
             
         except Exception as e:
-            logger.error(f"Migration failed: {e}")
+            logger.error(f"Surgical migration failed: {e}. Aborting.")
             raise e
     else:
-        logger.info("No checkpoint found. Starting fresh.")
+        logger.info("No checkpoint found or resume not requested. Starting fresh.")
 
+    # 7. Execute
     try:
         logger.info("Starting trainer.fit()...")
         trainer.fit(
