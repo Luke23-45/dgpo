@@ -221,7 +221,7 @@ def main():
         
     # Open LMDB for writing (map_size set generously for additions)
     # Standard 1TB map size for safety, actual file size grows as needed.
-    env = lmdb.open(str(dest_path), map_size=int(8 * 1024**3), subdir=False, readonly=False, lock=True)
+    env = lmdb.open(str(dest_path), map_size=int(28 * 1024**3), subdir=False, readonly=False, lock=True)
     
     advantages_stats = []
     

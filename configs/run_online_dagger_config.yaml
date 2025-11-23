@@ -69,7 +69,7 @@ training:
   # Required by Trainer (even if overridden by DAgger loop)
   val_batch_size: 64
   check_val_every_n_epoch: 1
-  max_epochs: 5 
+  max_epochs: 2 
   gradient_clip_val: 1.0
 
 # --- Optimizer (Fine-Tuning Settings) ---
@@ -86,7 +86,7 @@ dataset:
   val_path: ${static_dataset_path}
   use_aug: true
   proprio_noise: 0.02
-  num_workers: 2
+  num_workers: 0
 
 # --- Logging ---
 logging:

@@ -27,7 +27,7 @@ import mujoco
 import numpy as np
 import torch
 import pytorch_lightning as pl
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from PIL import Image
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -224,12 +224,12 @@ class DAggerCollector:
                 goal_img_np = self.env.render()
             goal_t = self.transform(Image.fromarray(goal_img_np)).unsqueeze(0).to(self.device)
 
-            # Initialize history buffer
+            # Initialize history buffer (Inference) - NORMALIZED TENSOR
             curr_img_pil = Image.fromarray(obs['image_primary'])
-            # Initialize raw buffer with CURRENT image (0-255)
-            prev_img_numpy = obs['image_primary'].copy() 
-            # Initialize tensor buffer with NORMALIZED image (-1 to 1)
             prev_img_buffer = self.transform(curr_img_pil).unsqueeze(0).to(self.device)
+
+            # Initialize raw buffer (Storage) - RAW NUMPY
+            prev_img_numpy = obs['image_primary'].copy() 
 
             episode_success = False
             
@@ -246,14 +246,16 @@ class DAggerCollector:
                 proprio = torch.from_numpy(obs['proprio']).float().unsqueeze(0).to(self.device)
                 
                 # Input Batch (v8.0 Structure)
+                # [FIX]: Use 'prev_img_buffer' (Tensor) here, NOT 'prev_img_numpy'
                 batch = {
-                    'prev_image': prev_img_numpy,
+                    'prev_image': prev_img_buffer, 
                     'curr_image': curr_tensor,
                     'goal_image': goal_t,
                     'curr_proprio': proprio
                 }
+                
+                # Update Inference History
                 prev_img_buffer = curr_tensor.clone()
-                prev_img_numpy = obs['image_primary'].copy()
 
                 # Model Forward
                 pred = self.student(batch)
@@ -262,93 +264,65 @@ class DAggerCollector:
                 if 'pose_chunk' in pred:
                      chunk_pose = pred['pose_chunk'].cpu().numpy()[0]
                      chunk_grip = pred['gripper_chunk'].cpu().numpy()[0]
-                     # Lookahead logic from Eval Script
                      lookahead_idx = min(4, self.chunk_size - 1)
                      raw_pose = chunk_pose[lookahead_idx].copy()
                      raw_logit = chunk_grip[lookahead_idx].item()
                 else:
-                     # Fallback for older checkpoints
                      raw_pose = pred['pose'].squeeze().cpu().numpy()
                      raw_logit = pred['gripper_logit'].item()
 
-                # --- C. DATA AGGREGATION (Fixed for v9 Chunking) ---
-                # We replicate the expert's immediate target K times to create a "Zero-Order Hold" chunk.
-                # This makes the DAgger data compatible with the Chunking Model.
+                # --- C. DATA AGGREGATION ---
                 gt_pose_chunk = np.tile(gt_pose, (self.chunk_size, 1))
                 gt_grip_chunk = np.full((self.chunk_size, 1), gt_gripper_state, dtype=np.float32)
 
                 # Store with keys matching SemanticPlannerDataset
+                # [FIX]: Use 'prev_img_numpy' (Uint8) here for storage
                 sample_data = {
-                    'curr_image': obs['image_primary'], # uint8 numpy
-                    'prev_image': prev_img_numpy,
-                    'goal_image': goal_img_np, # uint8 numpy
+                    'curr_image': obs['image_primary'], 
+                    'prev_image': prev_img_numpy,          
+                    'goal_image': goal_img_np,          
                     'curr_proprio': obs['proprio'],
-                    
-                    # Chunk Targets
                     'gt_pose_chunk': gt_pose_chunk.astype(np.float32),
                     'gt_grip_chunk': gt_grip_chunk.astype(np.float32),
                     'gt_phase_label': int(gt_phase),
-                    
                     'advantage': self.cfg.dagger.correction_advantage
                 }
 
-                buffer.add(
-                    sample=sample_data,
-                    is_correction=True 
-                )
+                buffer.add(sample=sample_data, is_correction=True)
                 corrections_added += 1
 
-                # --- D. v13.0 PHYSICS-AWARE SEQUENCER (The Logic Injection) ---
+                # Update Storage History
+                prev_img_numpy = obs['image_primary'].copy()
+
+                # --- D. v13.0 PHYSICS-AWARE SEQUENCER ---
+                # ... (Rest of the loop remains unchanged)
                 ee_pos = obs['ee_pose_world']
                 obj_pos = obs['object_pos_world']
                 dist_xy = np.linalg.norm(ee_pos[:2] - obj_pos[:2])
                 is_physically_grasped = obs['is_grasped'][0] > 0.5
                 
-                current_action_gain = 2.0 # Default High Gain
-                
-                # Priority 1: Transport Safety Protocol
+                current_action_gain = 2.0 
+
                 if is_physically_grasped:
-                    raw_logit = 5.0 # Force CLOSE
+                    raw_logit = 5.0
                 else:
-                    # Priority 2: Acquisition Logic
-                    
-                    # 2a. Safety Suppression (Don't close high up)
                     if ee_pos[2] > 0.46 and grasp_latch_counter == 0:
                         raw_logit = -5.0
-                    
-                    # 2b. Magnetic Approach
                     if dist_xy < 0.30 and grasp_latch_counter == 0:
-                        # Guide gently to object XY (50% blend)
                         raw_pose[:2] = (0.5 * raw_pose[:2]) + (0.5 * obj_pos[:2])
-                        # Progressive Z-Cap
-                        if dist_xy < 0.05:
-                            raw_pose[2] = 0.43 
-                        elif dist_xy < 0.15:
-                            raw_pose[2] = min(raw_pose[2], 0.47)
-
-                    # 2c. Trigger & Latch
+                        if dist_xy < 0.05: raw_pose[2] = 0.43 
+                        elif dist_xy < 0.15: raw_pose[2] = min(raw_pose[2], 0.47)
                     if dist_xy < 0.03 and ee_pos[2] < 0.45 and grasp_latch_counter == 0:
-                        grasp_latch_counter = 45 # 1.5s sequence
-                    
-                    # 2d. Execution Sequence
+                        grasp_latch_counter = 45 
                     if grasp_latch_counter > 0:
-                        raw_logit = 5.0 # Force CLOSE
+                        raw_logit = 5.0 
                         if grasp_latch_counter > 25:
-                            # Align & Descend
-                            raw_pose[:2] = obj_pos[:2] 
-                            raw_pose[2] = 0.425
-                            current_action_gain = 0.5 
+                            raw_pose[:2] = obj_pos[:2]; raw_pose[2] = 0.425; current_action_gain = 0.5 
                         else:
-                            # Lift
-                            raw_pose[:2] = ee_pos[:2]
-                            raw_pose[2] = 0.55
-                            current_action_gain = 1.0 
+                            raw_pose[:2] = ee_pos[:2]; raw_pose[2] = 0.55; current_action_gain = 1.0 
                         grasp_latch_counter -= 1
 
-                # Safety Clamp
                 raw_pose[2] = max(raw_pose[2], 0.405)
-
-                # --- E. SMOOTHING & ACTUATION ---
                 target_pose, gripper_cmd = self.smoother.update(raw_pose, raw_logit)
                 
                 try:
@@ -360,13 +334,9 @@ class DAggerCollector:
                 except:
                     delta_joints = np.zeros(7)
 
-                # Apply Heuristic Gain
-                delta_joints = delta_joints * current_action_gain
-
-                action = np.concatenate([delta_joints, [gripper_cmd]])
+                action = np.concatenate([delta_joints * current_action_gain, [gripper_cmd]])
                 obs, _, terminated, truncated, _ = self.env.step(action)
                 
-                # Success Check
                 obj_pos_now = obs['object_pos_world']
                 dist_goal = np.linalg.norm(obj_pos_now - goal_pos)
                 if dist_goal < 0.05 and obj_pos_now[2] > 0.415 and obs['is_grasped'][0] > 0.5:
@@ -377,11 +347,7 @@ class DAggerCollector:
             
             if episode_success: successes += 1
         
-        return {
-            "success_rate": successes / num_episodes,
-            "corrections_added": corrections_added
-        }
-
+        return {"success_rate": successes / num_episodes, "corrections_added": corrections_added}
 # ==============================================================================
 # 3. MASTER ORCHESTRATOR
 # ==============================================================================
@@ -403,7 +369,7 @@ def main(cfg: DictConfig):
     # B. Surgical Weight Injection (Hot-Patching)
     if os.path.exists(cfg.model_checkpoint):
         log.info("Performing Surgical Weight Injection...")
-        checkpoint = torch.load(cfg.model_checkpoint, map_location=device)
+        checkpoint = torch.load(cfg.model_checkpoint, map_location=device, weights_only=False)
         state_dict = checkpoint['state_dict']
         
         model_state = pl_module.state_dict()
@@ -425,11 +391,20 @@ def main(cfg: DictConfig):
     # [CRITICAL] Override Optimizer Warmup
     if 'optimizer' in pl_module.cfg:
         log.info("Overriding Optimizer Warmup for DAgger Fine-Tuning -> 0.0")
-        with OmegaConf.to_container(pl_module.cfg, resolve=True) as editable_cfg:
-             pl_module.cfg.optimizer.warmup_percentage = 0.0
+        # FIX: Handle both DictConfig (struct mode) and standard Dicts
+        if isinstance(pl_module.cfg, DictConfig):
+            with open_dict(pl_module.cfg):
+                 pl_module.cfg.optimizer.warmup_percentage = 0.0
+        else:
+            # Fallback for standard mutable dicts (no context manager needed)
+            # Try attribute access first, then item access
+            try:
+                pl_module.cfg.optimizer.warmup_percentage = 0.0
+            except AttributeError:
+                pl_module.cfg['optimizer']['warmup_percentage'] = 0.0
 
     # 3. Initialize Expert
-    expert_cfg = ExpertConfig(ignore_timeouts=True) 
+    expert_cfg = ExpertConfig() 
     obj_profile = ObjectProfile(size=np.array([0.04, 0.04, 0.04]), grasp_width_normalized=0.6)
     teacher = ScriptedExpert(object_profile=obj_profile, cfg=expert_cfg)
 

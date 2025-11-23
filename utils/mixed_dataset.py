@@ -65,7 +65,14 @@ class MixedDataset(Dataset):
         self.static_dataset = static_dataset
         self.online_dataset = online_dataset
         self.mix_ratio = mix_ratio
-        self.normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+
+        self.transform = transforms.Compose([
+            transforms.Resize((224, 224), antialias=True),
+            # Note: We assume inputs are already Tensors.
+            # If not, we'd add ToTensor(), but buffers usually store Tensors or Arrays
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        ])
+
         
         # Validate sources
         if not hasattr(static_dataset, '__getitem__'):
@@ -95,39 +102,65 @@ class MixedDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
-        Retrieves a sample.
-        
-        Branch Logic:
-        1. If Online Buffer is empty -> Force Static.
-        2. Else -> Roll Dice vs `mix_ratio`.
-           - Win: Sample random from Online Buffer (RAM, fast).
-           - Lose: Sample `idx` from Static Dataset (Disk, sequential cache hit).
+        Retrieves a sample, handling mixing, resizing, and strict Type Conversion.
         """
         use_online = False
         online_len = len(self.online_dataset)
 
-        # 1. Safety check: Can we use online data?
-        if online_len > 0:
-            # 2. Probabilistic switch
-            if random.random() < self.mix_ratio:
-                use_online = True
+        # 1. Probabilistic switch
+        if online_len > 0 and random.random() < self.mix_ratio:
+            use_online = True
 
         if use_online:
             rand_idx = random.randint(0, online_len - 1)
             sample = self.online_dataset[rand_idx]
             
-            # --- FIX START ---
-            # Apply normalization to image tensors to match Static Dataset
+            # --- [FIX] Uniform Type Conversion & Resizing ---
+            
+            # A. Images: Ensure Tensor + Resize + Normalize
             for key in ['curr_image', 'prev_image', 'goal_image']:
                 if key in sample:
-                    # Sample is 0-1, we need -1 to 1
-                    sample[key] = self.normalize(sample[key])
-            # --- FIX END ---
+                    # Convert to Tensor if Numpy
+                    if not isinstance(sample[key], torch.Tensor):
+                         sample[key] = torch.from_numpy(sample[key])
+                    
+                    # Force 224x224 and Normalize
+                    sample[key] = self.transform(sample[key])
+            
+            # B. Scalars/Arrays: Convert to Tensors to match Static Dataset types
+            
+            # Proprioception -> Float32
+            if 'curr_proprio' in sample and not isinstance(sample['curr_proprio'], torch.Tensor):
+                sample['curr_proprio'] = torch.tensor(sample['curr_proprio'], dtype=torch.float32)
+
+            # Trajectory Targets -> Float32
+            for key in ['gt_pose_chunk', 'gt_grip_chunk']:
+                if key in sample and not isinstance(sample[key], torch.Tensor):
+                    sample[key] = torch.tensor(sample[key], dtype=torch.float32)
+
+            # Phase Label -> Long (Int64)
+            if 'gt_phase_label' in sample and not isinstance(sample['gt_phase_label'], torch.Tensor):
+                sample['gt_phase_label'] = torch.tensor(sample['gt_phase_label'], dtype=torch.long)
+
+            # Advantage -> Float32 Tensor with shape [1]
+            if 'advantage' in sample:
+                val = sample['advantage']
+                if not isinstance(val, torch.Tensor):
+                    sample['advantage'] = torch.tensor([val], dtype=torch.float32)
             
             return sample
         else:
-            # Passthrough to static dataset using the sequential index provided by sampler
-            return self.static_dataset[idx]
+            # Static Dataset sample
+            sample = self.static_dataset[idx]
+            
+            # [Safety] Enforce Image Size for Static Data too (in case of 256x256 inputs)
+            for key in ['curr_image', 'prev_image', 'goal_image']:
+                if key in sample:
+                    if sample[key].shape[-1] != 224:
+                         resizer = transforms.Resize((224, 224), antialias=True)
+                         sample[key] = resizer(sample[key])
+            
+            return sample
 
     def update_ratio(self, new_ratio: float):
         """Allows curriculum learning (increasing online ratio over time)."""
