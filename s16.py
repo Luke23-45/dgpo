@@ -1,5 +1,5 @@
 # FILE: evaluate_semantic_planner.py
-# (v9.8 - Magnetic Descent Heuristic)
+# (v10.0 - Sequenced Grasping Physics)
 
 import logging
 import sys
@@ -56,7 +56,6 @@ class LightweightSmoother:
             self.smooth_pose = (self.alpha_pos * raw_pose) + ((1 - self.alpha_pos) * self.smooth_pose)
             self.smooth_grip_logit = (self.alpha_grip * raw_logit) + ((1 - self.alpha_grip) * self.smooth_grip_logit)
 
-        # Standard Hysteresis (overridden by external logic if needed)
         if not self.gripper_closed and self.smooth_grip_logit > 0.5:
             self.gripper_closed = True
         elif self.gripper_closed and self.smooth_grip_logit < -0.5:
@@ -111,8 +110,7 @@ class AWSPEvaluator:
         
         SIM_SUBSTEPS = 20
         self.effective_dt = self.env.model.opt.timestep * SIM_SUBSTEPS
-        # Robust MaxDQ (Calibrated approx 4.0, set high to allow gain to work)
-        self.max_dq = 4.0 
+        self.max_dq = 3.5 
 
         self.transform = transforms.Compose([
             transforms.Resize((224, 224), antialias=True),
@@ -122,6 +120,7 @@ class AWSPEvaluator:
         
         self.smoother = LightweightSmoother()
         self.prev_img_buffer = None
+
     def run(self):
         out_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
         video_file = out_dir / self.cfg.output_video_path
@@ -143,9 +142,6 @@ class AWSPEvaluator:
         video_writer = cv2.VideoWriter(str(video_file), cv2.VideoWriter_fourcc(*'mp4v'), 30, (w, h))
         
         success_count = 0
-        
-        # Tuning from previous analysis
-        self.max_dq = 4.0 
         action_gain = 2.0 
 
         try:
@@ -154,7 +150,6 @@ class AWSPEvaluator:
                 obs = self.env.get_expert_obs()
                 self.smoother.reset()
                 
-                # --- NEW: State Variable for Latching ---
                 grasp_latch_counter = 0
 
                 with render_robust_virtual_goal(self.env, obs['goal_pos_world']):
@@ -189,39 +184,61 @@ class AWSPEvaluator:
                     raw_target_pose = chunk_pose[2].copy() 
                     raw_grip_logit = chunk_grip[2].item()
 
-                    # --- PATCH 3: STATEFUL HEURISTICS ---
+                    # --- v10.0 PHYSICS-AWARE SEQUENCER ---
                     ee_pos = obs['ee_pose_world']
                     obj_pos = obs['object_pos_world']
                     dist_xy = np.linalg.norm(ee_pos[:2] - obj_pos[:2])
                     dist_3d = np.linalg.norm(ee_pos[:3] - obj_pos)
                     
                     heuristic_active = 0
+                    current_action_gain = 2.0 # Default Gain
                     
-                    # 1. SAFETY SUPPRESSION: Prevent "Fist Bumps"
-                    # If we are too high (>45cm), force OPEN regardless of model prediction.
-                    if ee_pos[2] > 0.45:
-                        raw_grip_logit = -5.0
+                    # 1. Safety Suppression
+                    if ee_pos[2] > 0.46 and grasp_latch_counter == 0:
+                        raw_grip_logit = -5.0 
                     
-                    # 2. MAGNETIC APPROACH (Widened to 15cm)
-                    if dist_xy < 0.15:
+                    # 2. Magnetic Approach
+                    if dist_xy < 0.15 and grasp_latch_counter == 0:
                         heuristic_active = 1
                         raw_target_pose[:2] = (0.5 * raw_target_pose[:2]) + (0.5 * obj_pos[:2])
                         
                         # Progressive Z-Cap
                         if dist_xy < 0.05:
-                            raw_target_pose[2] = 0.415 
+                            # Hover just above grasp point
+                            raw_target_pose[2] = 0.425 
                         elif dist_xy < 0.10:
                             raw_target_pose[2] = min(raw_target_pose[2], 0.45)
                     
-                    # 3. GRASP TRIGGER & LATCHING
-                    # If we get close enough ONCE, latch the grasp command for N steps.
-                    # This prevents the "Hot Potato" drop when jitter increases distance.
-                    if dist_3d < 0.04:
-                        grasp_latch_counter = 15 # Hold for 15 steps (~0.75s)
+                    # 3. Trigger & Latch
+                    # Trigger: Centered and Low
+                    if dist_xy < 0.03 and ee_pos[2] < 0.435 and grasp_latch_counter == 0:
+                        grasp_latch_counter = 40 # EXTENDED: 2.0 seconds
                     
+                    # 4. EXECUTION SEQUENCE
                     if grasp_latch_counter > 0:
                         heuristic_active = 2
                         raw_grip_logit = 5.0 # FORCE CLOSE
+                        
+                        if grasp_latch_counter > 20:
+                            # PHASE 1: FREEZE & GRAB (Steps 40->20)
+                            # FIX: Hard Floor. Do NOT follow ee_pos[2] down.
+                            # Lock Z to exactly object center height.
+                            raw_target_pose[2] = 0.425 
+                            
+                            # Lock XY to current position to stop drift
+                            raw_target_pose[:2] = ee_pos[:2]
+                            
+                            # CRITICAL: Reduce gain to prevent smashing
+                            current_action_gain = 0.5 
+                        else:
+                            # PHASE 2: LIFT (Steps 20->0)
+                            # Lock XY, Pull Z up
+                            raw_target_pose[:2] = ee_pos[:2]
+                            raw_target_pose[2] = 0.55
+                            
+                            # Restore gain for lifting power
+                            current_action_gain = 2.5 
+                        
                         grasp_latch_counter -= 1
 
                     # Smooth & Control
@@ -238,7 +255,8 @@ class AWSPEvaluator:
                     except Exception:
                         delta_joints = np.zeros(7)
 
-                    delta_joints = delta_joints * action_gain
+                    # Apply the dynamic gain
+                    delta_joints = delta_joints * current_action_gain
 
                     action = np.concatenate([delta_joints, [gripper_cmd]])
                     obs, _, terminated, truncated, _ = self.env.step(action)
@@ -255,12 +273,10 @@ class AWSPEvaluator:
 
                     # Render & Log
                     frame = cv2.cvtColor(self.env.render(), cv2.COLOR_RGB2BGR)
-                    # Visualize Latch status
                     latch_str = f"L:{grasp_latch_counter}" if grasp_latch_counter > 0 else ""
                     status_str = f"Ph:{predicted_phase} H:{heuristic_active} {latch_str}"
-                    
                     color = (0, 255, 0) if heuristic_active > 0 else (255, 255, 255)
-                    if heuristic_active == 2: color = (0, 0, 255) # Red for Grasp Force
+                    if heuristic_active == 2: color = (0, 0, 255)
                     
                     cv2.putText(frame, status_str, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
                     video_writer.write(frame)
@@ -285,7 +301,6 @@ class AWSPEvaluator:
             rate = (success_count / self.cfg.num_episodes) * 100
             log.info(f"FINAL EVALUATION RESULT: {rate:.1f}% Success Rate")
 
-            
 @hydra.main(version_base=None, config_path="./configs", config_name="evaluate_semantic_planner_config")
 def main(cfg: DictConfig):
     if "checkpoint_path" not in cfg:

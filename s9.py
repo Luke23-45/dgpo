@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
-
+import csv
 import cv2
 import hydra
 import mujoco
@@ -182,7 +182,20 @@ class AWSPEvaluator:
     def run(self):
         out_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
         video_file = out_dir / self.cfg.output_video_path
-        
+
+
+        csv_file = out_dir / "eval_telemetry.csv"
+        csv_f = open(csv_file, 'w', newline='')
+        writer = csv.writer(csv_f)
+        # Define columns for debugging
+        writer.writerow([
+            "episode", "step", "phase_pred", 
+            "grip_logit_raw", "grip_cmd_smoothed", 
+            "ee_z_actual", "target_z_commanded", 
+            "dist_to_obj", "is_grasped"
+        ])
+        log.info(f"Logging telemetry to: {csv_file}")
+
         obs, _ = self.env.reset()
         dummy = self.env.render()
         h, w, _ = dummy.shape
@@ -224,9 +237,13 @@ class AWSPEvaluator:
                     raw_grip = 0.0
                     
                     chunk = out['pose_chunk'].cpu().numpy()[0]
+                    phase_logits = out['phase_logits'].cpu().numpy()[0]
+                    predicted_phase = np.argmax(phase_logits)
                     # Lookahead: Index 4 (Middle of chunk) is safer than End
                     target_pose = chunk[4] 
                     raw_grip = out['gripper_chunk'].cpu().numpy()[0][0].item()
+                    raw_target_pose = chunk[4] 
+                    
 
                     # HEAVY SMOOTHING APPLIED HERE
                     target_pose, gripper_cmd = self.smoother.update(target_pose, raw_grip)
@@ -257,6 +274,22 @@ class AWSPEvaluator:
                     cv2.putText(frame, f"{self.arch_type} | {phase_txt}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
                     video_writer.write(frame)
 
+
+                    ee_z_actual = obs['ee_pose_world'][2]
+                    target_z_cmd = raw_target_pose[2] 
+                    dist_to_obj = np.linalg.norm(obs['ee_pose_world'][:3] - obs['object_pos_world'])
+                    
+                    writer.writerow([
+                        ep_idx, 
+                        step, 
+                        predicted_phase, 
+                        f"{raw_grip:.4f}",          # Fixed variable name (raw_grip vs raw_grip_logit)
+                        f"{gripper_cmd:.1f}",       
+                        f"{ee_z_actual:.4f}",       
+                        f"{target_z_cmd:.4f}",      
+                        f"{dist_to_obj:.4f}",       
+                        obs['is_grasped'][0]
+                    ])
                     if episode_success or terminated or truncated: break
 
                 successes.append(episode_success)
@@ -265,6 +298,7 @@ class AWSPEvaluator:
         finally:
             video_writer.release()
             self.env.close()
+            csv_f.close() 
             rate = (sum(successes) / len(successes)) * 100 if successes else 0.0
             log.info(f"FINAL SUCCESS RATE: {rate:.1f}%")
 
