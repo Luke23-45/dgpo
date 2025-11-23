@@ -1,63 +1,92 @@
-# FILE: configs/run_online_dagger_config.yaml
-# (Definitive, SOTA, Online Learning Configuration)
-
 defaults:
   - _self_
 
-# Global Seed (Different from pre-training to ensure fresh rollouts)
+# Global Seed
 seed: 100
 
 # --- Paths ---
-# [CRITICAL] Point this to your best Pre-Trained Checkpoint
-model_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_067.ckpt" 
-# model_checkpoint: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/notes/checkpoints/v1/backup_epoch_047.ckpt"
-# The original Expert data (Acts as the "Anchor" to prevent catastrophic forgetting)
+# Point to your best Pre-Trained Checkpoint
+model_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_031.ckpt" 
+
+# The original Expert data (Anchor)
 static_dataset_path: "/content/drive/MyDrive/pda/data/training_ready/training_data.lmdb"
-# static_dataset_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training_data.lmdb"
+
 # Physics Asset
 ik_solver_path: "urdf/panda_mujoco_kinematics.urdf"
+
+# --- Model Architecture (CRITICAL: Must match pre-training) ---
+model:
+  proprio_dim: 22       
+  num_task_phases: 5
+  
+  vision_backbone_model: "google/siglip-base-patch16-224"
+  vision_feature_dim: 768
+  
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  dim_feedforward_ratio: 4
+  dropout: 0.1
+  
+  # v9.0 Specific
+  chunk_size: 10  
+  
+  # Legacy params required by config parser
+  phase_dropout_prob: 0.3 
+  obs_horizon: 1 
 
 # --- DAgger Orchestration Settings ---
 dagger:
   num_rounds: 5                 # Number of Rollout -> Train cycles
   
   # Interaction Phase
-  rollout_episodes_per_round: 10 # Episodes the Student drives per round
-                                 # 20 episodes * 300 steps = ~6000 new frames max
+  rollout_episodes_per_round: 10 
   
   # Memory
-  buffer_capacity: 10000         # Max frames in RAM (Ring Buffer). 
-                                 # Prevents OOM. Oldest corrections are dropped first.
+  buffer_capacity: 10000         
   
-  # Data Mixing (The Secret Sauce)
-  mix_ratio: 0.3                 # Probability of sampling from Online Buffer.
-                                 # 30% of every batch will be specific corrections.
-                                 # 70% will be perfect expert data.
+  # Data Mixing
+  mix_ratio: 0.3                 
 
   # Advantage Injection
-  # We hardcode a high advantage for corrections because the Expert represents the Ideal Policy.
-  # AWR Weight w = exp(10.0 / 5.0) = e^2 = ~7.4. This ensures the model pays attention.
   correction_advantage: 10.0     
 
   # Update Phase
-  epochs_per_round: 5            # Short, aggressive fine-tuning bursts.
+  epochs_per_round: 5            
 
-# --- Training Hyperparameters (Fine-Tuning Mode) ---
+# --- Training Hyperparameters ---
 training:
-  batch_size: 64                 # Smaller batch size is fine for fine-tuning
-  num_workers: 2                 # DataLoader workers
+  batch_size: 64                 
+  num_workers: 2                 
   
-  # Learning Rate is 10x lower than pre-training (1e-4 -> 1e-5)
-  # This prevents destroying the features learned during pre-training.
-  lr: 1e-5
-  weight_decay: 1e-6
-
-  # AWR Parameters (Consistent with pre-training)
+  # AWR Parameters
   awr_temperature: 5.0
   awr_max_weight: 20.0
   
   loss_weights:
-    lambda_gripper: 2.0          # Maintain high priority on gripper correctness
+    lambda_gripper: 2.0
+    lambda_phase: 0.1
+
+  # Required by Trainer (even if overridden by DAgger loop)
+  val_batch_size: 64
+  check_val_every_n_epoch: 1
+  max_epochs: 5 
+  gradient_clip_val: 1.0
+
+# --- Optimizer (Fine-Tuning Settings) ---
+optimizer:
+  # Learning Rate is 10x lower than pre-training (1e-4 -> 1e-5)
+  lr: 1e-5
+  weight_decay: 1e-6
+  min_lr: 1e-7
+  warmup_percentage: 0.0 # Overridden to 0.0 in script, but kept here for safety
+
+# --- Dataset Config (For Noise/Augmentation) ---
+dataset:
+  train_path: ${static_dataset_path} # Reference the var above
+  val_path: ${static_dataset_path}
+  use_aug: true
+  proprio_noise: 0.02
+  num_workers: 2
 
 # --- Logging ---
 logging:

@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-
+from torchvision import transforms
 # Setup Logger
 log = logging.getLogger(__name__)
 
@@ -65,6 +65,7 @@ class MixedDataset(Dataset):
         self.static_dataset = static_dataset
         self.online_dataset = online_dataset
         self.mix_ratio = mix_ratio
+        self.normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         
         # Validate sources
         if not hasattr(static_dataset, '__getitem__'):
@@ -112,17 +113,18 @@ class MixedDataset(Dataset):
                 use_online = True
 
         if use_online:
-            # Random sampling from buffer (Replacment is allowed/implied by randomint)
-            # We act as a "Infinite Reservoir" for the online data within the epoch structure of static data.
             rand_idx = random.randint(0, online_len - 1)
-            try:
-                sample = self.online_dataset[rand_idx]
-                # Inject a flag for debugging if needed, though Tensor structure must match exactly
-                return sample
-            except Exception as e:
-                # Fallback to static on corruption/error to prevent crash
-                log.warning(f"Failed to fetch online sample {rand_idx}: {e}. Falling back to static.")
-                return self.static_dataset[idx]
+            sample = self.online_dataset[rand_idx]
+            
+            # --- FIX START ---
+            # Apply normalization to image tensors to match Static Dataset
+            for key in ['curr_image', 'prev_image', 'goal_image']:
+                if key in sample:
+                    # Sample is 0-1, we need -1 to 1
+                    sample[key] = self.normalize(sample[key])
+            # --- FIX END ---
+            
+            return sample
         else:
             # Passthrough to static dataset using the sequential index provided by sampler
             return self.static_dataset[idx]

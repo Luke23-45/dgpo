@@ -14,8 +14,8 @@ env:
   xml_path: "envs/panda_pick_place.xml"
   control_mode: "delta"
   
-seed: 10530
-num_episodes: 1
+seed: 10531
+num_episodes: 10
 max_steps: 400
 
 # Output paths (relative to hydra run dir)

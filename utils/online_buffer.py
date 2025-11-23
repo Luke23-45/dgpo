@@ -14,7 +14,8 @@ Key Features:
 import collections
 import logging
 import random
-from typing import Dict, List, Tuple, Any
+import pickle
+from typing import Dict, List, Tuple, Any, Optional
 
 import numpy as np
 import torch
@@ -73,8 +74,6 @@ class SlidingWindowBuffer:
         if missing > 0:
             imgs = [imgs[0]] * missing + imgs
             props = [props[0]] * missing + props
-            # For actions, padding with zeros or first action is a design choice.
-            # Repeating first action is usually safer for continuity.
             acts = [acts[0]] * missing + acts
             
         # 3. Stack & Format
@@ -84,96 +83,105 @@ class SlidingWindowBuffer:
             img_stack = np.transpose(img_stack, (0, 3, 1, 2))
             
         # Create Tensors
-        # Note: We don't need gradients for inference input
         img_tensor = torch.from_numpy(img_stack).float().div_(255.0)
         prop_tensor = torch.from_numpy(np.stack(props)).float()
         act_tensor = torch.from_numpy(np.stack(acts)).float()
 
         # Add Batch Dimension (B=1)
         return {
-            "initial_image": img_tensor.unsqueeze(0), # (1, T, C, H, W) - Model takes last or seq
-            "proprio_hist": prop_tensor.unsqueeze(0), # (1, T, D_prop)
-            "action_hist": act_tensor.unsqueeze(0)    # (1, T, D_act)
+            "initial_image": img_tensor.unsqueeze(0), 
+            "proprio_hist": prop_tensor.unsqueeze(0), 
+            "action_hist": act_tensor.unsqueeze(0)
         }
 
 
 class OnlineReplayBuffer:
     """
     Dual-Stream Replay Buffer for DAgger.
-    Optimized for RAM: Stores images as uint8 (CPU), converts to float (GPU) on sample.
     """
-    def __init__(self, capacity: int = 10000):
+    def __init__(self, capacity: int = 10000, default_advantage: float = 2.0):
         self.capacity = capacity
         self.success_buffer: List[Dict] = []
         self.correction_buffer: List[Dict] = []
         self.total_added = 0
+        self.default_advantage = default_advantage
     
     def add(self, sample: Dict[str, Any], is_correction: bool):
         """
-        Stores a training sample.
-        Crucial: Expects inputs to be CPU numpy arrays or CPU tensors to save VRAM.
+        Stores a training sample. 
+        Expects inputs to be CPU numpy arrays or CPU tensors.
+        Images (float 0-1) are compressed to uint8 (0-255) for RAM efficiency.
         """
         target_list = self.correction_buffer if is_correction else self.success_buffer
         
-        # FIFO Eviction (Split capacity between buffers)
+        # FIFO Eviction
         limit = self.capacity // 2
         if len(target_list) >= limit:
             target_list.pop(0)
             
-        # Lightweight processing before storage (ensure CPU)
         processed_sample = {}
         for k, v in sample.items():
             if isinstance(v, torch.Tensor):
                 v = v.detach().cpu()
                 # Compress Images: Float (0-1) -> Uint8 (0-255)
-                if k in ["initial_image", "goal_image"] and v.dtype == torch.float32:
-                    v = (v * 255.0).to(torch.uint8)
+                # Matches keys in SemanticPlannerDataset and DAggerCollector
+                if k in ["curr_image", "goal_image", "prev_image"] and v.dtype == torch.float32:
+                   v = (v * 255.0).to(torch.uint8)
             processed_sample[k] = v
             
         target_list.append(processed_sample)
         self.total_added += 1
 
-    def sample_batch(self, batch_size: int, correction_ratio: float = 0.5, device: str = 'cpu') -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
-        Samples a mixed batch, decompresses images, and moves to device.
+        Retrieves a single sample by index (virtual concatenated list).
+        Necessary for MixedDataset compatibility.
         """
-        n_correct = int(batch_size * correction_ratio)
-        n_success = batch_size - n_correct
-
-        # Handle empty buffer edge cases
-        if not self.correction_buffer:
-            n_success = batch_size
-            n_correct = 0
-        elif not self.success_buffer:
-            n_success = 0
-            n_correct = batch_size
-            
-        if n_correct == 0 and n_success == 0:
-            return {}
-
-        # Sampling
-        batch_samples = []
-        if n_correct > 0:
-            batch_samples.extend(random.choices(self.correction_buffer, k=n_correct))
-        if n_success > 0:
-            batch_samples.extend(random.choices(self.success_buffer, k=n_success))
-
-        # Collate & Decompress
-        collated = {}
-        # Get keys from first sample
-        keys = batch_samples[0].keys()
+        # Virtual list: [ ...success_buffer..., ...correction_buffer... ]
+        n_success = len(self.success_buffer)
         
-        for key in keys:
-            # Stack into (B, ...)
-            tensor_stack = torch.stack([s[key] for s in batch_samples])
-            
-            # Decompress Images: Uint8 -> Float
-            if key in ["initial_image", "goal_image"] and tensor_stack.dtype == torch.uint8:
-                tensor_stack = tensor_stack.float().div_(255.0)
-            
-            collated[key] = tensor_stack.to(device)
-            
-        return collated
-        
+        if idx < n_success:
+            sample = self.success_buffer[idx]
+        else:
+            corr_idx = idx - n_success
+            if corr_idx >= len(self.correction_buffer):
+                raise IndexError(f"Index {idx} out of range for OnlineReplayBuffer")
+            sample = self.correction_buffer[corr_idx]
+
+        # Decompress and format
+        out_sample = {}
+        for k, v in sample.items():
+            # Decompress: Uint8 -> Float (0-1)
+            if isinstance(v, torch.Tensor) and v.dtype == torch.uint8 and k in ["curr_image", "goal_image", "prev_image"]:
+                out_sample[k] = v.float().div_(255.0)
+            # If it was numpy uint8 (from env), convert to Tensor Float
+            elif isinstance(v, np.ndarray) and v.dtype == np.uint8 and k in ["curr_image", "goal_image", "prev_image"]:
+                 out_sample[k] = torch.from_numpy(v).float().div_(255.0)
+                 if out_sample[k].ndim == 3 and out_sample[k].shape[-1] == 3: # HWC -> CHW
+                     out_sample[k] = out_sample[k].permute(2, 0, 1)
+            else:
+                out_sample[k] = v
+        return out_sample
+
     def __len__(self):
         return len(self.success_buffer) + len(self.correction_buffer)
+        
+    def save_to_disk(self, path: str):
+        """Saves buffer to disk using Pickle."""
+        data = {
+            "success_buffer": self.success_buffer,
+            "correction_buffer": self.correction_buffer,
+            "total_added": self.total_added
+        }
+        with open(path, 'wb') as f:
+            pickle.dump(data, f)
+        log.info(f"OnlineBuffer saved to {path} ({len(self)} samples)")
+
+    def load_from_disk(self, path: str):
+        """Loads buffer from disk."""
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+        self.success_buffer = data["success_buffer"]
+        self.correction_buffer = data["correction_buffer"]
+        self.total_added = data["total_added"]
+        log.info(f"OnlineBuffer loaded from {path} ({len(self)} samples)")

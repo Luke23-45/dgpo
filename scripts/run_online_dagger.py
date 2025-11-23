@@ -1,28 +1,15 @@
 # FILE: scripts/run_online_dagger.py
-# (Definitive, SOTA, DAgger Orchestrator)
+# (Definitive, v13.0 Aligned - Transport Safety & Ratchet Logic)
 
 """
 Online DAgger (Dataset Aggregation) Orchestrator.
+ALIGNED WITH: evaluate_semantic_planner.py (v13.0)
 
-This script implements the **Iterative Alignment** loop for the AWSP framework.
-It bridges the "Simulation World" and the "Training World" to solve Covariate Shift.
-
-Algorithm (DAgger):
-1.  **Initialize**: Load Pre-trained Student (Policy) and Scripted Teacher (Expert).
-2.  **Loop (Rounds)**:
-    a.  **Rollout**: Student controls the robot. Teacher observes and labels the
-        states visited by the Student (generating "Correction" tuples).
-    b.  **Aggregate**: Add corrections to the RAM-based `OnlineReplayBuffer`.
-    c.  **Update**: Train the Student on a mixture of Static Expert Data (Stability)
-        and Online Correction Data (Recovery).
-    d.  **Evaluate**: Check zero-shot performance.
-
-Implementation Details:
--   **Dynamic Mixing**: Uses `MixedDataset` to interleave disk-based expert trajectories
-    with RAM-based corrections without I/O blocking.
--   **Safety**: Persists the Replay Buffer to disk every round.
--   **Optimization**: Re-initializes the PyTorch Lightning Trainer every round to
-    ensure clean optimizer states for fine-tuning.
+Key Features:
+1.  **Physics-Aware Sequencer**: Implements Transport Safety, Magnetic Approach, and Trigger/Latch logic
+    during the Student Rollout to ensure data is collected in the valid distribution.
+2.  **Lightweight Smoothing**: Uses EMA and Hysteresis to stabilize Student actions.
+3.  **SOTA Architecture Support**: Handles Disentangled v8.0/v9.0 inputs/outputs (Chunking).
 """
 
 from __future__ import annotations
@@ -30,19 +17,22 @@ from __future__ import annotations
 import logging
 import os
 import sys
-import copy
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
-import mujoco
+
 import cv2
 import hydra
+import mujoco
 import numpy as np
 import torch
 import pytorch_lightning as pl
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from torch.utils.data import DataLoader
+from torchvision import transforms
 from tqdm import tqdm
+from scipy.spatial.transform import Rotation as R
 
 # --- Project Imports ---
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,20 +52,125 @@ from utils.samplers import EpisodeAwareSampler
 # --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] [DAgger] - %(message)s",
+    format="%(asctime)s [%(levelname)s] [DAgger-v13] - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 log = logging.getLogger("DAgger")
 
 
 # ==============================================================================
-# 1. DATA COLLECTION ENGINE (The Rollout Loop)
+# 1. UTILITIES: SMOOTHER & ROBUST RENDERING (v13.0 Port)
+# ==============================================================================
+
+class LightweightSmoother:
+    """EMA Smoother with Gripper Hysteresis (Ported from Eval v13.0)."""
+    def __init__(self, alpha_pos=0.8, alpha_grip=0.5):
+        self.alpha_pos = alpha_pos
+        self.alpha_grip = alpha_grip
+        self.smooth_pose = None
+        self.smooth_grip_logit = 0.0
+        self.gripper_closed = False
+
+    def reset(self):
+        self.smooth_pose = None
+        self.smooth_grip_logit = 0.0
+        self.gripper_closed = False
+
+    def update(self, raw_pose: np.ndarray, raw_logit: float) -> Tuple[np.ndarray, float]:
+        if self.smooth_pose is None:
+            self.smooth_pose = raw_pose
+            self.smooth_grip_logit = raw_logit
+        else:
+            self.smooth_pose = (self.alpha_pos * raw_pose) + ((1 - self.alpha_pos) * self.smooth_pose)
+            self.smooth_grip_logit = (self.alpha_grip * raw_logit) + ((1 - self.alpha_grip) * self.smooth_grip_logit)
+        
+        # Hysteresis
+        if not self.gripper_closed and self.smooth_grip_logit > 0.5:
+            self.gripper_closed = True
+        elif self.gripper_closed and self.smooth_grip_logit < -0.5:
+            self.gripper_closed = False
+            
+        gripper_cmd = -1.0 if self.gripper_closed else 1.0
+        return self.smooth_pose, gripper_cmd
+
+def calculate_retract_joints(env: PandaEnv, ik_solver: IKSolver, target_pos_world: np.ndarray, object_quat_wxyz: np.ndarray) -> np.ndarray:
+    """Calculates joints for 'Done' state."""
+    hover_z = 0.55 
+    target_pos = np.array([target_pos_world[0], target_pos_world[1], hover_z])
+    
+    q_obj = np.array([object_quat_wxyz[1], object_quat_wxyz[2], object_quat_wxyz[3], object_quat_wxyz[0]])
+    r_target = R.from_quat(q_obj) * R.from_euler('x', 180, degrees=True)
+    
+    base_pos, base_quat = env.get_base_pose()
+    R_base_world = R.from_quat(base_quat).as_matrix()
+    T_world_base = np.linalg.inv(np.vstack([
+        np.hstack([R_base_world, base_pos.reshape(3,1)]),
+        [0,0,0,1]
+    ]))
+    
+    target_in_base_pos = (T_world_base @ np.append(target_pos, 1.0))[:3]
+    target_in_base_rot = T_world_base[:3, :3] @ r_target.as_matrix()
+
+    current_joints = env.data.qpos[:7].copy()
+    initial_guess = [0.0]*len(ik_solver.chain.links)
+    for i, v in enumerate(current_joints): initial_guess[ik_solver._active_idx[i]] = v
+
+    full_joints = ik_solver.chain.inverse_kinematics(
+        target_position=target_in_base_pos,
+        target_orientation=target_in_base_rot,
+        orientation_mode="all",
+        initial_position=initial_guess
+    )
+    return np.array([full_joints[i] for i in ik_solver._active_idx])
+
+@contextmanager
+def render_robust_virtual_goal(env: PandaEnv, ik_solver: IKSolver, target_pos_world: np.ndarray):
+    """
+    Robust Virtual Goal Renderer (v13.0).
+    Resets robot to home position before rendering to prevent occlusion.
+    """
+    saved_qpos = env.data.qpos.copy()
+    saved_qvel = env.data.qvel.copy()
+    saved_ctrl = env.data.ctrl.copy()
+    try:
+        # Reset robot to home to clear view
+        home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
+        env.data.qpos[:7] = home_qpos
+        env.data.qpos[7:] = 0.04 # Open grippers
+        
+        # Move object to goal
+        obj_jnt_adr = env.model.jnt_qposadr[env.object_joint_id]
+        curr_obj_quat = env.data.qpos[obj_jnt_adr+3 : obj_jnt_adr+7].copy()
+        
+        # Safe Z enforcement
+        safe_z = max(target_pos_world[2], 0.42)
+        env.data.qpos[obj_jnt_adr : obj_jnt_adr+3] = [target_pos_world[0], target_pos_world[1], safe_z]
+        env.data.qpos[obj_jnt_adr+3 : obj_jnt_adr+7] = curr_obj_quat
+        
+        # Calculate ideal retraction joints for visuals
+        try:
+             target_joints = calculate_retract_joints(env, ik_solver, target_pos_world, curr_obj_quat)
+             env.data.qpos[:7] = target_joints
+        except:
+             pass
+
+        env.data.qvel[:] = 0
+        mujoco.mj_forward(env.model, env.data)
+        yield
+    finally:
+        env.data.qpos[:] = saved_qpos
+        env.data.qvel[:] = saved_qvel
+        env.data.ctrl[:] = saved_ctrl
+        mujoco.mj_forward(env.model, env.data)
+
+
+# ==============================================================================
+# 2. COMPONENT: DATA COLLECTOR (v13.0 LOGIC)
 # ==============================================================================
 
 class DAggerCollector:
     """
-    Manages the interaction between Student, Teacher, and Environment.
-    Generates 'Correction' samples.
+    Manages rollout with v13.0 Physics-Aware Logic.
     """
     def __init__(self, 
                  env: PandaEnv, 
@@ -91,214 +186,275 @@ class DAggerCollector:
         self.device = device
         self.cfg = cfg
 
-        # Image Transform (Must match training exactly)
-        from torchvision import transforms
         self.transform = transforms.Compose([
             transforms.Resize((224, 224), antialias=True),
-            transforms.ToTensor()
+            transforms.ToTensor(),
+            # Normalize included in transform to match Eval script
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
 
-        # Calibration
+        # Physics Sync
         SIM_SUBSTEPS = 20 
         self.effective_dt = env.model.opt.timestep * SIM_SUBSTEPS
         self.max_dq = env.ACTION_SCALING_FACTOR / self.effective_dt
 
+        # v13.0 Utilities
+        self.smoother = LightweightSmoother()
+        self.chunk_size = cfg.model.get("chunk_size", 10) # Default for v9/v13 models
+
     @torch.no_grad()
-    def collect_round(self, buffer: OnlineReplayBuffer, num_episodes: int, epsilon: float = 0.0) -> Dict[str, float]:
-        """
-        Runs simulation episodes.
-        Student drives (mostly). Teacher corrects.
+    def collect_round(self, buffer: OnlineReplayBuffer, num_episodes: int) -> Dict[str, float]:
+        self.student.eval()
         
-        Args:
-            epsilon: Probability of executing Random actions (Exploration). 
-                     Usually 0.0 for pure DAgger (Student drives).
-        """
-        self.student.eval() # Student in eval mode (no dropout)
-        
-        total_steps = 0
         successes = 0
         corrections_added = 0
         
-        log.info(f"Starting Rollout: {num_episodes} Episodes...")
-        
         for ep in tqdm(range(num_episodes), desc="Rollout"):
-            # 1. Reset
-            # Add noise to seed for diversity
-            seed = self.cfg.seed + 9999 + ep 
+            seed = self.cfg.seed + 99999 + ep 
             obs, _ = self.env.reset(seed=seed)
+            self.smoother.reset()
+            grasp_latch_counter = 0
             
-            # Teacher Reset
             self.teacher.reset()
             self.env.set_object_size(self.teacher.object.size)
             
-            # 2. Goal Hallucination (For Student Input)
-            # We use the virtual goal rendering trick from evaluation
+            # 1. Robust Goal Rendering
             goal_pos = obs['goal_pos_world']
-            # Inline render logic for speed (simplified version of context manager)
-            saved_qpos = self.env.data.qpos.copy()
-            saved_qvel = self.env.data.qvel.copy()
-            try:
-                q_adr = self.env.model.jnt_qposadr[self.env.object_joint_id]
-                # Move obj to goal
-                self.env.data.qpos[q_adr:q_adr+3] = goal_pos
-                # Open gripper, retract arm (heuristic home)
-                self.env.data.qpos[7:9] = 0.04
-                mujoco.mj_forward(self.env.model, self.env.data)
+            with render_robust_virtual_goal(self.env, self.ik_solver, goal_pos):
                 goal_img_np = self.env.render()
-            finally:
-                self.env.data.qpos[:] = saved_qpos
-                self.env.data.qvel[:] = saved_qvel
-                mujoco.mj_forward(self.env.model, self.env.data)
-            
             goal_t = self.transform(Image.fromarray(goal_img_np)).unsqueeze(0).to(self.device)
 
-            # 3. Step Loop
+            # Initialize history buffer
+            curr_img_pil = Image.fromarray(obs['image_primary'])
+            # Initialize raw buffer with CURRENT image (0-255)
+            prev_img_numpy = obs['image_primary'].copy() 
+            # Initialize tensor buffer with NORMALIZED image (-1 to 1)
+            prev_img_buffer = self.transform(curr_img_pil).unsqueeze(0).to(self.device)
+
             episode_success = False
             
             for step in range(self.env.max_episode_steps):
-                # --- A. Get Expert Correction (The Label) ---
-                # We get what the expert *would* do in this state
-                # Note: The expert needs the rich observation dict
+                # --- A. TEACHER ---
                 expert_obs = self.env.get_expert_obs()
-                
-                # Expert Logic
-                # [PATCH] The expert now returns (target_pose, gripper_action, info) directly.
-                # This matches the updated ScriptedExpert signature.
                 gt_pose, gt_grip_act, gt_info = self.teacher.get_target_pose(expert_obs)
-                
-                # Convert Expert Action (Float -1/1) to State (1.0/0.0)
-                # Logic: < -0.1 implies CLOSED (1.0), else OPEN (0.0)
-                gt_gripper_state = 1.0 if gt_grip_act < -0.1 else 0.0
-                
-                # Get Phase (Explicit)
                 gt_phase = gt_info['gt_phase']
+                gt_gripper_state = float(gt_info['gt_gripper_intent'])
                 
-                # --- B. Get Student Prediction (The Driver) ---
-                img_t = self.transform(Image.fromarray(obs['image_primary'])).unsqueeze(0).to(self.device)
-                prop_t = torch.from_numpy(obs['proprio']).float().unsqueeze(0).to(self.device)
-                phase_t = torch.tensor([gt_phase], device=self.device) # Student knows phase (Assumption: Phase Oracle works)
+                # --- B. STUDENT INFERENCE ---
+                curr_img_pil = Image.fromarray(obs['image_primary'])
+                curr_tensor = self.transform(curr_img_pil).unsqueeze(0).to(self.device)
+                proprio = torch.from_numpy(obs['proprio']).float().unsqueeze(0).to(self.device)
+                
+                # Input Batch (v8.0 Structure)
+                batch = {
+                    'prev_image': prev_img_numpy,
+                    'curr_image': curr_tensor,
+                    'goal_image': goal_t,
+                    'curr_proprio': proprio
+                }
+                prev_img_buffer = curr_tensor.clone()
+                prev_img_numpy = obs['image_primary'].copy()
 
-                pred = self.student({
-                    'initial_image': img_t, 'goal_image': goal_t,
-                    'task_phase': phase_t, 'current_proprio': prop_t
-                })
+                # Model Forward
+                pred = self.student(batch)
                 
-                # Student outputs
-                raw_pose = pred['pose'].squeeze().cpu().numpy()
-                raw_logit = pred['gripper_logit'].item()
-                
-                # --- C. Save Correction (DAgger) ---
-                # Store: Student State -> Teacher Action
+                # Extract Output (Handling Chunks vs Single)
+                if 'pose_chunk' in pred:
+                     chunk_pose = pred['pose_chunk'].cpu().numpy()[0]
+                     chunk_grip = pred['gripper_chunk'].cpu().numpy()[0]
+                     # Lookahead logic from Eval Script
+                     lookahead_idx = min(4, self.chunk_size - 1)
+                     raw_pose = chunk_pose[lookahead_idx].copy()
+                     raw_logit = chunk_grip[lookahead_idx].item()
+                else:
+                     # Fallback for older checkpoints
+                     raw_pose = pred['pose'].squeeze().cpu().numpy()
+                     raw_logit = pred['gripper_logit'].item()
+
+                # --- C. DATA AGGREGATION (Fixed for v9 Chunking) ---
+                # We replicate the expert's immediate target K times to create a "Zero-Order Hold" chunk.
+                # This makes the DAgger data compatible with the Chunking Model.
+                gt_pose_chunk = np.tile(gt_pose, (self.chunk_size, 1))
+                gt_grip_chunk = np.full((self.chunk_size, 1), gt_gripper_state, dtype=np.float32)
+
+                # Store with keys matching SemanticPlannerDataset
+                sample_data = {
+                    'curr_image': obs['image_primary'], # uint8 numpy
+                    'prev_image': prev_img_numpy,
+                    'goal_image': goal_img_np, # uint8 numpy
+                    'curr_proprio': obs['proprio'],
+                    
+                    # Chunk Targets
+                    'gt_pose_chunk': gt_pose_chunk.astype(np.float32),
+                    'gt_grip_chunk': gt_grip_chunk.astype(np.float32),
+                    'gt_phase_label': int(gt_phase),
+                    
+                    'advantage': self.cfg.dagger.correction_advantage
+                }
+
                 buffer.add(
-                    initial_image=obs['image_primary'], # Save raw uint8
-                    goal_image=goal_img_np,             # Save raw uint8
-                    task_phase=gt_phase,
-                    current_proprio=obs['proprio'],
-                    gt_pose=gt_pose,
-                    gt_gripper=gt_gripper_state,
-                    advantage=self.cfg.dagger.correction_advantage # High value (e.g. 10.0)
+                    sample=sample_data,
+                    is_correction=True 
                 )
                 corrections_added += 1
 
-                # --- D. Execute Action (Student Drives) ---
-                # Decode Student Action
-                student_grip_cmd = -1.0 if raw_logit > 0.0 else 1.0
+                # --- D. v13.0 PHYSICS-AWARE SEQUENCER (The Logic Injection) ---
+                ee_pos = obs['ee_pose_world']
+                obj_pos = obs['object_pos_world']
+                dist_xy = np.linalg.norm(ee_pos[:2] - obj_pos[:2])
+                is_physically_grasped = obs['is_grasped'][0] > 0.5
                 
-                # Solve IK for Student Pose
-                # [PATCH] Use the robust compute_delta_action with calibrated max_dq
+                current_action_gain = 2.0 # Default High Gain
+                
+                # Priority 1: Transport Safety Protocol
+                if is_physically_grasped:
+                    raw_logit = 5.0 # Force CLOSE
+                else:
+                    # Priority 2: Acquisition Logic
+                    
+                    # 2a. Safety Suppression (Don't close high up)
+                    if ee_pos[2] > 0.46 and grasp_latch_counter == 0:
+                        raw_logit = -5.0
+                    
+                    # 2b. Magnetic Approach
+                    if dist_xy < 0.30 and grasp_latch_counter == 0:
+                        # Guide gently to object XY (50% blend)
+                        raw_pose[:2] = (0.5 * raw_pose[:2]) + (0.5 * obj_pos[:2])
+                        # Progressive Z-Cap
+                        if dist_xy < 0.05:
+                            raw_pose[2] = 0.43 
+                        elif dist_xy < 0.15:
+                            raw_pose[2] = min(raw_pose[2], 0.47)
+
+                    # 2c. Trigger & Latch
+                    if dist_xy < 0.03 and ee_pos[2] < 0.45 and grasp_latch_counter == 0:
+                        grasp_latch_counter = 45 # 1.5s sequence
+                    
+                    # 2d. Execution Sequence
+                    if grasp_latch_counter > 0:
+                        raw_logit = 5.0 # Force CLOSE
+                        if grasp_latch_counter > 25:
+                            # Align & Descend
+                            raw_pose[:2] = obj_pos[:2] 
+                            raw_pose[2] = 0.425
+                            current_action_gain = 0.5 
+                        else:
+                            # Lift
+                            raw_pose[:2] = ee_pos[:2]
+                            raw_pose[2] = 0.55
+                            current_action_gain = 1.0 
+                        grasp_latch_counter -= 1
+
+                # Safety Clamp
+                raw_pose[2] = max(raw_pose[2], 0.405)
+
+                # --- E. SMOOTHING & ACTUATION ---
+                target_pose, gripper_cmd = self.smoother.update(raw_pose, raw_logit)
+                
                 try:
                     delta_joints = self.ik_solver.compute_delta_action(
-                        target_ee_pose=raw_pose,
-                        model=self.env.model,
-                        data=self.env.data,
-                        ee_site_id=self.env.ee_site_id,
-                        joint_qpos_indices=np.arange(7),
-                        effective_dt=self.effective_dt,
-                        max_dq=self.max_dq # Uses self.max_dq derived in __init__
+                        target_ee_pose=target_pose,
+                        model=self.env.model, data=self.env.data, ee_site_id=self.env.ee_site_id,
+                        joint_qpos_indices=np.arange(7), effective_dt=self.effective_dt, max_dq=self.max_dq
                     )
-                except Exception:
+                except:
                     delta_joints = np.zeros(7)
 
-                action = np.concatenate([delta_joints, [student_grip_cmd]])
-                
-                # Step
+                # Apply Heuristic Gain
+                delta_joints = delta_joints * current_action_gain
+
+                action = np.concatenate([delta_joints, [gripper_cmd]])
                 obs, _, terminated, truncated, _ = self.env.step(action)
                 
-                # Check Success
-                dist = np.linalg.norm(obs['object_pos_world'] - obs['goal_pos_world'])
-                obj_z = obs['object_pos_world'][2]
-                if dist < 0.05 and obj_z > 0.41 and obs['is_grasped'][0] > 0.5:
+                # Success Check
+                obj_pos_now = obs['object_pos_world']
+                dist_goal = np.linalg.norm(obj_pos_now - goal_pos)
+                if dist_goal < 0.05 and obj_pos_now[2] > 0.415 and obs['is_grasped'][0] > 0.5:
                     episode_success = True
                 
                 if episode_success or terminated or truncated:
                     break
-                
-                total_steps += 1
             
             if episode_success: successes += 1
         
-        metrics = {
-            "rollout/success_rate": successes / num_episodes,
-            "rollout/corrections_added": corrections_added
+        return {
+            "success_rate": successes / num_episodes,
+            "corrections_added": corrections_added
         }
-        return metrics
-
 
 # ==============================================================================
-# 2. MASTER ORCHESTRATOR
+# 3. MASTER ORCHESTRATOR
 # ==============================================================================
 
 @hydra.main(version_base=None, config_path="../configs", config_name="run_online_dagger_config")
 def main(cfg: DictConfig):
-    # 1. Setup & Reproducibility
+    # 1. Setup
     pl.seed_everything(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
     workspace_dir = Path(os.getcwd())
     log.info(f"DAgger Workspace: {workspace_dir}")
 
-    # 2. Initialize Components
-    
-    # A. Model (Student) - Load from Pre-trained Checkpoint
-    log.info(f"Loading Base Policy from: {cfg.model_checkpoint}")
-    # We use the LightningModule wrapper to handle loading correctly
-    pl_module = SemanticPlannerLightningModule.load_from_checkpoint(
-        cfg.model_checkpoint, map_location=device, strict=True
-    )
+    # 2. Load Student (SOTA SURGICAL LOADING)
+    log.info(f"Loading Base Policy: {cfg.model_checkpoint}")
+    pl_module = SemanticPlannerLightningModule(cfg)
     student_model = pl_module.model
-    # Ensure config matches loaded model
-    train_cfg = pl_module.cfg 
+    student_model.to(device)
 
-    # B. Expert (Teacher)
-    expert_config = ExpertConfig() # Use defaults or load from hydra
+    # B. Surgical Weight Injection (Hot-Patching)
+    if os.path.exists(cfg.model_checkpoint):
+        log.info("Performing Surgical Weight Injection...")
+        checkpoint = torch.load(cfg.model_checkpoint, map_location=device)
+        state_dict = checkpoint['state_dict']
+        
+        model_state = pl_module.state_dict()
+        filtered_state_dict = {}
+        
+        for k, v in state_dict.items():
+            if k in model_state:
+                # Filter mismatches
+                if v.shape != model_state[k].shape:
+                    log.warning(f"Skipping shape mismatch: {k} | Ckpt: {v.shape} vs Model: {model_state[k].shape}")
+                    continue
+                filtered_state_dict[k] = v
+        
+        pl_module.load_state_dict(filtered_state_dict, strict=False)
+        log.info("Weights Loaded Successfully.")
+    else:
+        raise FileNotFoundError(f"Checkpoint not found: {cfg.model_checkpoint}")
 
+    # [CRITICAL] Override Optimizer Warmup
+    if 'optimizer' in pl_module.cfg:
+        log.info("Overriding Optimizer Warmup for DAgger Fine-Tuning -> 0.0")
+        with OmegaConf.to_container(pl_module.cfg, resolve=True) as editable_cfg:
+             pl_module.cfg.optimizer.warmup_percentage = 0.0
+
+    # 3. Initialize Expert
+    expert_cfg = ExpertConfig(ignore_timeouts=True) 
     obj_profile = ObjectProfile(size=np.array([0.04, 0.04, 0.04]), grasp_width_normalized=0.6)
+    teacher = ScriptedExpert(object_profile=obj_profile, cfg=expert_cfg)
 
-    teacher = ScriptedExpert(object_profile=obj_profile, cfg=expert_config)
-
-    # C. Environment & IK
+    # 4. Environment & IK
     env = PandaEnv(xml_path="envs/panda_pick_place.xml", control_mode='delta', enable_domain_randomization=True)
-    ik_solver = IKSolver(urdf_path="urdf/panda_mujoco_kinematics.urdf")
+    ik_solver = IKSolver(urdf_path=cfg.ik_solver_path)
 
-    # D. Datasets
-    # 1. Static Dataset (The Anchor)
+    # 5. Datasets
     log.info(f"Loading Static Dataset: {cfg.static_dataset_path}")
     static_dataset = SemanticPlannerDataset(
         dataset_path=cfg.static_dataset_path,
-        use_aug=True # Essential to maintain generalization
+        use_aug=True,
+        chunk_size=cfg.model.get("chunk_size", 10)
     )
     
-    # 2. Online Buffer (The Correction Memory)
     online_buffer = OnlineReplayBuffer(
         capacity=cfg.dagger.buffer_capacity,
         default_advantage=cfg.dagger.correction_advantage
     )
 
-    # E. Collector
+    # 6. Init Collector (With v13.0 Logic)
     collector = DAggerCollector(env, student_model, teacher, ik_solver, device, cfg)
 
     # ============================
-    # 3. THE DAGGER LOOP
+    # THE LOOP
     # ============================
     
     for round_idx in range(1, cfg.dagger.num_rounds + 1):
@@ -306,30 +462,24 @@ def main(cfg: DictConfig):
         
         # --- PHASE A: ROLLOUT ---
         log.info(">>> PHASE A: ROLLOUT (Data Collection)")
-        rollout_metrics = collector.collect_round(
+        metrics = collector.collect_round(
             buffer=online_buffer,
             num_episodes=cfg.dagger.rollout_episodes_per_round
         )
-        log.info(f"Rollout Metrics: {rollout_metrics}")
+        log.info(f"Rollout Complete. Success Rate: {metrics['success_rate']*100:.1f}%")
         log.info(f"Buffer Size: {len(online_buffer)}")
         
-        # Snapshot Buffer for safety
-        buffer_save_path = workspace_dir / f"buffer_round_{round_idx}.pkl"
-        online_buffer.save_to_disk(str(buffer_save_path))
+        online_buffer.save_to_disk(str(workspace_dir / f"buffer_round_{round_idx}.pkl"))
 
         # --- PHASE B: UPDATE (Fine-Tuning) ---
         log.info(">>> PHASE B: UPDATE (Fine-Tuning)")
         
-        # Create Mixed Dataset (Static + Online)
         mixed_dataset = MixedDataset(
             static_dataset=static_dataset,
             online_dataset=online_buffer,
             mix_ratio=cfg.dagger.mix_ratio
         )
         
-        # Setup DataLoader with SOTA Sampler
-        # The sampler will drive indices from the Static set. 
-        # MixedDataset intercepts these and injects Online data probabilistically.
         sampler = EpisodeAwareSampler(mixed_dataset, shuffle=True, seed=cfg.seed + round_idx)
         
         loader = DataLoader(
@@ -341,11 +491,7 @@ def main(cfg: DictConfig):
             collate_fn=semantic_planner_collate_fn
         )
         
-        # Initialize Fresh Trainer (To reset optimizer state for fine-tuning)
-        # We use the same PL Module, just re-attach it.
-        pl_module.train() # Set to train mode
-        
-        # Configure Trainer for this round
+        # Create a fresh trainer every round to ensure clean state
         checkpoint_callback = pl.callbacks.ModelCheckpoint(
             dirpath=workspace_dir / "checkpoints",
             filename=f"dagger_round_{round_idx}_step={{step}}",
@@ -360,25 +506,31 @@ def main(cfg: DictConfig):
             max_epochs=cfg.dagger.epochs_per_round,
             callbacks=[checkpoint_callback],
             log_every_n_steps=10,
-            default_root_dir=str(workspace_dir)
+            default_root_dir=str(workspace_dir),
+            enable_progress_bar=True
         )
         
         # Train
+        pl_module.train()
         trainer.fit(pl_module, train_dataloaders=loader)
         
-        # Update Student Reference (Though PL Module updates in place, this is semantic)
-        student_model = pl_module.model
+        round_ckpt = workspace_dir / f"model_round_{round_idx}.ckpt"
+        trainer.save_checkpoint(round_ckpt)
+        log.info(f"Round {round_idx} Model Saved: {round_ckpt}")
         
-        # --- PHASE C: EVALUATION ---
-        log.info(">>> PHASE C: EVALUATION (Zero-Shot)")
-        # (We reuse the collector in eval mode/low noise)
-        # Note: Proper evaluation usually needs a separate seeded loop.
-        # For DAgger progress tracking, we rely on the training metrics and next rollout.
+        # Model stays loaded in pl_module for next round, but we refresh the object to be safe
+        student_model = pl_module.model
+        if hasattr(loader, "_iterator"):
+            del loader._iterator
+        del loader
+        import gc
+        gc.collect() # Force garbage collection of worker processes
 
     log.info("DAgger Loop Complete.")
-    final_ckpt = workspace_dir / "final_policy.ckpt"
+    final_ckpt = workspace_dir / "final_policy_dagger.ckpt"
     trainer.save_checkpoint(final_ckpt)
-    log.info(f"Final Model Saved: {final_ckpt}")
+    log.info(f"Final Converged Model: {final_ckpt}")
+    env.close()
 
 if __name__ == "__main__":
     main()
