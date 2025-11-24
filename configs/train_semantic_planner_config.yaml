@@ -23,8 +23,8 @@ model:
 
 # --- Dataset Configuration ---
 dataset:
-  train_path: "/content/dgpo/data/training_ready/training_data.lmdb"
-  val_path: "/content/dgpo/data/training_ready/training_data.lmdb"
+  train_path: "/content/fresh_data/final_training_set/training.lmdb"
+  val_path: "/content/fresh_data/final_training_set/training.lmdb"
 
   # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb"
   # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb"
@@ -38,7 +38,7 @@ training:
 
   check_val_every_n_epoch: 900
 
-  backup_every_n_epochs: 4
+  backup_every_n_epochs: 1
 
   backup_dir: "/content/drive/MyDrive/pda/models/v1/backups"
 
@@ -65,7 +65,7 @@ training:
   loss_weights:
     lambda_gripper: 2.0      
 
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_007.ckpt" 
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_031.ckpt" 
 
 # --- Optimizer ---
 optimizer:

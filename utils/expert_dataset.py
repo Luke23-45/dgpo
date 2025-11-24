@@ -155,7 +155,7 @@ class ExpertDatasetWriter:
         lmdb_path = self._lmdb_path
 
         # open env (match same args as save())
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=1.0, subdir=False)
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=30.0, subdir=False)
         try:
             with env.begin(write=True) as txn:
                 for ep_dict in episode_list:
@@ -191,6 +191,7 @@ class ExpertDatasetWriter:
         finally:
             env.sync()
             close_lmdb_env(env)
+            
         
         json_path = self._lmdb_path.parent / f"{self._lmdb_path.stem}_index.json"
         with open(json_path, "w") as f:
@@ -216,7 +217,7 @@ class ExpertDatasetWriter:
 
         # --- 2. Open LMDB Environment ---
         # Use a large map size for a 25GB+ dataset. 50GB is safe.
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=6.0, subdir=False) 
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=30.0, subdir=False) 
         
         try:
             with env.begin(write=True) as txn: 
@@ -267,6 +268,7 @@ class ExpertDatasetWriter:
         
         finally:
             close_lmdb_env(env) 
+            self.episodes_in_memory.clear()
 
         # --- 5. Write the final JSON index and config ---
         self.index_data["metadata"] = self.metadata
@@ -950,10 +952,10 @@ class ExpertDataset(IterableDataset):
                             else:
                                 keep = (self._rng.random() < self.p_motion_frame) 
                             if keep:
-                                 # store copy-safe snapshots [cite: 305]
+                                # store copy-safe snapshots [cite: 305]
                                 filtered.append(( {k: np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v) 
-                                                   for k, v in step_obs.items()}, 
-                                                  step_action.copy() )) 
+                                                for k, v in step_obs.items()}, 
+                                              step_action.copy() ))
 
                         # fallback: if empty, keep most "active" frame (highest joint delta magnitude) [cite: 307]
                         if not filtered and unfiltered_actions:
@@ -978,27 +980,31 @@ class ExpertDataset(IterableDataset):
                             fb_act = np.asarray(unfiltered_actions[best_idx], dtype=np.float32).copy()
                             filtered.append((fb_obs, fb_act)) 
 
-                        # Acceptance
-                        if filtered:
-                            # append to the in-memory episode buffer which will be yielded
-                            self._episode_buffer.extend(filtered) 
-                            final_obs = unfiltered_obs[-1]
 
-                            goal_image_primary = np.copy(final_obs.get("image_primary"))
-                            if goal_image_primary is None:
-                                raise ValueError("Final observation is missing 'image_primary', cannot create goal image.")
-                            # Build full episode dict (store unfiltered trajectory for offline writer)
+                        if filtered:
+                          
+                            filt_obs, filt_acts = zip(*filtered)
+
+                            self._episode_buffer.extend(zip(filt_obs, filt_acts))
+                            
+                            final_obs = unfiltered_obs[-1]
+                            if "goal_image" in final_obs and final_obs["goal_image"] is not None:
+                                goal_image_primary = np.copy(final_obs["goal_image"])
+                            else:
+                                goal_image_primary = np.copy(final_obs.get("image_primary"))
+
+                            # Build full episode dict using FILTERED data
                             ep_id = f"w{getattr(self,'_worker_id',0)}_e{self._episode_id_counter}"
                             episode_dict = { 
                                 "episode_id": ep_id,
                                 "seed": int(current_episode_seed),
-                                 "obs_list": [{k: (np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v)) 
-                                              for k, v in o.items()} for o in unfiltered_obs],
-                                 "actions": [np.asarray(a, dtype=np.float32).copy() for a in unfiltered_actions], 
-                                "ik_fail_flags": list(unfiltered_ik_flags),
+                                "obs_list": [{k: (np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v)) 
+                                              for k, v in o.items()} for o in filt_obs],
+                                "actions": [np.asarray(a, dtype=np.float32).copy() for a in filt_acts], 
+                                "ik_fail_flags": [False] * len(filt_obs), 
                                 "goal_image_primary": goal_image_primary,
                                 "success": True,
-                             } 
+                             }
                             self.episodes.append(episode_dict)
                             self._episode_id_counter += 1
                             consecutive_failures = 0

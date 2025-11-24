@@ -29,7 +29,7 @@ seed: 105132456731
 # A good starting point for a high-quality dataset is 20,000 - 50,000 samples.
 # num_samples: 50000 
 # num_samples: 25000 
-num_episodes: 260
+num_episodes: 6
 # Number of parallel worker processes to spawn.
 # A good rule of thumb is to set this to the number of available CPU cores minus one or two.
 # For debugging, set to 0 to run in the main thread.

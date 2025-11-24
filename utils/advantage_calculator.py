@@ -24,6 +24,8 @@ Usage:
         --gamma 0.99
 """
 
+#python -m utils.advantage_calculator --source-db "C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\training\expert_expert_run_validation_dataset_6_episodes\expert_expert_run_validation_dataset_6_episodes.lmdb" --dest-db "C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\training_ready\expert_expert_run_validation_dataset_6_episodes\expert_expert_run_validation_dataset_6_episodes.lmdb" --gamma 0.99
+
 from __future__ import annotations
 
 import argparse
@@ -221,7 +223,7 @@ def main():
         
     # Open LMDB for writing (map_size set generously for additions)
     # Standard 1TB map size for safety, actual file size grows as needed.
-    env = lmdb.open(str(dest_path), map_size=int(28 * 1024**3), subdir=False, readonly=False, lock=True)
+    env = lmdb.open(str(dest_path), map_size=int(2 * 1024**3), subdir=False, readonly=False, lock=True)
     
     advantages_stats = []
     

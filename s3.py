@@ -1,367 +1,308 @@
-#!/usr/bin/env python3
+# FILE: scripts/verify_dataset_integrity.py
+# (SOTA Robust Validator for Strategist Datasets)
 
-"""
-ViP-C (Visual Planner-Controller) SOTA Evaluation Script
-
-This script provides a comprehensive, diagnostic-rich evaluation for the
-hierarchical ViP-C policy. It loads a trained model, its normalizers, and
-kinematic limits from a checkpoint and executes the policy in the PandaEnv,
-recording a video with rich visual overlays.
-
-Key SOTA Features:
-1.  **Hierarchical Control Loop:** Correctly implements the "Plan -> Act -> Re-plan"
-    dialogue. The high-level Planner is called only when the task phase changes,
-    and the low-level Controller executes the received subgoal.
-2.  **Full State Restoration:** Robustly loads the complete training state,
-    including the model (EMA weights), action/proprio normalizers, and
-    kinematic limits directly from the PyTorch Lightning checkpoint.
-3.  **Correct "Norm-to-Raw" Workflow:** Implements the full, symmetrical data
-    flow required for inference:
-    - Raw proprioception from the env is *normalized* before being passed to the model.
-    - Normalized actions from the model are *un-normalized* and *clamped* before
-      being sent to the environment.
-4.  **Ground-Truth State Determination:** Programmatically determines the current
-    `TaskPhase` at each step using ground-truth information from the environment,
-    perfectly mirroring the data labeling logic.
-5.  **Diagnostic Visualization:** Overlays the Planner's predicted subgoal
-    heatmap directly onto the recorded video, providing invaluable insight into
-    the model's high-level decision-making process in real-time.
-
-
-python -m s2 checkpoint_path=/notes/checkpoints/backup_epoch_31.ckpt output_video=vip_c_evaluation.mp4
-"""
-
+import argparse
+import json
 import logging
-import collections
+import sys
+import time
+import traceback
 from pathlib import Path
-import cv2
-import hydra
+from collections import defaultdict
+
+import lmdb
 import numpy as np
-import torch
-import mujoco
-from omegaconf import DictConfig, OmegaConf
-from PIL import Image
-from torchvision import transforms
-from tqdm.auto import tqdm
-from typing import Dict
-import pytorch_lightning as pl
-# --- Import Project Modules ---
-from envs.panda_env import PandaEnv
-from train.train_uhp import UHPLightningModule
-from models.vip_c import ViPC, LinearNormalizer
-from train.train_vip_c import ViPCLightningModule
-from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from models.uhp import UHP_Orchestrator, LinearNormalizer
-from typing import List, Any
-import csv
-# --- Configuration ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(name)s] - %(message)s')
-log = logging.getLogger(__name__)
+from tqdm import tqdm
 
+# --- Project Imports ---
+# Ensure we can import the actual Reader class to test compatibility
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
+try:
+    from utils.expert_dataset import ExpertTrajectoryDataset
+except ImportError:
+    print("CRITICAL: Could not import utils.expert_dataset. Check python path.")
+    sys.exit(1)
 
-def get_goal_image(env: PandaEnv, obs: dict) -> np.ndarray:
-    """
-    [DEFINITIVE, SOTA VERSION]
-    Creates a 'goal_image' by saving the current state, teleporting the object
-    to the goal position, rendering the scene, and then perfectly restoring the
-    original state. This is the only robust way to get a ground-truth goal image.
-    """
-    log.debug("Capturing goal image by temporarily moving object...")
-    
-    # 1. Save the current complete simulation state.
-    original_mj_state = env.get_mj_state()
+# --- Logging Setup ---
+class Colors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
 
-    try:
-        # 2. Get the goal pose from the observation.
-        goal_pos_world = obs['goal_pos_world']
+logging.basicConfig(level=logging.INFO, format=f'{Colors.HEADER}%(asctime)s [%(levelname)s] %(message)s{Colors.ENDC}')
+log = logging.getLogger("DataValidator")
+
+class DatasetValidator:
+    def __init__(self, dataset_path: str):
+        self.path = Path(dataset_path)
+        self.index_path = self.path.parent / f"{self.path.stem}_index.json"
+        self.errors = []
+        self.warnings = []
+        self.stats = defaultdict(list)
         
-        # 3. Manually set the object's free joint to the goal position.
-        qpos_addr = env.model.jnt_qposadr[env.object_joint_id]
-        env.data.qpos[qpos_addr:qpos_addr + 3] = goal_pos_world
-        
-        # Set orientation if available in the observation.
-        if 'goal_orn_world' in obs:
-             quat_xyzw = obs['goal_orn_world']
-             # Convert xyzw (SciPy) to wxyz (MuJoCo) for the simulation.
-             quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
-             env.data.qpos[qpos_addr + 3:qpos_addr + 7] = quat_wxyz
+        # Specific SOTA keys required for Strategist v9.0
+        self.REQUIRED_KEYS = [
+            "image_primary", "proprio", "actions", "ee_pose_world", 
+            "gt_phase", "gt_gripper", "advantages"
+        ]
 
-        # 4. Propagate this change through the simulation state.
-        mujoco.mj_forward(env.model, env.data)
+    def _log_err(self, msg):
+        self.errors.append(msg)
+        log.error(f"{Colors.FAIL}{msg}{Colors.ENDC}")
+
+    def _log_warn(self, msg):
+        self.warnings.append(msg)
+        log.warning(f"{Colors.WARNING}{msg}{Colors.ENDC}")
+
+    def check_filesystem(self):
+        log.info(f"--- Phase 1: Filesystem & Metadata Check ---")
         
-        # 5. Render the "goal" scene.
-        goal_img_np = env.render(camera_name="fixed_camera")
+        if not self.path.exists():
+            self._log_err(f"LMDB file not found: {self.path}")
+            return False
         
-    except Exception as e:
-        log.error(f"Error manually setting goal pose: {e}", exc_info=True)
-        goal_img_np = obs['image_primary'] # Fallback to current image on error.
-    finally:
-        # 6. CRITICAL: Always restore the original simulation state.
-        env.set_mj_state(original_mj_state)
+        if not self.index_path.exists():
+            self._log_err(f"Index JSON not found: {self.index_path}")
+            return False
             
-    log.debug("Goal image captured and state restored.")
-    return goal_img_np
+        try:
+            with open(self.index_path, 'r') as f:
+                self.index = json.load(f)
+            self.num_episodes = len(self.index['episodes'])
+            log.info(f"Metadata loaded. Total Episodes claimed: {Colors.BOLD}{self.num_episodes}{Colors.ENDC}")
+        except Exception as e:
+            self._log_err(f"Failed to parse JSON index: {e}")
+            return False
+            
+        return True
 
+    def check_lmdb_structure(self):
+        """Checks if keys in JSON actually exist in LMDB without decoding data."""
+        log.info(f"--- Phase 2: LMDB Key Consistency Scan ---")
+        
+        env = lmdb.open(str(self.path), readonly=True, lock=False, readahead=False,subdir=False)
+        missing_keys = 0
+        checked_keys = 0
+        
+        try:
+            with env.begin() as txn:
+                cursor = txn.cursor()
+                # Create a set of all keys in DB for O(1) lookup
+                # Note: For massive DBs (TB+), iteration might be better, but for <50GB this is fine
+                log.info("Mapping LMDB keys...")
+                db_keys = set(key.decode('ascii') for key, _ in cursor)
+                
+                for i, ep_meta in enumerate(tqdm(self.index['episodes'], desc="Verifying Keys")):
+                    ep_id = ep_meta.get('episode_id', f'ep_{i:06d}')
+                    
+                    for mod_name, mod_meta in ep_meta['modalities'].items():
+                        key = mod_meta['key']
+                        checked_keys += 1
+                        if key not in db_keys:
+                            self._log_err(f"Episode {ep_id}: Missing key in LMDB '{key}' (Modality: {mod_name})")
+                            missing_keys += 1
+        finally:
+            env.close()
+            
+        if missing_keys == 0:
+            log.info(f"{Colors.OKGREEN}Structure Clean. Verified {checked_keys} keys.{Colors.ENDC}")
+            return True
+        return False
 
-def _prepare_for_csv(data: Any) -> List[float]:
-    """A robust helper to convert tensors, arrays, or scalars into a flat list of floats for CSV logging."""
-    if data is None:
-        return []
-    if isinstance(data, torch.Tensor):
-        data = data.detach().cpu().numpy()
-    if isinstance(data, np.ndarray):
-        return data.flatten().tolist()
-    if isinstance(data, (int, float)):
-        return [float(data)]
-    return []
+    def deep_content_inspection(self, sample_ratio=1.0):
+        """
+        Uses the actual Reader class to load data, decode images, and check numerical validity.
+        """
+        log.info(f"--- Phase 3: Deep Content Inspection (Checking {sample_ratio*100:.0f}% of data) ---")
+        
+        try:
+            # Initialize SOTA Reader
+            ds = ExpertTrajectoryDataset(
+                demo_path=str(self.path),
+                observation_horizon=1,
+                action_horizon=1
+            )
+        except Exception as e:
+            self._log_err(f"CRITICAL: Reader class failed to initialize: {e}")
+            traceback.print_exc()
+            return False
 
-def load_lightning_module_from_checkpoint(
-    checkpoint_path: str, device: torch.device
-) -> UHPLightningModule:
-    """
-    [SOTA, "SINGLE SOURCE OF TRUTH" VERSION]
-    Loads a full UHPLightningModule, which correctly handles model weights,
-    hyperparameters, and all custom state like normalizers and kinematic limits.
-    """
-    log.info(f"Loading Lightning checkpoint from: {checkpoint_path}")
-    # CRITICAL FIX: Load using the UHPLightningModule class.
-    lightning_model = UHPLightningModule.load_from_checkpoint(
-        checkpoint_path, map_location=device
-    )
+        total_frames = 0
+        nan_detected = False
+        black_images = 0
+        
+        # Sampling logic
+        indices = np.arange(len(ds))
+        if sample_ratio < 1.0:
+            np.random.shuffle(indices)
+            indices = indices[:int(len(indices) * sample_ratio)]
+            
+        log.info(f"Inspecting {len(indices)} frames...")
+
+        # Stats containers
+        phases_found = set()
+        adv_sum = 0.0
+        adv_count = 0
+        
+        pbar = tqdm(indices, desc="Deep Scan")
+        for idx in pbar:
+            try:
+                # This calls __getitem__, triggering decompression and slicing
+                # It returns (obs_chunk, action_chunk)
+                sample = ds[idx]
+                
+                if sample is None:
+                    self._log_err(f"Index {idx} returned None from dataset!")
+                    continue
+                    
+                obs, action = sample
+                
+                # 1. Check NaNs in Action
+                if np.isnan(action).any():
+                    self._log_err(f"NaN found in ACTIONS at global index {idx}")
+                    nan_detected = True
+                
+                # 2. Check Proprioception
+                proprio = obs.get('proprio')
+                if proprio is not None:
+                    if np.isnan(proprio).any():
+                        self._log_err(f"NaN found in PROPRIO at global index {idx}")
+                        nan_detected = True
+                    # Physics sanity check (e.g., qpos shouldn't be 1000.0)
+                    if np.max(np.abs(proprio)) > 100.0:
+                        self._log_warn(f"Suspiciously high value in proprio at {idx}: {np.max(np.abs(proprio))}")
+
+                # 3. Check Images (Visual Sanity)
+                img = obs.get('image_primary')
+                if img is not None:
+                    if img.shape != (1, 256, 256, 3): # Assuming horizon=1
+                        self._log_err(f"Unexpected image shape at {idx}: {img.shape}")
+                    
+                    # Check for "Black Screen Bug" (all zeros)
+                    if np.mean(img) < 1.0:
+                        black_images += 1
+                
+                # 4. Recover Episode Metadata to check Aux labels
+                # Map global idx back to episode to check advantage stats
+                ep_idx, t = ds.get_episode_and_timestep(idx)
+                ep_meta = ds.episode_metadata[ep_idx]
+                
+                # Check required SOTA keys exist in meta
+                for req in self.REQUIRED_KEYS:
+                    if req not in ep_meta['modalities']:
+                        # Only warn once per key per run to avoid spam
+                        if f"missing_{req}" not in self.stats:
+                            self._log_err(f"Episode {ep_idx} missing required modality '{req}'")
+                            self.stats[f"missing_{req}"] = True
+
+                # 5. Check Advantage Statistics (if available)
+                # Access raw array directly via reader helper to avoid overhead
+                if "advantages" in ep_meta['modalities']:
+                    adv_mod = ep_meta['modalities']['advantages']
+                    adv_val = ds._get_full_modality_array(
+                        adv_mod['key'], adv_mod['compression'], adv_mod['dtype'], tuple(adv_mod['shape'])
+                    )[t]
+                    adv_sum += adv_val
+                    adv_count += 1
+                
+                # 6. Check Phase
+                if "gt_phase" in ep_meta['modalities']:
+                    ph_mod = ep_meta['modalities']['gt_phase']
+                    ph_val = ds._get_full_modality_array(
+                        ph_mod['key'], ph_mod['compression'], ph_mod['dtype'], tuple(ph_mod['shape'])
+                    )[t]
+                    phases_found.add(int(ph_val))
+
+                total_frames += 1
+
+            except Exception as e:
+                self._log_err(f"Crash reading index {idx}: {e}")
+                if total_frames < 5: traceback.print_exc() # Print first few stacks
+                
+        # --- Final Report ---
+        print("\n" + "="*60)
+        print(f"{Colors.BOLD}DATASET INTEGRITY REPORT{Colors.ENDC}")
+        print("="*60)
+        
+        status = f"{Colors.OKGREEN}PASS{Colors.ENDC}"
+        
+        if self.errors:
+            status = f"{Colors.FAIL}FAIL{Colors.ENDC}"
+            print(f"Errors Found: {len(self.errors)}")
+            for e in self.errors[:10]: print(f" - {e}")
+            if len(self.errors) > 10: print(" ... (and more)")
+        else:
+            print(f"Errors Found: 0")
+
+        if self.warnings:
+            print(f"Warnings: {len(self.warnings)}")
+            for w in self.warnings[:5]: print(f" - {w}")
+
+        print("-" * 30)
+        print(f"Total Episodes: {self.num_episodes}")
+        print(f"Total Frames Scanned: {total_frames}")
+        print(f"Nan/Inf Detected: {nan_detected}")
+        
+        if black_images > 0:
+            print(f"{Colors.FAIL}Black (Zero) Images: {black_images} ({black_images/total_frames*100:.2f}%){Colors.ENDC}")
+        else:
+            print(f"Black Images: 0 (OK)")
+
+        print(f"Phases Found: {sorted(list(phases_found))} (Should be [0, 1, 2, 3, 4])")
+        
+        if adv_count > 0:
+            avg_adv = adv_sum / adv_count
+            print(f"Mean Advantage: {avg_adv:.4f} (Should be close to 0.0)")
+        else:
+            print(f"{Colors.WARNING}No Advantage values found! (Run advantage_calculator.py){Colors.ENDC}")
+
+        print("="*60)
+        return len(self.errors) == 0
+
+def main():
+    parser = argparse.ArgumentParser(description="SOTA Dataset Integrity Validator")
+    parser.add_argument("--dataset", type=str, required=True, help="Path to .lmdb file")
+    parser.add_argument("--samples", type=str, default="all", help="'all' or number of samples to check")
+    args = parser.parse_args()
+
+    dataset_path = Path(args.dataset)
     
-    # SOTA: The EMA model is the one we should always use for inference.
-    # This logic correctly extracts it.
-    if hasattr(lightning_model, 'ema') and lightning_model.ema:
-        lightning_model.model = lightning_model.ema.ema_model
-        log.info("EMA weights successfully extracted and applied for inference.")
+    validator = DatasetValidator(dataset_path)
+    
+    # 1. Basic Checks
+    if not validator.check_filesystem():
+        sys.exit(1)
+        
+    if not validator.check_lmdb_structure():
+        sys.exit(1)
+        
+    # 2. Content Checks
+    # Determine sample ratio
+    if args.samples.lower() == "all":
+        ratio = 1.0
     else:
-        log.warning("Checkpoint does not contain EMA state. Using standard weights.")
-        
-    lightning_model.eval()
-    log.info("LightningModule loaded and set to eval mode.")
-    return lightning_model
+        # Load index to get total count for ratio calc
+        with open(validator.index_path, 'r') as f:
+            idx_data = json.load(f)
+            total_eps = len(idx_data['episodes'])
+            # Estimate total frames (approx 200 per ep)
+            est_frames = total_eps * 200 
+            ratio = min(1.0, int(args.samples) / est_frames)
 
-
-
-
-# In FILE: evaluate_uhp.py
-
-# --- [START OF DEFINITIVE PATCH 1: CORRECT ORACLE] ---
-# REPLACE the existing `get_current_task_phase` function with this one.
-
-def get_current_task_phase(obs: Dict[str, np.ndarray],
-                           prev_is_grasped: bool,
-                           dist_ee_to_obj_threshold: float = 0.04,
-                           lift_height_threshold: float = 0.03,
-                           dist_obj_to_goal_threshold: float = 0.08
-                           ) -> int:
-
-    is_grasped = obs.get('is_grasped', [0.0])[0] > 0.5
-    ee_pos = obs['ee_pose_world'][:3]
-    obj_pos = obs['object_pos_world']
-    goal_pos = obs['goal_pos_world']
-    table_z = 0.4  # Assumed table height from PandaEnv
-
-    dist_ee_to_obj = np.linalg.norm(ee_pos - obj_pos)
-    dist_obj_to_goal = np.linalg.norm(obj_pos - goal_pos)
-    obj_lift_height = obj_pos[2] - table_z
-
-    # This logic now robustly mirrors the expert's state machine.
-    if not is_grasped and not prev_is_grasped:
-        # Not holding, object not recently released.
-        if dist_ee_to_obj < dist_ee_to_obj_threshold:
-            # Phase 1: Close enough to grasp.
-            return 1
-        else:
-            # Phase 0: Approaching the object.
-            return 0
-    elif is_grasped and not prev_is_grasped:
-        # Just grasped the object.
-        return 1
-    elif is_grasped and prev_is_grasped:
-        # Currently holding the object.
-        if obj_lift_height < lift_height_threshold:
-            # Still in the process of lifting.
-            return 1 # Or could be 2 if lift is fast, this is safer.
-        elif dist_obj_to_goal < dist_obj_to_goal_threshold:
-            # Phase 3: Arrived at the goal, ready to place.
-            return 3
-        else:
-            # Phase 2: Transporting the object towards the goal.
-            return 2
-    elif not is_grasped and prev_is_grasped:
-        # Just released the object.
-        # Phase 4: Retracting from placement.
-        return 4
+    valid = validator.deep_content_inspection(sample_ratio=ratio)
     
-    # Default fallback
-    return 0
-# --- [END OF DEFINITIVE PATCH 1] ---
-
-
-
-
-# In FILE: evaluate_uhp.py
-
-# --- [START OF DEFINITIVE PATCH 2: MAIN EVALUATION FUNCTION] ---
-# REPLACE the existing `evaluate` function with this new version.
-
-@hydra.main(version_base=None, config_path="./configs", config_name="evaluate_uhp_config")
-def evaluate(cfg: DictConfig):
-    log.info("--- UHP v2.0 Hierarchical Visual Evaluation (SOTA Patched) ---")
-    log.info(f"Full evaluation config:\n{OmegaConf.to_yaml(cfg)}")
+    if not valid:
+        sys.exit(1)
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    pl.seed_everything(cfg.seed, workers=True)
-
-    # --- 1. Load the "Single Source of Truth" ---
-    lightning_module = load_lightning_module_from_checkpoint(cfg.checkpoint_path, device)
-    model: UHP_Orchestrator = lightning_module.model
-    
-    # --- 2. Unpack All Components ---
-    action_normalizer = lightning_module.action_normalizer
-    proprio_normalizer = lightning_module.proprio_normalizer
-    joint_limits_low = lightning_module.joint_limits_low
-    joint_limits_high = lightning_module.joint_limits_high
-    noise_scheduler = lightning_module.noise_scheduler
-    train_cfg = lightning_module.cfg
-    obs_horizon = train_cfg.model.executor_cfg.obs_horizon
-    action_dim = train_cfg.model.executor_cfg.action_dim
-    action_horizon = train_cfg.model.executor_cfg.action_horizon
-    
-    env = PandaEnv(xml_path=train_cfg.env.xml_path, control_mode="delta")
-    
-    # --- 3. Setup Image Transforms ---
-    transform_planner_img = transforms.Compose([
-        transforms.Resize((224, 224), antialias=True),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    transform_controller_primary = transforms.Compose([transforms.Resize((224, 224), antialias=True), transforms.ToTensor()])
-    transform_controller_wrist = transforms.Compose([transforms.Resize((128, 128), antialias=True), transforms.ToTensor()])
-    
-    # --- 4. Setup Video & CSV Recording ---
-    # (This section is already well-implemented and needs no changes)
-    video_writer = None
-    if cfg.logging.enable_video:
-        video_path = Path(cfg.output_video)
-        video_path.parent.mkdir(parents=True, exist_ok=True)
-        frame_test, _ = env.reset(seed=cfg.seed)
-        H, W, _ = env.render().shape
-        video_writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*'mp4v'), 30.0, (W, H))
-        log.info(f"Recording video to: {video_path}")
-
-    csv_file = None
-    csv_writer = None
-    if cfg.logging.enable_csv_logging:
-        csv_path = Path(cfg.logging.csv_output_path)
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        csv_file = open(csv_path, 'w', newline='')
-        csv_writer = csv.writer(csv_file)
-        
-        header = ['episode_idx', 'step', 'oracle_task_phase', 'gt_is_grasped']
-        header += [f'gt_ee_pos_{ax}' for ax in ['x', 'y', 'z']]
-        header += [f'gt_obj_pos_{ax}' for ax in ['x', 'y', 'z']]
-        header += ['planner_subgoal_emb_norm']
-        header += [f'action_executed_{i}' for i in range(action_dim)]
-        for t in range(action_horizon):
-            header += [f'action_pred_h{t}_d{i}' for i in range(action_dim)]
-        csv_writer.writerow(header)
-        log.info(f"Logging diagnostic data to: {csv_path}")
-
-    # --- 5. Run Hierarchical Evaluation Loop ---
-    for ep_idx in tqdm(range(cfg.num_episodes), desc="Evaluating Episodes"):
-        obs, _ = env.reset(seed=cfg.seed + ep_idx)
-        goal_image_np = get_goal_image(env, obs)
-        goal_image_tensor = transform_planner_img(Image.fromarray(goal_image_np)).to(device).unsqueeze(0)
-        
-        # --- CRITICAL FIX: Warm-up the observation history ---
-        # Populate the deque with unique, consecutive observations before starting.
-        obs_history = collections.deque(maxlen=obs_horizon)
-        # Take a few "zero action" steps to get a valid history.
-        for _ in range(obs_horizon):
-            # Pass a zero action to get the next observation without moving.
-            obs, _, _, _, _ = env.step(np.zeros(action_dim))
-            obs_history.append(obs)
-            
-        current_phase = -1
-        subgoal_embedding = None
-        # State for our new oracle.
-        prev_is_grasped = False
-
-        step_iterator = tqdm(range(env.max_episode_steps), desc=f"Episode {ep_idx+1}", leave=False)
-        for step_count in step_iterator:
-            
-            new_phase = get_current_task_phase(obs, prev_is_grasped)
-            if new_phase != current_phase:
-                 log.info(f"Step {step_count}: Oracle phase changed to {new_phase}.")
-            current_phase = new_phase # Update the phase for logging
-
-            current_image_tensor = transform_planner_img(Image.fromarray(obs['image_primary'])).to(device).unsqueeze(0)
-            task_phase_tensor = torch.tensor([current_phase], dtype=torch.long, device=device)
-            current_proprio_tensor = torch.from_numpy(obs['proprio']).float().to(device).unsqueeze(0)
-
-            # The `plan` method is now called at EVERY step.
-            subgoal_embedding = model.plan(
-                current_image_tensor,
-                goal_image_tensor,
-                task_phase_tensor,
-                current_proprio_tensor
-            )
-            
-            # Prepare Executor inputs from the now-valid obs_history
-            proprio_hist = torch.from_numpy(np.stack([h['proprio'] for h in obs_history])).float().to(device)
-            primary_hist = torch.stack([transform_controller_primary(Image.fromarray(h['image_primary'])) for h in obs_history]).to(device)
-            wrist_hist = torch.stack([transform_controller_wrist(Image.fromarray(h['image_wrist'])) for h in obs_history]).to(device)
-            controller_obs_hist = {
-                'image_primary': primary_hist.unsqueeze(0),
-                'image_wrist': wrist_hist.unsqueeze(0),
-                'proprio': proprio_hist.unsqueeze(0)
-            }
-            
-            action_chunk_raw = model.act(
-                controller_obs_hist, subgoal_embedding, noise_scheduler,
-                cfg.inference.inference_steps, action_normalizer, proprio_normalizer,
-                joint_limits_low, joint_limits_high
-            )
-            action = action_chunk_raw[0, 0, :].cpu().numpy()
-            
-            if cfg.logging.enable_csv_logging:
-                log_row = (
-                    _prepare_for_csv(ep_idx) + _prepare_for_csv(step_count) +
-                    _prepare_for_csv(current_phase) + _prepare_for_csv(obs['is_grasped']) +
-                    _prepare_for_csv(obs['ee_pose_world'][:3]) + _prepare_for_csv(obs['object_pos_world']) +
-                    _prepare_for_csv(torch.linalg.norm(subgoal_embedding)) +
-                    _prepare_for_csv(action) + _prepare_for_csv(action_chunk_raw)
-                )
-                csv_writer.writerow(log_row)
-
-            # Update state for the next oracle call BEFORE stepping the environment.
-            prev_is_grasped = obs.get('is_grasped', [0.0])[0] > 0.5
-            
-            # Step Environment
-            obs, reward, terminated, truncated, info = env.step(action)
-            obs_history.append(obs)
-            
-            if cfg.logging.enable_video:
-                frame_rgb = env.render()
-                # You can add text overlays here for diagnostics
-                phase_text = f"Phase: {current_phase}"
-                cv2.putText(frame_rgb, phase_text, (10, H - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-                video_writer.write(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
-            
-            if terminated or truncated:
-                log.info(f"Episode finished after {step_count + 1} steps.")
-                break
-        
-    # --- 6. Cleanup ---
-    if video_writer is not None: video_writer.release()
-    if csv_file is not None: csv_file.close()
-    env.close()
-    log.info("--- Evaluation Complete. ---")
+    sys.exit(0)
 
 if __name__ == "__main__":
-    evaluate()
+    main()
 
-# --- [END OF DEFINITIVE PATCH 2] ---
+#python -m s3 --dataset "C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\final_training_set\training_set.lmdb" --samples all

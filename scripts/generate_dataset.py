@@ -3,7 +3,7 @@
 generate_dataset.py - Robust LMDB-sharded dataset generator.
 
 This definitive version includes episode-based generation control, SOTA
-SoA formatting, and robust multiprocessing orchestration.
+SoA formatting, and robust multiprocessing orchestration with AUTO-CLEANUP.
 """
 
 from __future__ import annotations
@@ -47,7 +47,6 @@ def merge_sota_shards(shard_dirs: list[Path], out_dir: Path, run_name: str, tota
     """
     Merges SOTA-formatted shards by combining their JSON indexes and copying
     the LMDB files into a single, unified dataset directory.
-    This version correctly names the final dataset based on the target type.
     """
     if use_episode_target:
         final_dataset_name = f"expert_{run_name}_{total_target}_episodes"
@@ -60,11 +59,11 @@ def merge_sota_shards(shard_dirs: list[Path], out_dir: Path, run_name: str, tota
 
     merged_index = {"episodes": [], "metadata": {}}
     total_episodes = 0
-    all_keys_in_use = set() # To manage keys across multiple LMDB files
+    all_keys_in_use = set()
 
     # We need a central LMDB writer for the merged data
     final_lmdb_path = final_dataset_path / f"{final_dataset_name}.lmdb"
-    map_size = int(28 * 1024**3)  # 100 GB, adjust as needed
+    map_size = int(30 * 1024**3)  # 100 GB, adjust as needed
     final_env = lmdb.open(str(final_lmdb_path), map_size=map_size, subdir=False, readonly=False, lock=True)
 
     try:
@@ -98,7 +97,6 @@ def merge_sota_shards(shard_dirs: list[Path], out_dir: Path, run_name: str, tota
                             new_modality_key = old_modality_key.replace(ep_meta["episode_id"], new_ep_id)
                             new_ep_meta["modalities"][modality_name]["key"] = new_modality_key
 
-                            # Copy the data from the shard LMDB to the final LMDB with the new key
                             data_blob = shard_txn.get(old_modality_key.encode('ascii'))
                             if data_blob:
                                 final_txn.put(new_modality_key.encode('ascii'), data_blob)
@@ -125,8 +123,7 @@ def worker_loop_fn_SOTA(worker_id: int, cfg: dict, shard_dir_path_str: str,
                         summary_path_str: str, samples_per_worker: Optional[int] = None,
                         episodes_per_worker: Optional[int] = None):
     """
-    SOTA Worker entrypoint that uses ExpertDatasetWriter to generate an
-    optimized, SoA-formatted, self-contained dataset shard.
+    SOTA Worker entrypoint.
     """
     if samples_per_worker is None and episodes_per_worker is None:
         raise ValueError("Must provide either samples_per_worker or episodes_per_worker target.")
@@ -140,7 +137,6 @@ def worker_loop_fn_SOTA(worker_id: int, cfg: dict, shard_dir_path_str: str,
         target_str = f"{episodes_per_worker} episodes" if episodes_per_worker is not None else f"{samples_per_worker} samples"
         logging.info(f"{log_prefix} starting. seed_base={cfg.get('seed',0)} target={target_str} shard_dir={shard_dir_path}")
 
-        # --- 1. Initialize the SOTA Writer for this specific shard ---
         writer = ExpertDatasetWriter(
             out_dir=str(shard_dir_path),
             run_name=run_name,
@@ -148,7 +144,6 @@ def worker_loop_fn_SOTA(worker_id: int, cfg: dict, shard_dir_path_str: str,
             jpeg_quality=cfg.get("jpeg_quality", 90)
         )
 
-        # --- 2. Initialize the Online Data Generator (ExpertDataset) ---
         expert_config_dict = cfg.get("expert_config", {})
         expert_config_instance = ExpertConfig(**expert_config_dict)
         base_seed = int(cfg.get("seed", 0)) if cfg.get("seed") is not None else int(time.time())
@@ -169,41 +164,28 @@ def worker_loop_fn_SOTA(worker_id: int, cfg: dict, shard_dir_path_str: str,
             yield_full_obs=True,
         )
 
-        # --- 3. Run the Generation Loop and Stream to the Writer ---
         last_saved_episode_count = 0
-        
-        # Intelligent Progress Bar setup
         use_episode_target = episodes_per_worker is not None
         pbar_total = episodes_per_worker if use_episode_target else samples_per_worker
         pbar_desc = f"Worker {worker_id} (Episodes)" if use_episode_target else f"Worker {worker_id} (Samples)"
         pbar = tqdm(total=pbar_total, desc=pbar_desc, leave=True)
 
-        for _ in ds: # This iterator will now stop based on the correct limit
-            # Update pbar based on mode
+        for _ in ds: 
             if use_episode_target:
                 if ds._episode_id_counter > pbar.n:
                     pbar.update(ds._episode_id_counter - pbar.n)
             else:
-                pbar.update(1) # Old behavior: update per sample
+                pbar.update(1) 
 
-            # Check if new episodes have been collected by the generator
-            if len(ds.episodes) > last_saved_episode_count:
-                new_eps_to_write = ds.episodes[last_saved_episode_count:]
-                writer.save_batch(new_eps_to_write)
-                last_saved_episode_count = len(ds.episodes)
-            if len(ds.episodes) == 1 and last_saved_episode_count == 0:
-                first_ep = ds.episodes[0]
-                if "gt_phase" not in first_ep["obs_list"][0] or "gt_gripper" not in first_ep["obs_list"][0]:
-                    raise RuntimeError(
-                        f"[Worker {worker_id}] CRITICAL FAILURE: Generated episode is missing "
-                        f"'gt_phase' or 'gt_gripper'. Check ExpertDataset implementation."
-                    )
+          
+            if len(ds.episodes) > 0:
+                writer.save_batch(ds.episodes)
+                ds.episodes.clear()
+
+      
         pbar.close()
-
-        # Finalize the writer (this saves the final index.json for the shard)
         writer.save() 
         
-        # --- 4. Write Worker Summary ---
         final_stats = ds.get_stats()
         summary = {
             "worker_id": worker_id,
@@ -235,19 +217,20 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    
+    if args.resume and "seed" in cfg:
+        logger.info(f"Resume mode: Shifting base seed {cfg['seed']} by +999999 to avoid duplicates.")
+        cfg["seed"] = int(cfg["seed"]) + 999999
+
     out_dir = Path(args.out_dir) if args.out_dir else Path(cfg["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     
     run_name = cfg.get("run_name", time.strftime("%Y%m%d_%H%M%S"))
-
     num_workers = int(cfg.get("num_workers", 0))
 
-    # Each worker now creates a directory, not a single file
     shards_base_dir = out_dir / "shards"
     shards_base_dir.mkdir(parents=True, exist_ok=True)
     
-    # --- START OF MODIFICATION: Implement Episode-Based Target ---
-    # Prioritize num_episodes if it exists, otherwise fall back to num_samples.
     if "num_episodes" in cfg and cfg["num_episodes"] is not None:
         use_episode_target = True
         total_target = int(cfg["num_episodes"])
@@ -258,11 +241,23 @@ def main():
         total_target = int(cfg["num_samples"])
         target_per_worker = (total_target + num_workers - 1) // num_workers if num_workers > 0 else total_target
         logger.info(f"TARGET MODE: SAMPLES. Total: {total_target}, Per Worker: {target_per_worker}")
-    # --- END OF MODIFICATION ---
 
     ctx = mp.get_context("spawn")
     worker_processes = []
     shard_dirs_to_merge = []
+
+    # [HELPER] Robustly delete directory (handles Windows locking)
+    def robust_rmtree(path, retries=3):
+        for i in range(retries):
+            try:
+                if path.exists():
+                    shutil.rmtree(path)
+                return
+            except Exception:
+                if i < retries - 1:
+                    time.sleep(1.0)
+                else:
+                    logger.warning(f"Could not fully delete {path} after retries. Proceeding anyway.")
 
     if num_workers > 0:
         for w in range(num_workers):
@@ -270,16 +265,25 @@ def main():
             summary_file = shard_dir / "summary.json"
             shard_dirs_to_merge.append(shard_dir)
 
-            if args.resume and summary_file.exists():
-                with open(summary_file, 'r') as f:
-                    summary = json.load(f)
-                    if summary.get("status") == "ok":
-                        logger.info(f"Shard for worker {w} at {shard_dir} already complete. Skipping.")
-                        continue
+            # [PATCH] Aggressive Directory Cleaning
+            if args.resume:
+                if summary_file.exists():
+                    try:
+                        with open(summary_file, 'r') as f:
+                            summary = json.load(f)
+                            if summary.get("status") == "ok":
+                                logger.info(f"Shard for worker {w} already complete. Skipping.")
+                                continue
+                    except Exception:
+                        pass # File corrupted, will re-run
+            else:
+                # Force Clean if not resuming
+                if shard_dir.exists():
+                    logger.info(f"Cleaning existing shard directory: {shard_dir}")
+                    robust_rmtree(shard_dir)
 
-            shard_dir.mkdir(exist_ok=True)
+            shard_dir.mkdir(parents=True, exist_ok=True)
 
-            # Use kwargs for flexible worker arguments
             worker_kwargs = {
                 "worker_id": w, "cfg": cfg, "shard_dir_path_str": str(shard_dir),
                 "summary_path_str": str(summary_file),
@@ -292,12 +296,17 @@ def main():
         
         for p in worker_processes:
             p.join()
-    else: # Single-threaded case
+            
+    else: # Single-threaded
         shard_dir = shards_base_dir / "worker_0"
         summary_file = shard_dir / "summary.json"
         shard_dirs_to_merge.append(shard_dir)
         
-        shard_dir.mkdir(exist_ok=True)
+        if not args.resume and shard_dir.exists():
+            logger.info(f"Cleaning existing shard directory: {shard_dir}")
+            robust_rmtree(shard_dir)
+        
+        shard_dir.mkdir(parents=True, exist_ok=True)
         try:
             worker_kwargs = {
                 "worker_id": 0, "cfg": cfg, "shard_dir_path_str": str(shard_dir),
@@ -321,10 +330,13 @@ def main():
             logger.error(f"Worker shard at {shard_dir} is missing a summary file. Merge might be incomplete.")
             continue
         with open(summary_file, 'r') as f:
-            summary = json.load(f)
-            if summary.get("status") != "ok":
+            try:
+                summary = json.load(f)
+                if summary.get("status") != "ok":
+                    all_workers_succeeded = False
+                    logger.error(f"Worker {summary.get('worker_id')} at {shard_dir} reported an error.")
+            except Exception:
                 all_workers_succeeded = False
-                logger.error(f"Worker {summary.get('worker_id')} at {shard_dir} reported an error. Merge might be incomplete.")
 
     if all_workers_succeeded or args.resume:
         if not all_workers_succeeded:
@@ -332,7 +344,10 @@ def main():
         merged_count = merge_sota_shards(shard_dirs_to_merge, out_dir, run_name, total_target, use_episode_target)
         logger.info(f"Merged episodes count: {merged_count}")
         # Optional: Clean up shard directories after successful merge
-        shutil.rmtree(shards_base_dir)
+        try:
+            robust_rmtree(shards_base_dir)
+        except:
+            pass
     else:
         logger.error("One or more workers failed and not in resume mode. Skipping final merge.")
 
