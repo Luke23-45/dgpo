@@ -1,0 +1,41 @@
+# FILE: configs/evaluate_ood_config.yaml
+
+defaults:
+  - _self_
+
+# --- Essential Paths ---
+# Path to the trained model checkpoint (.ckpt file)
+# REPLACE THIS with your specific model path
+checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_043.ckpt"
+
+# Path to the MuJoCo XML environment file
+xml_path: "envs/panda_pick_place.xml"
+
+# --- Evaluation Hyperparameters ---
+# Global random seed for reproducibility
+seed: 1000
+
+# Maximum simulation steps per episode before declaring a Timeout
+max_steps: 400
+
+# Number of test episodes to run for EACH condition (ID, Rot_Easy, Light_Dim, etc.)
+# Total episodes = episodes_per_condition * 6 conditions
+episodes_per_condition: 10
+
+# --- Data Processing ---
+# CRITICAL: Set to True ONLY if your training pipeline used transforms.Normalize.
+# If you simply converted images to tensors (0-1 range), keep this False.
+use_normalization: False 
+
+# --- Environment Settings ---
+env:
+  # Must match the action scaling used during data collection/training
+  action_scaling_factor: 0.5
+
+# --- Hydra Output Configuration ---
+# This organizes logs by date and time
+hydra:
+  run:
+    dir: outputs/ood_evaluation/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: True

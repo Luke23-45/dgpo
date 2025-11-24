@@ -4,7 +4,7 @@
 defaults:
   - _self_
 
-checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_031.ckpt" # Path to your trained model .ckpt
+checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_043.ckpt" # Path to your trained model .ckpt
 
 #checkpoint_path: ""
 ik_solver_path: "urdf/panda_mujoco_kinematics.urdf" # Path to URDF
@@ -14,7 +14,7 @@ env:
   xml_path: "envs/panda_pick_place.xml"
   control_mode: "delta"
   
-seed: 10531
+seed: 1313226303
 num_episodes: 10
 max_steps: 400
 
