@@ -38,4 +38,4 @@ hydra:
   run:
     dir: outputs/ood_evaluation/${now:%Y-%m-%d}/${now:%H-%M-%S}
   job:
-    chdir: True
+    chdir: False

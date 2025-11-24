@@ -1,0 +1,21 @@
+[2025-11-24 17:07:20,327][__main__][INFO] - Loading Checkpoint: /content/drive/MyDrive/pda/models/v1/backups/backup_epoch_043.ckpt
+[2025-11-24 17:07:22,846][models.semantic_planner][INFO] - [SemanticPlanner] Initializing v9.0 (Strategist) with config: SemanticPlannerConfig(proprio_dim=22, vision_backbone_model='google/siglip-base-patch16-224', vision_feature_dim=768, fusion_transformer_layers=4, fusion_transformer_heads=8, dim_feedforward_ratio=4, dropout=0.1, chunk_size=10, num_task_phases=5)
+[2025-11-24 17:07:22,846][models.semantic_planner][INFO] - Loading Vision Backbone: google/siglip-base-patch16-224
+[2025-11-24 17:07:23,276][models.semantic_planner][INFO] - Initializing custom modules (Skipping Vision Backbone)...
+[2025-11-24 17:07:23,465][models.semantic_planner][INFO] - [SemanticPlanner v9.0] Initialization Complete.
+[2025-11-24 17:07:24,051][__main__][INFO] - Model Chunk Size detected: 10
+[2025-11-24 17:07:24,052][__main__][INFO] - Loading Validation Dataset: /content/drive/MyDrive/pda/data/training_ready/training_data.lmdb
+[2025-11-24 17:07:24,052][utils.semantic_planner_dataset][INFO] - Initializing SemanticPlannerDataset (v9.0 SOTA). Path: /content/drive/MyDrive/pda/data/training_ready/training_data.lmdb
+[2025-11-24 17:07:24,052][utils.semantic_planner_dataset][INFO] - Config: Chunk Size=10, Proprio Noise=0.0, History=T-1
+[2025-11-24 17:07:24,052][utils.ego_planner_dataset][INFO] - Initializing EgoPlannerDataset (Definitive Patched Version, use_aug=False)
+[2025-11-24 17:07:24,058][utils.expert_dataset][INFO] - Loading index from /content/drive/MyDrive/pda/data/training_ready/training_data_index.json...
+[2025-11-24 17:07:24,076][utils.expert_dataset][INFO] - Loaded 80 episodes, 19881 total valid chunks (Virtually Indexed).
+[2025-11-24 17:07:24,076][utils.ego_planner_dataset][INFO] - Building explicit sample index map for robust indexing...
+[2025-11-24 17:07:24,088][utils.ego_planner_dataset][INFO] - Successfully initialized. Found 19881 valid samples across 80 episodes.
+[2025-11-24 17:07:24,090][utils.semantic_planner_dataset][INFO] - Dataset loaded successfully. Ready for Trajectory & Phase training.
+[2025-11-24 17:07:24,092][__main__][INFO] - Starting Open-Loop Validation Loop...
+[2025-11-24 17:07:24,303][lmdb_utils][INFO] -  Opened LMDB at /content/drive/MyDrive/pda/data/training_ready/training_data.lmdb | mode=RO | file-mode
+[2025-11-24 17:07:24,308][lmdb_utils][INFO] -  Opened LMDB at /content/drive/MyDrive/pda/data/training_ready/training_data.lmdb | mode=RO | file-mode
+[2025-11-24 17:07:24,309][lmdb_utils][INFO] -  Opened LMDB at /content/drive/MyDrive/pda/data/training_ready/training_data.lmdb | mode=RO | file-mode
+[2025-11-24 17:07:24,309][lmdb_utils][INFO] -  Opened LMDB at /content/drive/MyDrive/pda/data/training_ready/training_data.lmdb | mode=RO | file-mode
+[2025-11-24 17:23:45,911][__main__][INFO] - --- Generating SOTA Validation Report ---

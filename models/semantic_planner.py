@@ -109,13 +109,42 @@ class SemanticPlanner(nn.Module):
     def __init__(self, cfg: SemanticPlannerConfig):
         super().__init__()
         self.cfg = cfg
+
+
         logger.info(f"[SemanticPlanner] Initializing v9.0 (Strategist) with config: {cfg}")
 
         # --- 1. Vision Backbone (Frozen) ---
+        # logger.info(f"Loading Vision Backbone: {cfg.vision_backbone_model}")
+        # self.vision_backbone = SiglipVisionModel.from_pretrained(cfg.vision_backbone_model)
+        # self.vision_backbone.requires_grad_(False)
+        # self.vision_backbone.eval()
+        # logger.info(f"[SemanticPlanner] Initializing v9.0 (Fine-Tuning) with config: {cfg}")
+
+        # --- 1. Vision Backbone (Partial Unfreeze) ---
         logger.info(f"Loading Vision Backbone: {cfg.vision_backbone_model}")
         self.vision_backbone = SiglipVisionModel.from_pretrained(cfg.vision_backbone_model)
-        self.vision_backbone.requires_grad_(False)
-        self.vision_backbone.eval()
+        
+        # A. Freeze EVERYTHING first
+        for param in self.vision_backbone.parameters():
+            param.requires_grad = False
+            
+        # B. Unfreeze the Last Encoder Layer
+        # This allows the model to learn "Geometry" without forgetting "Objects"
+        last_layer = self.vision_backbone.vision_model.encoder.layers[-1]
+        for param in last_layer.parameters():
+            param.requires_grad = True
+            
+        # C. Unfreeze the Final LayerNorm (Crucial for feature scaling)
+        if hasattr(self.vision_backbone.vision_model, 'post_layernorm'):
+             for param in self.vision_backbone.vision_model.post_layernorm.parameters():
+                param.requires_grad = True
+
+        # Ensure the model stays in train mode (for the unfrozen parts)
+        # while we will manually handle BatchNorm freezing if needed (SigLIP usually uses LayerNorm, which is fine)
+        
+        logger.info("Backbone Status: Bottom layers FROZEN. Top layer UNFROZEN for geometric adaptation.")
+
+
 
         backbone_cfg = self.vision_backbone.config
         
@@ -215,10 +244,19 @@ class SemanticPlanner(nn.Module):
         logger.info("[SemanticPlanner v9.0] Initialization Complete.")
 
     def train(self, mode: bool = True):
-        """Force backbone to remain in eval mode during training."""
+        """
+        Hybrid Train Mode:
+        - Frozen layers stay in Eval mode (to freeze stats/dropout).
+        - Unfrozen layers go to Train mode.
+        """
         super().train(mode)
         if mode:
+            # 1. Force entire backbone to eval first (default safety)
             self.vision_backbone.eval()
+            
+            # 2. Set specifically unfrozen layers to train
+            self.vision_backbone.vision_model.encoder.layers[-1].train()
+            self.vision_backbone.vision_model.post_layernorm.train()
         return self
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -237,11 +275,14 @@ class SemanticPlanner(nn.Module):
         # To save compute, we stack images along batch dim: (3*B, C, H, W)
         stacked_images = torch.cat([prev_image, curr_image, goal_image], dim=0)
         
-        with torch.no_grad():
-            backbone_out = self.vision_backbone(stacked_images.float())
+        # [FIX] Do NOT use no_grad() here. 
+        # The flags set in __init__ (requires_grad=True for top layer) handle the selective training.
+        # AMP will handle the mixed precision automatically.
+        backbone_out = self.vision_backbone(stacked_images.float())
         
-        # Handle tokens (Standard SigLIP: 196 patches)
         visual_tokens = backbone_out.last_hidden_state
+
+        
         seq_len = visual_tokens.shape[1]
         
         # Robust slicing (in case of CLS/Registers)

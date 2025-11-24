@@ -349,75 +349,111 @@ class SemanticPlannerLightningModule(pl.LightningModule):
 
     def configure_optimizers(self):
         """
-        Robust SOTA Optimizer Configuration.
-        Includes safeguards against top-level parameter crashes.
+        SOTA Optimizer Configuration: Differential Learning Rates & Intelligent Weight Decay.
+        
+        Architecture-Aware Logic:
+        1. **Parameter Groups**:
+           - **Backbone** (SigLIP): Low LR (0.1x) to preserve pre-trained features.
+           - **Head** (Planner): Base LR (1.0x) for rapid task adaptation.
+        2. **Regularization Hygiene**:
+           - **Decay**: applied ONLY to matrix multiplications (Linear, Conv, Attention weights).
+           - **No Decay**: applied to Biases, LayerNorms, Embeddings, and 1D Vectors.
         """
-        decay = set()
-        no_decay = set()
+        # 1. Define Targets
+        # Use a lower learning rate for the pre-trained backbone to prevent catastrophic forgetting.
+        base_lr = self.cfg.optimizer.lr
+        backbone_lr = base_lr * 0.1
+        weight_decay = self.cfg.optimizer.weight_decay
+
+        # 2. Initialize Parameter Buckets
+        # Format: (Backbone/Head) x (Decay/NoDecay)
+        backbone_decay = []
+        backbone_no_decay = []
+        head_decay = []
+        head_no_decay = []
+
+        # 3. Setup Module Analysis
+        # We identify modules that MUST NOT have weight decay (Norms, Embeddings)
+        blacklist_modules = (torch.nn.LayerNorm, torch.nn.Embedding)
+        whitelist_modules = (torch.nn.Linear, torch.nn.MultiheadAttention)
         
-        # Define Module Types for filtering
-        whitelist_weight_modules = (torch.nn.Linear, torch.nn.MultiheadAttention)
-        blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.Embedding)
-        
-        # Pre-compute module map for safe lookups
+        # Create a lookup map from parameter name -> owning module
+        # allowing precise isinstance checks rather than string heuristics.
         name_to_module = {n: m for n, m in self.named_modules()}
 
         for pn, p in self.named_parameters():
             if not p.requires_grad:
-                continue
-            
-            # Explicitly exclude Frozen Backbone
-            if "vision_backbone" in pn:
-                continue
+                continue  # Skip frozen parameters (e.g. frozen parts of SigLIP)
 
-            # 1. Catch Explicit "No Decay" cases (Biases, Orphans, Norms)
+            # --- A. Determine Group (Backbone vs. Head) ---
+            is_backbone = "vision_backbone" in pn
+
+            # --- B. Determine Regularization (Decay vs. No Decay) ---
+            # Default: Apply decay
+            apply_decay = True
+
+            # Rule 1: Never decay biases
             if pn.endswith('bias'):
-                no_decay.add(pn)
-            elif "spatial_pos_embedding" in pn or "query_token" in pn or "token_type" in pn:
-                no_decay.add(pn)
-            elif pn.endswith("weight") and "norm" in pn:
-                no_decay.add(pn)
-            elif p.ndim < 2:
-                # Catch 1D parameters (like new learned scalars) automatically
-                no_decay.add(pn)
+                apply_decay = False
             
-            # 2. Module-based Logic (Robust Implementation)
-            elif pn.endswith("weight"):
-                # Safe Parent Extraction
-                # rpartition splits safely even if separator is missing
-                parent_name = pn.rpartition('.')[0] 
+            # Rule 2: Never decay 1D parameters (Scale/Shift params, raw vectors)
+            # This catches LayerNorm weights, scalar gates, etc.
+            elif p.ndim < 2:
+                apply_decay = False
+
+            # Rule 3: Special handling for known structural embeddings
+            elif "spatial_pos_embedding" in pn or "query_token" in pn or "token_type" in pn:
+                apply_decay = False
+
+            # Rule 4: Module-based inspection (The Gold Standard)
+            # If it's a weight, check the module type.
+            elif pn.endswith('weight'):
+                # Get parent module name (e.g. "model.transformer.layers.0.norm1")
+                parent_name = pn.rpartition('.')[0]
                 
-                # Check if parent is in our module map (handles orphans gracefully)
+                # Check the module type if we can find it
                 if parent_name in name_to_module:
-                    parent_mod = name_to_module[parent_name]
-                    if isinstance(parent_mod, blacklist_weight_modules):
-                        no_decay.add(pn)
-                    else:
-                        decay.add(pn)
+                    module = name_to_module[parent_name]
+                    if isinstance(module, blacklist_modules):
+                        apply_decay = False
+                    elif isinstance(module, whitelist_modules):
+                        apply_decay = True
                 else:
-                    # Fallback for weights without mapped parents (Standard Decay)
-                    decay.add(pn)
+                    # Fallback: If we can't find the module, but it's a weight > 1D, decay it.
+                    apply_decay = True
+
+            # --- C. Bucket Assignment ---
+            if is_backbone:
+                if apply_decay:
+                    backbone_decay.append(p)
+                else:
+                    backbone_no_decay.append(p)
             else:
-                # Default for everything else
-                decay.add(pn)
+                if apply_decay:
+                    head_decay.append(p)
+                else:
+                    head_no_decay.append(p)
 
-        # Create Groups
-        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-        decay_params = [param_dict[pn] for pn in sorted(list(decay))]
-        no_decay_params = [param_dict[pn] for pn in sorted(list(no_decay))]
-
+        # 4. Logging Verification (Ensure no params are lost)
         if self.trainer.is_global_zero:
-            logger.info(f"Optimizer Configured: {len(decay_params)} decay vars, {len(no_decay_params)} no-decay vars.")
+            logger.info(
+                f"Optimizer Groups | "
+                f"Head Decay: {len(head_decay)} | Head No-Decay: {len(head_no_decay)} | "
+                f"Backbone Decay: {len(backbone_decay)} | Backbone No-Decay: {len(backbone_no_decay)}"
+            )
 
+        # 5. Construct Optimizer with Differential LRs
         optimizer = torch.optim.AdamW(
             [
-                {"params": decay_params, "weight_decay": self.cfg.optimizer.weight_decay},
-                {"params": no_decay_params, "weight_decay": 0.0},
+                {"params": head_decay,       "lr": base_lr,     "weight_decay": weight_decay},
+                {"params": head_no_decay,    "lr": base_lr,     "weight_decay": 0.0},
+                {"params": backbone_decay,   "lr": backbone_lr, "weight_decay": weight_decay},
+                {"params": backbone_no_decay,"lr": backbone_lr, "weight_decay": 0.0},
             ],
-            lr=self.cfg.optimizer.lr,
             betas=(0.9, 0.999)
         )
 
+        # 6. Scheduler
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
             num_warmup_steps=int(self.trainer.estimated_stepping_batches * self.cfg.optimizer.warmup_percentage),
@@ -425,7 +461,6 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         )
 
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
-
 
     def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int) -> None:
         """
@@ -549,14 +584,70 @@ def main(cfg: DictConfig) -> None:
     )
 
 
+    # resume_path = cfg.training.get("resume_from_checkpoint")
+    # ckpt_arg = None 
+
+    # if resume_path and os.path.exists(resume_path):
+    #     logger.info(f"Resuming training from checkpoint: {resume_path}")
+    #     ckpt_arg = resume_path
+    # else:
+    #     logger.info("No resume checkpoint found. Starting fresh.")
+
+
     resume_path = cfg.training.get("resume_from_checkpoint")
-    ckpt_arg = None 
+    ckpt_arg = None # Default: Start fresh
 
     if resume_path and os.path.exists(resume_path):
-        logger.info(f"Resuming training from checkpoint: {resume_path}")
-        ckpt_arg = resume_path
+        logger.info(f"--- DETECTED CHECKPOINT: {resume_path} ---")
+        logger.info("Performing Surgical Weight Injection (v8 -> v9 Action Chunking)...")
+        
+        try:
+            # 1. Load Raw Checkpoint
+            checkpoint = torch.load(resume_path, map_location="cpu")
+            state_dict = checkpoint['state_dict']
+            
+            # 2. Get New Model Structure
+            model_state = model.state_dict()
+            filtered_state_dict = {}
+            
+            # 3. The Brain Transplant
+            for k, v in state_dict.items():
+                # --- A. Handle Query Token Split ---
+                # Old model had 'plan_cls_token'. New model has 3 distinct queries.
+                # We clone the old general knowledge into all 3 new specialists.
+                if "plan_cls_token" in k:
+                    logger.info("Migrating: Cloning 'plan_cls_token' -> 'traj', 'grip', & 'phase' queries")
+                    filtered_state_dict["model.traj_query_token"] = v
+                    filtered_state_dict["model.grip_query_token"] = v
+                    filtered_state_dict["model.phase_query_token"] = v
+                    continue
+
+                # --- B. Handle Standard Keys ---
+                if k in model_state:
+                    # Shape Check: If shape changed (e.g. Heads, Embeddings), skip loading
+                    if v.shape != model_state[k].shape:
+                        logger.warning(f"Resetting Layer (Shape Mismatch): {k} | Old: {v.shape} -> New: {model_state[k].shape}")
+                        continue
+                    
+                    # Exact Match: Keep it
+                    filtered_state_dict[k] = v
+            
+            # 4. Inject Weights
+            # strict=False is mandatory (we expect to miss heads and new embeddings)
+            keys = model.load_state_dict(filtered_state_dict, strict=False)
+            
+            logger.info("Migration Successful.")
+            logger.info(f"Layers Initialized from Scratch: {len(keys.missing_keys)}")
+            # Expect missing: *.traj_head.*, *.token_type_embeddings*, etc.
+            
+            # 5. Force Optimizer Reset
+            ckpt_arg = None 
+            
+        except Exception as e:
+            logger.error(f"Surgical migration failed: {e}")
+            raise e
     else:
-        logger.info("No resume checkpoint found. Starting fresh.")
+        logger.info("No checkpoint found. Starting fresh.")
 
     try:
         logger.info("Starting trainer.fit()...")
@@ -569,6 +660,10 @@ def main(cfg: DictConfig) -> None:
     except Exception as e:
         logger.exception(f"Training failed with exception: {e}")
         raise e
+    
+
+
+    
     finally:
         for lg in loggers:
             if isinstance(lg, WandbLogger):

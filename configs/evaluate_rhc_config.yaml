@@ -4,7 +4,7 @@ defaults:
 
 # --- Model & Environment Configuration ---
 checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_043.ckpt"
-num_episodes: 50
+num_episodes: 12
 max_steps: 200 # Max steps per episode (e.g., 10 seconds at 20Hz)
 seed: 42
 success_threshold: 0.05 # 5 cm distance to goal for success

@@ -79,9 +79,9 @@ class DomainRandomizationConfig:
 
         # --- Left Three-Quarter Views ---
         # [Source: Shot_04/sample_00] Excellent, clear left-side composition. Elevation: 53.0°
-        CameraShot(pos=(0.57, 0.58, 1.01), target=(0.44, -0.01, 0.43)),
+        # CameraShot(pos=(0.57, 0.58, 1.01), target=(0.44, -0.01, 0.43)),
         # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
-        CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
+        # CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
         # [Source: Shot_12/sample_01] Another strong left view, slightly different framing. Elevation: 39.2°
         CameraShot(pos=(1.10, 0.41, 1.01), target=(0.52, 0.06, 0.45)),
         # --- Frontal Views ---
@@ -96,7 +96,7 @@ class DomainRandomizationConfig:
         # [Source: Shot_09/sample_00] A well-composed high three-quarter view. Elevation: 48.7°
         CameraShot(pos=(1.02, 0.05, 1.10), target=(0.45, -0.02, 0.44)),
         # [Source: Shot_10/sample_01 - MODIFIED] A safe top-down, clamped away from the extreme 74°. Elevation: 68.0°
-        CameraShot(pos=(0.85, -0.15, 1.25), target=(0.40, -0.04, 0.45)),
+        # CameraShot(pos=(0.85, -0.15, 1.25), target=(0.40, -0.04, 0.45)),
 
         # --- Dynamic / Lower Views (Still Safe) ---
         # [Source: Shot_11/sample_00] The perfect low-angle shot, just above the limit. Elevation: 25.2°
@@ -106,18 +106,23 @@ class DomainRandomizationConfig:
 
         # --- Extra Views for Maximum Variety ---    
         # [Source: Shot_03/sample_00] An interesting over-the-shoulder left view. Elevation: 35.0°
-        CameraShot(pos=(0.75, 0.54, 0.91), target=(0.40, -0.02, 0.44)),
+        # CameraShot(pos=(0.75, 0.54, 0.91), target=(0.40, -0.02, 0.44)),
         # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
         # [Source: Shot_07/sample_00] A very wide three-quarter view, good for seeing the whole table. Elevation: 23.5° (clamped to 25)
         CameraShot(pos=(1.20, 0.55, 0.95), target=(0.52, 0.01, 0.45)),
     ])
 
-    radius_jitter: float = 0.10      # meters (reduced from 0.15)
-    azimuth_jitter: float = 0.26     # radians (~15 degrees) (reduced from 0.35)
-    elevation_jitter: float = 0.17   # radians (~10 degrees) (reduced from 0.26)
-    target_pos_jitter: float = 0.05  # meters (reduced from 0.08)
-    fovy_jitter: float = 3.0         # degrees (reduced from 5.0)
+    # radius_jitter: float = 0.10      # meters (reduced from 0.15)
+    # azimuth_jitter: float = 0.26     # radians (~15 degrees) (reduced from 0.35)
+    # elevation_jitter: float = 0.17   # radians (~10 degrees) (reduced from 0.26)
+    # target_pos_jitter: float = 0.05  # meters (reduced from 0.08)
+    # fovy_jitter: float = 3.0         # degrees (reduced from 5.0)
 
+    radius_jitter: float = 0.05      # meters (reduced from 0.10). Keeps scale consistent.
+    azimuth_jitter: float = 0.15     # radians (~8.5 deg). Prevents swinging behind robot arm.
+    elevation_jitter: float = 0.10   # radians (~5.7 deg). Prevents becoming "Top Down".
+    target_pos_jitter: float = 0.02  # meters (2cm). Keeps object perfectly centered.
+    fovy_jitter: float = 2.0         # degrees. Minor zoom variation.
 
 class PandaEnv(gym.Env):
     """
@@ -1578,3 +1583,33 @@ class PandaEnv(gym.Env):
         high_limits.append(1.0)
         
         return np.array(low_limits, dtype=np.float32), np.array(high_limits, dtype=np.float32)
+    
+
+    def debug_force_camera_shot(self, shot_index: int):
+        """
+        DEBUG ONLY: Forces the camera to a specific index from the config list.
+        Bypasses all jitter and randomization to visualize the 'Ideal' shot.
+        """
+        if not (0 <= shot_index < len(self.dr_config.camera_shots)):
+            print(f"Warning: Shot index {shot_index} out of bounds.")
+            return
+
+        shot = self.dr_config.camera_shots[shot_index]
+        
+        # 1. Set Position
+        cam_pos = np.array(shot.pos)
+        target_pos = np.array(shot.target)
+        
+        # 2. Calculate Orientation (Look-At)
+        quat_xyzw = self._calculate_look_at_quat(cam_pos, target_pos)
+        quat_wxyz = self._scipy_xyzw_to_mujoco_wxyz(quat_xyzw)
+        
+        # 3. Apply to Model
+        self.model.cam_pos[self.camera_id] = cam_pos
+        self.model.cam_quat[self.camera_id] = quat_wxyz
+        
+        # 4. Reset FOV to a standard value (e.g. 45) to judge the position purely
+        self.model.cam_fovy[self.camera_id] = 45.0
+        
+        # 5. Update scene
+        mujoco.mj_forward(self.model, self.data)
