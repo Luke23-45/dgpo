@@ -534,7 +534,7 @@ def main(cfg: DictConfig) -> None:
     
     # 2. Logging Setup
     # Hydra sets the working directory, so '.' is the output directory
-    output_dir = Path("/content/drive/MyDrive/pda/logs_awsp/")
+    output_dir = Path("/content/drive/MyDrive/pda/logs_awsp_newer/")
     
     loggers = [TensorBoardLogger(save_dir=".", name="tb_logs")]
     
