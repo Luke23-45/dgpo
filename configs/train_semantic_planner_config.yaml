@@ -29,7 +29,7 @@ dataset:
   # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb"
   # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb"
   num_workers: 2            
-  use_aug: false
+  use_aug: true
 
 # --- Training Loop Configuration ---
 training:
@@ -65,7 +65,7 @@ training:
   loss_weights:
     lambda_gripper: 2.0      
 
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_005.ckpt" 
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_015.ckpt" 
 
 # --- Optimizer ---
 optimizer:

@@ -87,23 +87,26 @@ class RewardConfig:
 
 # --- Optimized NumPy Math Helpers (No Scipy Overhead) ---
 
+
 def quat_apply(quat: np.ndarray, vec: np.ndarray) -> np.ndarray:
     """
     Rotates vector `vec` by quaternion `quat` [x, y, z, w].
-    Pure NumPy implementation for speed.
+    Corrected Implementation: v' = v + 2 * cross(q_xyz, cross(q_xyz, v) + q_w * v)
     """
-    x, y, z, w = quat
-    vx, vy, vz = vec
+    xyz = quat[:3]
+    w = quat[3]
     
-    t0 = 2.0 * (w * vx + y * vz - z * vy)
-    t1 = 2.0 * (w * vy + z * vx - x * vz)
-    t2 = 2.0 * (w * vz + x * vy - y * vx)
+    # Manual Cross Product for Speed (t = 2 * cross(xyz, vec))
+    tx = 2.0 * (xyz[1] * vec[2] - xyz[2] * vec[1])
+    ty = 2.0 * (xyz[2] * vec[0] - xyz[0] * vec[2])
+    tz = 2.0 * (xyz[0] * vec[1] - xyz[1] * vec[0])
     
-    return np.array([
-        vx + w * t0 + y * t2 - z * t1,
-        vy + w * t1 + z * t0 - x * t2,
-        vz + w * t2 + x * t1 - y * t0
-    ])
+    # v' = vec + w * t + cross(xyz, t)
+    res_x = vec[0] + w * tx + (xyz[1] * tz - xyz[2] * ty)
+    res_y = vec[1] + w * ty + (xyz[2] * tx - xyz[0] * tz)
+    res_z = vec[2] + w * tz + (xyz[0] * ty - xyz[1] * tx)
+    
+    return np.array([res_x, res_y, res_z])
 
 
 def _safe_get(d: Dict, key: str, default: np.ndarray) -> np.ndarray:
@@ -147,6 +150,9 @@ def calculate_rewards_for_episode(
         norm = np.linalg.norm(ee_quat)
         if norm > 1e-6:
             ee_quat = ee_quat / norm
+        else:
+            # Fallback to identity [0,0,0,1] if corrupt, prevents quat_apply from zeroing vectors
+            ee_quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
 
         obj_pos = _safe_get(current_obs, 'object_pos_world', np.zeros(3, dtype=np.float32))
         goal_pos = _safe_get(current_obs, 'goal_pos_world', np.zeros(3, dtype=np.float32))

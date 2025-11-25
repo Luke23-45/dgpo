@@ -18,7 +18,7 @@ from utils.semantic_planner_dataset import SemanticPlannerDataset
 def main():
     # PATH TO YOUR DATASET
     # Update this to match your actual LMDB path
-    dataset_path = r"C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\final_training_set\training_set.lmdb" 
+    dataset_path = r"C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\sdf\asdfw2\final_training_set\training_set.lmdb" 
     
     print(f"Loading dataset: {dataset_path}")
     

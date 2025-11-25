@@ -70,46 +70,73 @@ class DomainRandomizationConfig:
     # ============================ CURATED EXEMPLAR SHOTS ============================
     # FINAL PATCH: This new list is mined from the best results in your JSON data.
     # It provides a wider, more robust, and higher-quality set of base viewpoints.
+    # camera_shots: List[CameraShot] = field(default_factory=lambda: [
+    #     # --- Right Three-Quarter Views ---
+    #     # [Source: Shot_01/sample_00] Perfect, balanced right view. Elevation: 38.3°
+    #     CameraShot(pos=(0.90, -0.57, 1.03), target=(0.41, -0.02, 0.45)),
+    #     # (From Shot_04/sample_01) - A slightly wider right view. Elevation: 45.1°
+    #     CameraShot(pos=(1.07, -0.25, 1.09), target=(0.49, -0.03, 0.44)),
+
+    #     # --- Left Three-Quarter Views ---
+    #     # [Source: Shot_04/sample_00] Excellent, clear left-side composition. Elevation: 53.0°
+    #     # CameraShot(pos=(0.57, 0.58, 1.01), target=(0.44, -0.01, 0.43)),
+    #     # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
+    #     # CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
+    #     # [Source: Shot_12/sample_01] Another strong left view, slightly different framing. Elevation: 39.2°
+    #     CameraShot(pos=(1.10, 0.41, 1.01), target=(0.52, 0.06, 0.45)),
+
+    #     CameraShot(pos=(0.98, 0.53, 0.98), target=(0.48, -0.01, 0.44)),
+        
+    #     # --- Frontal Views ---
+    #     # [Source: Shot_08/sample_00] A perfect, direct frontal shot. Elevation: 31.0°
+    #     CameraShot(pos=(1.09, 0.14, 0.87), target=(0.40, 0.03, 0.44)),
+    #     # [Source: Shot_09/sample_12] A slightly higher frontal view, great for context. Elevation: 36.1°
+    #     # CameraShot(pos=(1.17, 0.06, 0.98), target=(0.45, -0.02, 0.45)),
+    #     # [Source: Shot_06/sample_02] A wider frontal view. Elevation: 41.3°
+    #     CameraShot(pos=(1.02, 0.10, 0.95), target=(0.39, 0.04, 0.45)),
+
+    #     # --- High-Angle / Near Top-Down Views ---
+    #     # [Source: Shot_09/sample_00] A well-composed high three-quarter view. Elevation: 48.7°
+    #     CameraShot(pos=(1.02, 0.05, 1.10), target=(0.45, -0.02, 0.44)),
+    #     # [Source: Shot_10/sample_01 - MODIFIED] A safe top-down, clamped away from the extreme 74°. Elevation: 68.0°
+    #     # CameraShot(pos=(0.85, -0.15, 1.25), target=(0.40, -0.04, 0.45)),
+
+    #     # --- Dynamic / Lower Views (Still Safe) ---
+    #     # [Source: Shot_11/sample_00] The perfect low-angle shot, just above the limit. Elevation: 25.2°
+    #     CameraShot(pos=(1.02, 0.10, 0.95), target=(0.39, 0.04, 0.45)),
+    #     # [Source: Shot_13/sample_01] A fantastic wide, low-left perspective. Elevation: 27.4°
+    #     CameraShot(pos=(0.98, 0.53, 0.82), target=(0.48, -0.01, 0.44)),
+
+    #     # --- Extra Views for Maximum Variety ---    
+    #     # [Source: Shot_03/sample_00] An interesting over-the-shoulder left view. Elevation: 35.0°
+    #     # CameraShot(pos=(0.75, 0.54, 0.91), target=(0.40, -0.02, 0.44)),
+    #     # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
+    #     # [Source: Shot_07/sample_00] A very wide three-quarter view, good for seeing the whole table. Elevation: 23.5° (clamped to 25)
+    #     CameraShot(pos=(1.20, 0.55, 0.95), target=(0.52, 0.01, 0.45)),
+    # ])
     camera_shots: List[CameraShot] = field(default_factory=lambda: [
-        # --- Right Three-Quarter Views ---
-        # [Source: Shot_01/sample_00] Perfect, balanced right view. Elevation: 38.3°
+        # --- Right Three-Quarter Views (Safe High Angles) ---
         CameraShot(pos=(0.90, -0.57, 1.03), target=(0.41, -0.02, 0.45)),
-        # (From Shot_04/sample_01) - A slightly wider right view. Elevation: 45.1°
         CameraShot(pos=(1.07, -0.25, 1.09), target=(0.49, -0.03, 0.44)),
 
-        # --- Left Three-Quarter Views ---
-        # [Source: Shot_04/sample_00] Excellent, clear left-side composition. Elevation: 53.0°
-        # CameraShot(pos=(0.57, 0.58, 1.01), target=(0.44, -0.01, 0.43)),
-        # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
-        # CameraShot(pos=(0.91, 0.49, 0.92), target=(0.38, 0.06, 0.45)),
-        # [Source: Shot_12/sample_01] Another strong left view, slightly different framing. Elevation: 39.2°
+        # --- Left Three-Quarter Views (Balanced) ---
         CameraShot(pos=(1.10, 0.41, 1.01), target=(0.52, 0.06, 0.45)),
-        # --- Frontal Views ---
-        # [Source: Shot_08/sample_00] A perfect, direct frontal shot. Elevation: 31.0°
+        
+        # [FIXED] "Side Left" - Raised Z from 0.82 to 0.98 for safety
+        CameraShot(pos=(0.98, 0.53, 0.98), target=(0.48, -0.01, 0.44)),
+        
+        # Wide Left
+        CameraShot(pos=(1.20, 0.55, 0.95), target=(0.52, 0.01, 0.45)),
+
+        # --- Frontal Views (Varied Heights) ---
+        # Low Front (Face Level) - Lowest safe frontal shot
         CameraShot(pos=(1.09, 0.14, 0.87), target=(0.40, 0.03, 0.44)),
-        # [Source: Shot_09/sample_12] A slightly higher frontal view, great for context. Elevation: 36.1°
-        # CameraShot(pos=(1.17, 0.06, 0.98), target=(0.45, -0.02, 0.45)),
-        # [Source: Shot_06/sample_02] A wider frontal view. Elevation: 41.3°
+        
+        # Mid Front - Standard view
         CameraShot(pos=(1.02, 0.10, 0.95), target=(0.39, 0.04, 0.45)),
 
-        # --- High-Angle / Near Top-Down Views ---
-        # [Source: Shot_09/sample_00] A well-composed high three-quarter view. Elevation: 48.7°
+        # High Front - Near top-down
         CameraShot(pos=(1.02, 0.05, 1.10), target=(0.45, -0.02, 0.44)),
-        # [Source: Shot_10/sample_01 - MODIFIED] A safe top-down, clamped away from the extreme 74°. Elevation: 68.0°
-        # CameraShot(pos=(0.85, -0.15, 1.25), target=(0.40, -0.04, 0.45)),
-
-        # --- Dynamic / Lower Views (Still Safe) ---
-        # [Source: Shot_11/sample_00] The perfect low-angle shot, just above the limit. Elevation: 25.2°
-        CameraShot(pos=(1.15, -0.53, 1.0), target=(0.51, -0.06, 0.45)),
-        # [Source: Shot_13/sample_01] A fantastic wide, low-left perspective. Elevation: 27.4°
-        CameraShot(pos=(0.98, 0.53, 0.82), target=(0.48, -0.01, 0.44)),
-
-        # --- Extra Views for Maximum Variety ---    
-        # [Source: Shot_03/sample_00] An interesting over-the-shoulder left view. Elevation: 35.0°
-        # CameraShot(pos=(0.75, 0.54, 0.91), target=(0.40, -0.02, 0.44)),
-        # (From Shot_06/sample_15) - A wide, cinematic left view. Elevation: 32°
-        # [Source: Shot_07/sample_00] A very wide three-quarter view, good for seeing the whole table. Elevation: 23.5° (clamped to 25)
-        CameraShot(pos=(1.20, 0.55, 0.95), target=(0.52, 0.01, 0.45)),
     ])
 
     # radius_jitter: float = 0.10      # meters (reduced from 0.15)
@@ -152,12 +179,15 @@ class PandaEnv(gym.Env):
     # Placement zones are defined as [min_offset, max_offset] from the table center
     # These have been adjusted to be more central and guarantee visibility.
     PLACEMENT_ZONES = {
-        "center": (np.array([-0.05, -0.05]), np.array([0.05, 0.05])),
-        "left":   (np.array([-0.15, -0.1]), np.array([-0.05, 0.1])),
-        "right":  (np.array([0.05, -0.1]), np.array([0.15, 0.1])),
-        "front":  (np.array([-0.15, -0.15]), np.array([0.15, -0.05])),
-        "back":   (np.array([-0.15, 0.05]), np.array([0.15, 0.15])),
+        # "center": (np.array([-0.05, -0.05]), np.array([0.05, 0.05])),
+        # "left":   (np.array([-0.15, -0.1]), np.array([-0.05, 0.1])),
+        # "right":  (np.array([0.05, -0.1]), np.array([0.15, 0.1])),
+        # "front":  (np.array([-0.15, -0.15]), np.array([0.15, -0.05])),
+        # "back":   (np.array([-0.15, 0.05]), np.array([0.15, 0.15])),
+        "full_table": (np.array([-0.25, -0.35]), np.array([0.15, 0.35]))
+
     }
+
     # Z-height for the object on the table
     OBJECT_Z_HEIGHT = 0.42 
     # Z-height for the goal on the table
@@ -569,68 +599,63 @@ class PandaEnv(gym.Env):
             "width": int(width),
         }
 
+
     def _apply_domain_randomization(self, gripper_pos: np.ndarray, goal_pos: np.ndarray):
         """
-        Handles all domain randomization using the new "Exemplar-Based Spherical Jitter" strategy.
-        This guarantees high-quality, varied, and well-framed shots every time.
+        Original Domain Randomization: Object-Centric / Panning.
+        The camera tracks the midpoint between the gripper and the goal.
         """
         if not self.enable_domain_randomization:
             return
 
-        # --- Part 1: Photometric Randomization (Lighting and Textures) ---
-
-
-        # --- Part 2: Geometric Randomization (Principled Camera Placement) ---
-
-        # 1. Select a random high-quality "exemplar" shot from our curated list.
-        chosen_shot = self.np_random.choice(self.dr_config.camera_shots)
-
-        # print(f"Camera Short: {chosen_shot}")
-        base_cam_pos = np.array(chosen_shot.pos)
-        base_target_pos = np.array(chosen_shot.target)
-
-        # 2. Define the dynamic "center of action" for this specific task.
-        # We will aim the camera at the midpoint between the gripper and the goal.
+        # --- 1. Photometric Randomization ---
+        # Center lighting on the action
         action_midpoint = (gripper_pos + goal_pos) / 2.0
         self._randomize_photometrics(action_midpoint)
-        # 3. Add bounded, random jitter to the target position.
-        # This creates small variations in framing (e.g., rule of thirds).
-        target_jitter = self.np_random.uniform(-self.dr_config.target_pos_jitter,
-                                              self.dr_config.target_pos_jitter,
-                                              size=3)
+
+        # --- 2. Geometric Randomization (Camera Pose) ---
+        chosen_shot = self.np_random.choice(self.dr_config.camera_shots)
+        base_cam_pos = np.array(chosen_shot.pos)
+        base_target_ref = np.array(chosen_shot.target)
+
+        # A. Define Target: The Action Midpoint + Jitter
+        # This causes the "Panning" effect as the gripper moves
+        target_jitter = self.np_random.uniform(
+            -self.dr_config.target_pos_jitter,
+            self.dr_config.target_pos_jitter, 
+            size=3
+        )
         final_target_pos = action_midpoint + target_jitter
-        # SAFETY: Ensure the camera isn't looking at the floor.
+        
+        # Safety: Keep focus above table
         final_target_pos[2] = max(final_target_pos[2], self.GOAL_Z_HEIGHT)
 
-        # 4. Convert the exemplar's camera position to spherical coordinates relative to its target.
-        radius, azimuth, elevation = self._cartesian_to_spherical(base_cam_pos, base_target_pos)
-
-        # 5. Apply bounded, random jitter in the more intuitive spherical coordinate space.
+        # B. Spherical Conversion
+        radius, azimuth, elevation = self._cartesian_to_spherical(base_cam_pos, base_target_ref)
+        
+        # Apply Noise
         radius += self.np_random.uniform(-self.dr_config.radius_jitter, self.dr_config.radius_jitter)
         azimuth += self.np_random.uniform(-self.dr_config.azimuth_jitter, self.dr_config.azimuth_jitter)
         elevation += self.np_random.uniform(-self.dr_config.elevation_jitter, self.dr_config.elevation_jitter)
 
-        # 6. CRITICAL SAFETY CLAMPS: Enforce the "Good Zone" limits we discovered.
-        # This single-handedly prevents the vast majority of bad shots.
-        elevation = np.clip(elevation, np.deg2rad(25), np.deg2rad(70)) # Clamp between 25° and 70°
-        radius = np.clip(radius, 0.8, 2.0) # Prevent camera from getting too close or far
+        # C. Safety Clamps
+        elevation = np.clip(elevation, np.deg2rad(25), np.deg2rad(75))
+        radius = np.clip(radius, 0.6, 1.5)
 
-        # 7. Reconstruct the new Cartesian camera position using the jittered spherical coords
-        #    and the NEW dynamic target position.
+        # D. Reconstruct Camera
         final_cam_pos = self._spherical_to_cartesian(radius, azimuth, elevation, final_target_pos)
-
-        # 8. Calculate the final camera orientation and FOV.
         new_quat_xyzw = self._calculate_look_at_quat(final_cam_pos, final_target_pos)
-        base_fovy = self.model.cam_fovy[self.camera_id]
-        final_fovy = base_fovy + self.np_random.uniform(-self.dr_config.fovy_jitter,
-                                                        self.dr_config.fovy_jitter)
-        final_fovy = np.clip(final_fovy, 35.0, 80.0) # Clamp FOV for good measure
+        
+        # E. FOV Randomization
+        base_fovy = 45.0 
+        final_fovy = base_fovy + self.np_random.uniform(-self.dr_config.fovy_jitter, self.dr_config.fovy_jitter)
+        final_fovy = np.clip(final_fovy, 35.0, 65.0)
 
-        # --- Part 3: Apply Final Camera Pose to the MuJoCo Model ---
+        # --- 3. Apply to Simulation ---
         self.model.cam_pos[self.camera_id] = final_cam_pos
-        # MuJoCo uses w,x,y,z format for quaternions
-        self.model.cam_quat[self.camera_id] = self._scipy_xyzw_to_mujoco_wxyz(new_quat_xyzw).tolist()
+        self.model.cam_quat[self.camera_id] = self._scipy_xyzw_to_mujoco_wxyz(new_quat_xyzw)
         self.model.cam_fovy[self.camera_id] = final_fovy
+        
         if hasattr(self, "_camera_flip_cache"):
             self._camera_flip_cache.clear()
 
@@ -948,6 +973,12 @@ class PandaEnv(gym.Env):
         
         return np.concatenate([pos, quat_xyzw]).astype(np.float32)
 
+    def set_rendering_enabled(self, enabled: bool):
+        """Toggle rendering on/off to speed up the physics-only pass."""
+        self._rendering_enabled = getattr(self, "_rendering_enabled", True)
+        self._rendering_enabled = enabled
+
+
     def _get_obs(self) -> Dict[str, np.ndarray]:
         """
         Returns a clean observation dictionary that matches the observation_space.
@@ -967,10 +998,17 @@ class PandaEnv(gym.Env):
             left_force,
             right_force
         ])
+        if getattr(self, "_rendering_enabled", True):
+            image_primary = self.render(camera_name="fixed_camera")
+            image_wrist = self.render(camera_name="wrist_camera")
+        else:
+            # Fast placeholders (shapes must match space)
+            image_primary = np.zeros((256, 256, 3), dtype=np.uint8)
+            image_wrist = np.zeros((128, 128, 3), dtype=np.uint8)
 
         return {
-            "image_primary": self.render(camera_name="fixed_camera"),
-            "image_wrist": self.render(camera_name="wrist_camera"),
+            "image_primary": image_primary,
+            "image_wrist": image_wrist,
             "proprio": proprio,
             "is_grasped": np.array([self._is_physically_grasped], dtype=np.float32),
             "task_completed": np.array([0.0], dtype=np.float32),
@@ -1134,97 +1172,87 @@ class PandaEnv(gym.Env):
         return x_new, y_new
     
 
+
     def reset(self, seed: int = None, options: dict = None) -> Tuple[Dict, Dict]:
+        """
+        Reset with Object-Centric Randomization (Legacy Panning Logic).
+        Sequence: 1. Physics -> 2. Robot -> 3. Place Objects -> 4. Randomize Camera (Tracking)
+        """
         super().reset(seed=seed)
         if seed is not None: self.np_random, _ = seeding.np_random(seed)
         
         self.timestep = 0
         mujoco.mj_resetData(self.model, self.data)
         self.data.ctrl[:] = 0
-        print(f"seed - {seed}")
         
-        # FIX #4: Ensure grasp state is reset at the start of every episode
+        # 1. Physics Randomization
+        object_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
+        new_mass = self.np_random.uniform(low=0.1, high=0.5)
+        self.model.geom_friction[self.object_geom_id][0] = self.np_random.uniform(low=0.5, high=1.2)
+        self.model.body_mass[object_body_id] = new_mass
+
+        # 2. Robot Initialization
+        home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
+        qpos_jitter = self.np_random.uniform(-0.05, 0.05, size=home_qpos.shape)
+        self.data.qpos[:7] = home_qpos + qpos_jitter
+        
+        # 3. Object Placement (Before Camera Randomization)
+        # We use the safe zone we defined
+        safe_full_zone = (np.array([-0.20, -0.20]), np.array([0.15, 0.20]))
+        
+        # Note: We DISABLE check_visibility here because the camera hasn't moved yet.
+        # We rely on the camera moving TO the object in the next step.
+        object_pos = self._place_object_in_zone(
+            "object", "full_table", safe_full_zone, self.OBJECT_Z_HEIGHT,
+            camera_name="fixed_camera", check_visibility=False
+        )
+        
+        goal_pos = self._place_object_in_zone(
+            "goal", "full_table", safe_full_zone, self.GOAL_Z_HEIGHT,
+            camera_name="fixed_camera", check_visibility=False
+        )
+
+        # 4. Rotational Randomization
+        obj_yaw = self.np_random.uniform(-np.pi, np.pi)
+        obj_quat_wxyz = self._scipy_xyzw_to_mujoco_wxyz(R.from_euler('z', obj_yaw).as_quat())
+        goal_yaw = self.np_random.uniform(-np.pi, np.pi)
+        goal_quat_wxyz = self._scipy_xyzw_to_mujoco_wxyz(R.from_euler('z', goal_yaw).as_quat())
+
+        # 5. Apply Objects to Physics
+        joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
+        qpos_adr = int(self.model.jnt_qposadr[joint_id])
+        self.data.qpos[qpos_adr : qpos_adr+3] = object_pos
+        self.data.qpos[qpos_adr+3 : qpos_adr+7] = obj_quat_wxyz
+
+        goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "goal")
+        self.data.xpos[goal_body_id] = goal_pos
+        self.data.xquat[goal_body_id] = goal_quat_wxyz
+        
+        # Update physics so get_ee_pose is correct
+        mujoco.mj_forward(self.model, self.data)
+
+        # 6. Camera Randomization (Tracking)
+        # Now that objects are placed, we move the camera to look at them.
+        initial_ee_pos = self.get_ee_pose()[:3]
+        self._apply_domain_randomization(initial_ee_pos, goal_pos)
+
+        # 7. Final Settle
+        mujoco.mj_forward(self.model, self.data)
+        
         self._is_physically_grasped = False
         self._grasp_stabilization_counter = 0
         self._grasp_pos_offset = None
         self._grasp_orn_offset = None
-        # FIX #3: Apply physics randomization BEFORE the first mj_forward call
-        # 1. Physics Domain Randomization for the main object
-        object_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "object")
-        new_mass = self.np_random.uniform(low=0.1, high=0.5)
-        new_friction = self.np_random.uniform(low=0.5, high=1.2)
-        self.model.body_mass[object_body_id] = new_mass
-        self.model.geom_friction[self.object_geom_id][0] = new_friction
-
-        # Set initial robot pose
-        home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
-        qpos_jitter = self.np_random.uniform(-0.03, 0.03, size=home_qpos.shape)
-        self.data.qpos[:7] = home_qpos + qpos_jitter
         
-        # Propagate all model and data changes through the physics state
-        mujoco.mj_forward(self.model, self.data)
+        # 8. Render
+        if getattr(self, "_rendering_enabled", True):
+            self._initial_image = self.render(camera_name="fixed_camera")
+            self._goal_image = self._render_goal_image()
+        else:
+            h, w, c = self.observation_space["image_primary"].shape
+            self._initial_image = np.zeros((h, w, c), dtype=np.uint8)
+            self._goal_image = np.zeros((h, w, c), dtype=np.uint8)
         
-        # Now, proceed with object placement and visual DR
-        initial_ee_pos = self.get_ee_pose()[:3]
-        
-        obj_zone_key, goal_zone_key = self.np_random.choice(list(self.PLACEMENT_ZONES.keys()), 2, replace=True)
-        obj_zone, goal_zone = self.PLACEMENT_ZONES[obj_zone_key], self.PLACEMENT_ZONES[goal_zone_key]
-        object_pos = self._place_object_in_zone("object", obj_zone_key, obj_zone, self.OBJECT_Z_HEIGHT,camera_name="fixed_camera", check_visibility=False)
-        goal_pos   = self._place_object_in_zone("goal", goal_zone_key, goal_zone, self.GOAL_Z_HEIGHT,camera_name="primary", check_visibility=False)
-
-        MAX_REACH_X = 0.65
-        MIN_REACH_X = 0.40
-        MAX_REACH_Y = 0.25
-        MIN_REACH_Y = -0.25
-        # optionally limit how far Y can shift to prevent extreme lateral jumps
-        MAX_Y_SHIFT = 0.15  # for example
-
-        x0, y0 = object_pos[0], object_pos[1]
-        gx, gy = goal_pos[0], goal_pos[1]
-
-        x_new, y_new = self.compensatory_clamp_xy(
-            (x0, y0),
-            (gx, gy),
-            MIN_REACH_X, MAX_REACH_X,
-            MIN_REACH_Y, MAX_REACH_Y,
-            max_y_offset=MAX_Y_SHIFT
-        )
-
-        # if (x_new, y_new) != (x0, y0):
-        #     print(f"WARN: object position compensated: ({x0:.3f}, {y0:.3f}) → ({x_new:.3f}, {y_new:.3f})")
-
-        object_pos[0] = x_new
-        object_pos[1] = y_new
-             
-        self._apply_domain_randomization(initial_ee_pos, goal_pos)
-
-        if np.linalg.norm(goal_pos[:2] - object_pos[:2]) < 0.05:
-            goal_pos[0] += 0.05 
-        
-
-        joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "object_joint")
-        qpos_adr = int(self.model.jnt_qposadr[joint_id])
-        
-        # 2. Randomize the object's yaw angle (rotation around Z-axis).
-        #    This creates a non-identity rotation for the expert to align to.
-        random_yaw_angle = self.np_random.uniform(low=-np.pi, high=np.pi)
-        random_yaw_rotation = R.from_euler('z', random_yaw_angle)
-        
-        # 3. Convert to MuJoCo format (w, x, y, z) and apply to qpos.
-        #    _scipy_xyzw_to_mujoco_wxyz converts [x,y,z,w] to [w,x,y,z]
-        random_quat_wxyz = self._scipy_xyzw_to_mujoco_wxyz(random_yaw_rotation.as_quat())
-        
-        # 4. Apply both position and orientation to the object's free joint.
-        self.data.qpos[qpos_adr:qpos_adr + 3] = object_pos
-        self.data.qpos[qpos_adr + 3:qpos_adr + 7] = random_quat_wxyz
-
-        goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "goal")
-        self.data.xpos[goal_body_id] = goal_pos
-        
-        # Final forward pass to settle the scene before returning the first observation
-        mujoco.mj_forward(self.model, self.data)
-        self._initial_image = self.render(camera_name="fixed_camera")
-        self._goal_image = self._render_goal_image()
         return self.get_expert_obs(), {}
 
 

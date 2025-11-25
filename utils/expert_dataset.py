@@ -155,7 +155,7 @@ class ExpertDatasetWriter:
         lmdb_path = self._lmdb_path
 
         # open env (match same args as save())
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=30.0, subdir=False)
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=2.0, subdir=False)
         try:
             with env.begin(write=True) as txn:
                 for ep_dict in episode_list:
@@ -217,7 +217,7 @@ class ExpertDatasetWriter:
 
         # --- 2. Open LMDB Environment ---
         # Use a large map size for a 25GB+ dataset. 50GB is safe.
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=30.0, subdir=False) 
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=2.0, subdir=False) 
         
         try:
             with env.begin(write=True) as txn: 
@@ -703,6 +703,7 @@ class ExpertDataset(IterableDataset):
         self.env_xml_path = env_xml_path
         self.base_seed = base_seed
         self.max_samples_per_epoch = max_samples_per_epoch
+
         self.skip_on_error = skip_on_error
         self.warmup = warmup
         self.scripted_cfg = scripted_cfg 
@@ -813,7 +814,6 @@ class ExpertDataset(IterableDataset):
                 raise ValueError(f"Key {k} has shape {arr.shape}, expected at least dims {shape_tpl}")
             # we could enforce exact dims for fixed-length keys
     
-
     def _generate_one(self, current_obs: Dict) -> Tuple[Dict, np.ndarray, np.ndarray, bool]: 
         """
         Produces (obs, sim_action, data_action, ik_failed_flag).
@@ -851,206 +851,153 @@ class ExpertDataset(IterableDataset):
         
         return current_obs, action, ik_failed
 
-        
     def __iter__(self) -> Iterator[Tuple[Dict, np.ndarray]]:
-        """
-        Robust iterator for ExpertDataset.
-
-        Guarantees:
-           - deterministic per-worker RNG (via self._rng) [cite: 289]
-          - at least one sample kept from any successful trajectory [cite: 289]
-          - safe copying of numpy arrays to avoid shallow-copy bugs [cite: 289]
-          - consistent episode dict keys ("actions", "obs_list", "ik_fail_flags") [cite: 289]
-        """
-        # Ensure worker state is initialized (this must set self._worker_id, self._worker_master_seed, self._rng)
-        self._init_worker_state() 
-
-        # defensive inits
+        self._init_worker_state()
         self._episode_buffer.clear()
-        samples_this_epoch = 0
         consecutive_failures = 0
         episode_attempt_counter = 0
         MAX_CONSEC = 25
 
         while True:
-            # stop condition
-            samples_limit_reached = (self.max_samples_per_epoch is not None and
-                                    samples_this_epoch >= self.max_samples_per_epoch)
-            
-            episodes_limit_reached = (self.max_episodes_per_epoch is not None and
-                                      self._episode_id_counter >= self.max_episodes_per_epoch)
+            if self.max_samples_per_epoch and self._samples_yielded >= self.max_samples_per_epoch: return
+            if self.max_episodes_per_epoch and self._episode_id_counter >= self.max_episodes_per_epoch: return
 
-            if samples_limit_reached:
-                logger.info(f"Sample limit reached ({samples_this_epoch}/{self.max_samples_per_epoch}). Worker stopping.")
-                return
-
-            if episodes_limit_reached:
-                logger.info(f" Episode limit reached ({self._episode_id_counter}/{self.max_episodes_per_epoch}). Worker stopping.")
-                return
-
-            # if buffer empty, generate a new episode
             if not self._episode_buffer:
                 try:
-                    # deterministic per-episode seed derived from master seed
-                    current_episode_seed = (self._worker_master_seed + episode_attempt_counter) & 0x7FFFFFFF 
+                    # --- PASS 1: PHYSICS ONLY (FAST, LIGHTWEIGHT) ---
+                    self._env.set_rendering_enabled(False)
+                    
+                    seed = (self._worker_master_seed + episode_attempt_counter) & 0x7FFFFFFF
                     episode_attempt_counter += 1
-                    logger.debug(f"[worker {getattr(self,'_worker_id',0)}] Starting episode attempt seed={current_episode_seed}")
-
-                    # reset env & expert
-                    obs, _ = self._env.reset(seed=current_episode_seed) 
-                    self._env.set_object_size(self.object_profile.size) 
+                    
+                    obs, _ = self._env.reset(seed=seed)
                     self._scripted_expert.reset()
-                    if hasattr(self._ik_solver, "reset_controller_state"):
-                         self._ik_solver.reset_controller_state() 
+                    self._ik_solver.reset_controller_state()
+                    
+                    cached_steps = []
+                    
+                    for _ in range(self._env.max_episode_steps):
+                        target_pose, grip_act, info = self._scripted_expert.get_target_pose(obs)
+                        
+                        eff_dt = self._env.model.opt.timestep * 20
+                        max_dq = self._env.ACTION_SCALING_FACTOR / eff_dt
+                        delta_action = self._ik_solver.compute_delta_action(
+                            target_ee_pose=target_pose,
+                            model=self._env.model, data=self._env.data,
+                            ee_site_id=self._env.ee_site_id,
+                            joint_qpos_indices=np.arange(7),
+                            effective_dt=eff_dt, max_dq=max_dq
+                        )
+                        full_action = np.concatenate([delta_action, [grip_act]]).astype(np.float32)
+                        ik_failed = np.linalg.norm(delta_action) < 1e-4
 
-                    # collect the full (unfiltered) trajectory in memory for possible fallback
-                    unfiltered_obs: List[Dict[str, np.ndarray]] = []
-                    unfiltered_actions: List[np.ndarray] = []
-                    unfiltered_ik_flags: List[bool] = [] 
+                        # --- FIX: CACHE NUMPY ARRAYS ONLY ---
+                        # We avoid copying the entire MjData object.
+                        step_snapshot = {
+                            "qpos": self._env.data.qpos.copy(), # Tiny array
+                            "qvel": self._env.data.qvel.copy(), # Tiny array
+                            "ctrl": self._env.data.ctrl.copy(), # Tiny array
+                            "py_grasp_state": self._env._is_physically_grasped,
+                            "action": full_action,
+                            "expert_info": info,
+                            "ik_failed": ik_failed,
+                            "expert_state_str": info["expert_state_str"]
+                        }
+                        cached_steps.append(step_snapshot)
 
-                    for step in range(self._env.max_episode_steps):
-                        policy_obs, action, ik_failed = self._generate_one(obs)
-
-                        # convert and copy immediately to avoid aliasing
-                        obs_snapshot = {k: (np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v)) 
-                                        for k, v in policy_obs.items()}
-                        action_arr = np.asarray(action, dtype=np.float32).copy()
-
-                        # CRITICAL FIX: Add the expert state to the snapshot BEFORE appending it to the list.
-                        obs_snapshot['expert_state'] = self._scripted_expert.get_state()
-
-                        # Now, append the complete and correct snapshot to the trajectory lists.
-                        unfiltered_obs.append(obs_snapshot) 
-                        unfiltered_actions.append(action_arr) 
-                        unfiltered_ik_flags.append(bool(ik_failed))
-
-                        # step simulator with sim_act (absolute action used to step)
-                        obs, _, terminated, truncated, _ = self._env.step(action) 
-                        if terminated or truncated or self._scripted_expert.is_done():
+                        obs, _, done, trunc, _ = self._env.step(full_action)
+                        if done or trunc or self._scripted_expert.is_done():
                             break
 
-                    # determine success using the same logic as dataset (scripted_expert or env-based) [cite: 299]
-                    # prefer scripted_expert.was_successful() if available
-                    try:
-                        is_success = self._scripted_expert.was_successful() 
-                    except Exception: 
-                        # fallback: basic object-lift & near-goal test [cite: 300]
-                        final = obs
-                        objp = final["object_pos_world"]
-                        goalp = final["goal_pos_world"] 
-                        is_lifted = objp[2] > (self._env.OBJECT_Z_HEIGHT + 0.03)
-                        is_near_goal = np.linalg.norm(objp[:2] - goalp[:2]) < 0.05
-                        is_success = bool(is_lifted and is_near_goal) 
-
-                     # If successful, filter frames for storage (balanced selection) [cite: 302]
-                    if is_success:
-                        filtered: List[Tuple[Dict, np.ndarray]] = []
-                        for step_idx, (step_obs, step_action) in enumerate(zip(unfiltered_obs, unfiltered_actions)): 
-                            ee_vel = np.linalg.norm(step_obs["proprio"][7:14])
+                    # --- PASS 2: FILTER & RENDER ---
+                    if self._scripted_expert.was_successful():
+                        consecutive_failures = 0
+                        indices_to_keep = []
+                        
+                        # 1. Filter using cached qvel (no need for full state)
+                        for i, step_data in enumerate(cached_steps):
+                            qvel = step_data["qvel"][:7]
+                            ee_vel = np.linalg.norm(qvel)
                             if ee_vel < 0.1:
-                                keep = (self._rng.random() < self.p_low_vel) 
+                                keep = (self._rng.random() < self.p_low_vel)
                             else:
-                                keep = (self._rng.random() < self.p_motion_frame) 
-                            if keep:
-                                # store copy-safe snapshots [cite: 305]
-                                filtered.append(( {k: np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v) 
-                                                for k, v in step_obs.items()}, 
-                                              step_action.copy() ))
+                                keep = (self._rng.random() < self.p_motion_frame)
+                            if keep: indices_to_keep.append(i)
+                        
+                        # 2. Force Last Frame
+                        last_idx = len(cached_steps) - 1
+                        if last_idx not in indices_to_keep:
+                            indices_to_keep.append(last_idx)
+                        indices_to_keep.sort()
 
-                        # fallback: if empty, keep most "active" frame (highest joint delta magnitude) [cite: 307]
-                        if not filtered and unfiltered_actions:
-                            # robustly compute magnitudes (exclude gripper scalar if present)
-                            try:
-                                mags = [] 
-                                for a in unfiltered_actions:
-                                    a = np.asarray(a, dtype=np.float32) 
-                                    if a.size >= 2:
-                                        mags.append(np.linalg.norm(a[:-1]))  # assume last is gripper
-                                    else: 
-                                        mags.append(np.linalg.norm(a)) 
-                                best_idx = int(np.argmax(mags)) 
-                            except Exception:
-                                best_idx = -1
-                            logger.warning(
-                                 "Successful trajectory entirely filtered by stochastic selector; [cite: 312] "
-                                f"keeping fallback frame idx={best_idx} (worker={getattr(self,'_worker_id',0)})" 
-                            )
-                            fb_obs = {k: np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v) 
-                                      for k, v in unfiltered_obs[best_idx].items()}
-                            fb_act = np.asarray(unfiltered_actions[best_idx], dtype=np.float32).copy()
-                            filtered.append((fb_obs, fb_act)) 
-
-
-                        if filtered:
-                          
-                            filt_obs, filt_acts = zip(*filtered)
-
-                            self._episode_buffer.extend(zip(filt_obs, filt_acts))
+                        # 3. Enable Rendering
+                        self._env.set_rendering_enabled(True)
+                        
+                        processed_obs_list = []
+                        processed_act_list = []
+                        processed_flags = []
+                        
+                        # 4. Render Loop
+                        for idx in indices_to_keep:
+                            step_data = cached_steps[idx]
                             
-                            final_obs = unfiltered_obs[-1]
-                            if "goal_image" in final_obs and final_obs["goal_image"] is not None:
-                                goal_image_primary = np.copy(final_obs["goal_image"])
-                            else:
-                                goal_image_primary = np.copy(final_obs.get("image_primary"))
+                            # --- FIX: LIGHTWEIGHT RESTORE ---
+                            self._env.data.qpos[:] = step_data["qpos"]
+                            self._env.data.qvel[:] = step_data["qvel"]
+                            self._env.data.ctrl[:] = step_data["ctrl"]
+                            
+                            # CRITICAL: Recompute derived physics (collisions, camera matrices)
+                            mujoco.mj_forward(self._env.model, self._env.data)
+                            
+                            # Restore Python State
+                            self._env._is_physically_grasped = step_data["py_grasp_state"]
+                            
+                            # Render
+                            full_obs = self._env.get_expert_obs()
+                            
+                            # Inject Info
+                            full_obs["gt_phase"] = np.array([step_data["expert_info"]["gt_phase"]], dtype=np.int32)
+                            full_obs["gt_gripper"] = np.array([step_data["expert_info"]["gt_gripper_intent"]], dtype=np.float32)
+                            full_obs["expert_state"] = step_data["expert_state_str"]
+                            
+                            processed_obs_list.append({k: copy.deepcopy(v) for k, v in full_obs.items()})
+                            processed_act_list.append(step_data["action"].copy())
+                            processed_flags.append(step_data["ik_failed"])
 
-                            # Build full episode dict using FILTERED data
-                            ep_id = f"w{getattr(self,'_worker_id',0)}_e{self._episode_id_counter}"
-                            episode_dict = { 
-                                "episode_id": ep_id,
-                                "seed": int(current_episode_seed),
-                                "obs_list": [{k: (np.copy(v) if isinstance(v, np.ndarray) else copy.deepcopy(v)) 
-                                              for k, v in o.items()} for o in filt_obs],
-                                "actions": [np.asarray(a, dtype=np.float32).copy() for a in filt_acts], 
-                                "ik_fail_flags": [False] * len(filt_obs), 
-                                "goal_image_primary": goal_image_primary,
-                                "success": True,
-                             }
-                            self.episodes.append(episode_dict)
-                            self._episode_id_counter += 1
-                            consecutive_failures = 0
-                        else: 
-                            # defensive: should not happen due to fallback
-                            consecutive_failures += 1
-                            logger.error("Filtered trajectory unexpectedly empty after fallback.") 
-                            if consecutive_failures >= MAX_CONSEC:
-                                raise RuntimeError("Too many consecutive failures")
-                            continue 
+                        # --- ASSEMBLE DICT (Clean, No Redundant Goal) ---
+                        ep_id = f"w{self._worker_id}_e{self._episode_id_counter}"
+                        episode_dict = {
+                            "episode_id": ep_id,
+                            "seed": int(seed),
+                            "obs_list": processed_obs_list,
+                            "actions": processed_act_list,
+                            "ik_fail_flags": processed_flags,
+                            "success": True
+                        }
+                        
+                        self.episodes.append(episode_dict)
+                        
+                        for o, a in zip(processed_obs_list, processed_act_list):
+                            self._episode_buffer.append((o, a))
+                            
+                        self._episode_id_counter += 1
                     else:
-                        # Failed trajectory: log & increment counter
                         consecutive_failures += 1
-                        logger.debug(f"Discarding failed trajectory (worker={getattr(self,'_worker_id',0)}). [cite: 324] "
-                                      f"Consecutive failures: {consecutive_failures}") 
                         if consecutive_failures >= MAX_CONSEC:
-                            raise RuntimeError("Too many consecutive failures")
-                        continue
+                            raise RuntimeError("Expert failed too many times consecutively.")
 
-                except Exception as exc: 
-                    # robust error handling
+                except Exception as exc:
                     if self.skip_on_error:
-                        logger.warning(f"Episode generation exception (worker={getattr(self,'_worker_id',0)}): {exc}", exc_info=True)
-                        consecutive_failures += 1 
-                        if consecutive_failures >= MAX_CONSEC:
-                            raise RuntimeError(f"ExpertDataset crashed {MAX_CONSEC} times in a row.") from exc 
+                        logger.warning(f"Gen Error: {exc}", exc_info=False)
+                        consecutive_failures += 1
+                        # Force clear to free memory if crash happened mid-loop
+                        cached_steps = []
                         continue
-                    else: 
-                        raise
+                    else: raise
 
-            # Yield samples from the episode buffer one-by-one
-            if not self._episode_buffer:
-                continue
-
-            obs_from_buffer, action_to_yield = self._episode_buffer.pop(0)
- 
-            # increment counters [cite: 329]
-            samples_this_epoch += 1
-            self._samples_yielded += 1
-
-            if self.yield_full_obs:
-                yield obs_from_buffer, action_to_yield
-            else:
-                obs_for_policy = {"image_primary": obs_from_buffer["image_primary"], 
-                                  "proprio": obs_from_buffer["proprio"]}
-                yield obs_for_policy, action_to_yield
+            if self._episode_buffer:
+                yield self._episode_buffer.pop(0)
+                self._samples_yielded += 1
 
     
     def get_stats(self):

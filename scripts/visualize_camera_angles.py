@@ -68,7 +68,7 @@ def main():
             shot_folder.mkdir(exist_ok=True)
             
             # Reset physics to center the object for consistent viewing
-            env.reset(seed=53) 
+            env.reset(seed=65) 
             
             # Force the camera to the specific index
             env.debug_force_camera_shot(i)

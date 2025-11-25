@@ -105,7 +105,7 @@ def main():
         overlay_text(img, f"Step: {t}", (10, 20), (255, 255, 255))
         overlay_text(img, f"Phase: {int(p_val)}", (10, 40), (255, 255, 255))
         overlay_text(img, f"Grip Label: {g_val:.1f}", (10, 60), status_color)
-        overlay_text(img, f"Advantage: {a_val:.2f}", (10, 80), (200, 200, 255))
+        overlay_text(img, f"Advantage: {a_val:.2f}", (10, 80), (0, 0, 5))
 
         writer.write(img)
 
@@ -123,4 +123,4 @@ if __name__ == "__main__":
 
 
 
-# python -m s4 --dataset "C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\final_training_set\training_set.lmdb" --episode 0 --output "check_ep0.mp4"
+# python -m s4 --dataset "C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\sdf\asdfw2\final_training_set\training_set.lmdb" --episode 0 --output "check_ep0.mp4"
