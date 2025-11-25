@@ -1,5 +1,5 @@
 # FILE: scripts/visualize_camera_angles.py
-
+#python -m scripts.visualize_camera_angles
 import sys
 import time
 import cv2
@@ -68,7 +68,7 @@ def main():
             shot_folder.mkdir(exist_ok=True)
             
             # Reset physics to center the object for consistent viewing
-            env.reset(seed=50) 
+            env.reset(seed=53) 
             
             # Force the camera to the specific index
             env.debug_force_camera_shot(i)

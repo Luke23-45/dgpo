@@ -233,7 +233,6 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         return torch.rad2deg(angle_rad).mean()
 
 
-# [IN CLASS SemanticPlannerLightningModule]
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> Optional[torch.Tensor]:
         if not batch: return None
@@ -263,7 +262,10 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         # Calculate raw L1 per element, then mean over (K, 7) dimensions
         raw_pose_loss = self.pose_criterion(pred_pose_chunk, gt_pose_chunk) # (B, K, 7)
         # Weighted mean over batch, standard mean over trajectory
-        pose_loss = (raw_pose_loss.mean(dim=[1, 2]) * weights.squeeze()).mean()
+
+        POSE_SCALE = 10.0 
+        
+        pose_loss = (raw_pose_loss.mean(dim=[1, 2]) * weights.squeeze()).mean() * POSE_SCALE
 
         # B. Gripper Loss (BCE)
         # Reshape for BCE: (B*K, 1)
@@ -584,70 +586,70 @@ def main(cfg: DictConfig) -> None:
     )
 
 
-    # resume_path = cfg.training.get("resume_from_checkpoint")
-    # ckpt_arg = None 
-
-    # if resume_path and os.path.exists(resume_path):
-    #     logger.info(f"Resuming training from checkpoint: {resume_path}")
-    #     ckpt_arg = resume_path
-    # else:
-    #     logger.info("No resume checkpoint found. Starting fresh.")
-
-
     resume_path = cfg.training.get("resume_from_checkpoint")
-    ckpt_arg = None # Default: Start fresh
+    ckpt_arg = None 
 
     if resume_path and os.path.exists(resume_path):
-        logger.info(f"--- DETECTED CHECKPOINT: {resume_path} ---")
-        logger.info("Performing Surgical Weight Injection (v8 -> v9 Action Chunking)...")
-        
-        try:
-            # 1. Load Raw Checkpoint
-            checkpoint = torch.load(resume_path, map_location="cpu")
-            state_dict = checkpoint['state_dict']
-            
-            # 2. Get New Model Structure
-            model_state = model.state_dict()
-            filtered_state_dict = {}
-            
-            # 3. The Brain Transplant
-            for k, v in state_dict.items():
-                # --- A. Handle Query Token Split ---
-                # Old model had 'plan_cls_token'. New model has 3 distinct queries.
-                # We clone the old general knowledge into all 3 new specialists.
-                if "plan_cls_token" in k:
-                    logger.info("Migrating: Cloning 'plan_cls_token' -> 'traj', 'grip', & 'phase' queries")
-                    filtered_state_dict["model.traj_query_token"] = v
-                    filtered_state_dict["model.grip_query_token"] = v
-                    filtered_state_dict["model.phase_query_token"] = v
-                    continue
-
-                # --- B. Handle Standard Keys ---
-                if k in model_state:
-                    # Shape Check: If shape changed (e.g. Heads, Embeddings), skip loading
-                    if v.shape != model_state[k].shape:
-                        logger.warning(f"Resetting Layer (Shape Mismatch): {k} | Old: {v.shape} -> New: {model_state[k].shape}")
-                        continue
-                    
-                    # Exact Match: Keep it
-                    filtered_state_dict[k] = v
-            
-            # 4. Inject Weights
-            # strict=False is mandatory (we expect to miss heads and new embeddings)
-            keys = model.load_state_dict(filtered_state_dict, strict=False)
-            
-            logger.info("Migration Successful.")
-            logger.info(f"Layers Initialized from Scratch: {len(keys.missing_keys)}")
-            # Expect missing: *.traj_head.*, *.token_type_embeddings*, etc.
-            
-            # 5. Force Optimizer Reset
-            ckpt_arg = None 
-            
-        except Exception as e:
-            logger.error(f"Surgical migration failed: {e}")
-            raise e
+        logger.info(f"Resuming training from checkpoint: {resume_path}")
+        ckpt_arg = resume_path
     else:
-        logger.info("No checkpoint found. Starting fresh.")
+        logger.info("No resume checkpoint found. Starting fresh.")
+
+
+    # resume_path = cfg.training.get("resume_from_checkpoint")
+    # ckpt_arg = None # Default: Start fresh
+
+    # if resume_path and os.path.exists(resume_path):
+    #     logger.info(f"--- DETECTED CHECKPOINT: {resume_path} ---")
+    #     logger.info("Performing Surgical Weight Injection (v8 -> v9 Action Chunking)...")
+        
+    #     try:
+    #         # 1. Load Raw Checkpoint
+    #         checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+    #         state_dict = checkpoint['state_dict']
+            
+    #         # 2. Get New Model Structure
+    #         model_state = model.state_dict()
+    #         filtered_state_dict = {}
+            
+    #         # 3. The Brain Transplant
+    #         for k, v in state_dict.items():
+    #             # --- A. Handle Query Token Split ---
+    #             # Old model had 'plan_cls_token'. New model has 3 distinct queries.
+    #             # We clone the old general knowledge into all 3 new specialists.
+    #             if "plan_cls_token" in k:
+    #                 logger.info("Migrating: Cloning 'plan_cls_token' -> 'traj', 'grip', & 'phase' queries")
+    #                 filtered_state_dict["model.traj_query_token"] = v
+    #                 filtered_state_dict["model.grip_query_token"] = v
+    #                 filtered_state_dict["model.phase_query_token"] = v
+    #                 continue
+
+    #             # --- B. Handle Standard Keys ---
+    #             if k in model_state:
+    #                 # Shape Check: If shape changed (e.g. Heads, Embeddings), skip loading
+    #                 if v.shape != model_state[k].shape:
+    #                     logger.warning(f"Resetting Layer (Shape Mismatch): {k} | Old: {v.shape} -> New: {model_state[k].shape}")
+    #                     continue
+                    
+    #                 # Exact Match: Keep it
+    #                 filtered_state_dict[k] = v
+            
+    #         # 4. Inject Weights
+    #         # strict=False is mandatory (we expect to miss heads and new embeddings)
+    #         keys = model.load_state_dict(filtered_state_dict, strict=False)
+            
+    #         logger.info("Migration Successful.")
+    #         logger.info(f"Layers Initialized from Scratch: {len(keys.missing_keys)}")
+    #         # Expect missing: *.traj_head.*, *.token_type_embeddings*, etc.
+            
+    #         # 5. Force Optimizer Reset
+    #         ckpt_arg = None 
+            
+    #     except Exception as e:
+    #         logger.error(f"Surgical migration failed: {e}")
+    #         raise e
+    # else:
+    #     logger.info("No checkpoint found. Starting fresh.")
 
     try:
         logger.info("Starting trainer.fit()...")

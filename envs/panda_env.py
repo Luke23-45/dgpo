@@ -88,7 +88,7 @@ class DomainRandomizationConfig:
         # [Source: Shot_08/sample_00] A perfect, direct frontal shot. Elevation: 31.0°
         CameraShot(pos=(1.09, 0.14, 0.87), target=(0.40, 0.03, 0.44)),
         # [Source: Shot_09/sample_12] A slightly higher frontal view, great for context. Elevation: 36.1°
-        CameraShot(pos=(1.17, 0.06, 0.98), target=(0.45, -0.02, 0.45)),
+        # CameraShot(pos=(1.17, 0.06, 0.98), target=(0.45, -0.02, 0.45)),
         # [Source: Shot_06/sample_02] A wider frontal view. Elevation: 41.3°
         CameraShot(pos=(1.02, 0.10, 0.95), target=(0.39, 0.04, 0.45)),
 
@@ -100,7 +100,7 @@ class DomainRandomizationConfig:
 
         # --- Dynamic / Lower Views (Still Safe) ---
         # [Source: Shot_11/sample_00] The perfect low-angle shot, just above the limit. Elevation: 25.2°
-        CameraShot(pos=(1.15, -0.53, 0.82), target=(0.51, -0.06, 0.45)),
+        CameraShot(pos=(1.15, -0.53, 1.0), target=(0.51, -0.06, 0.45)),
         # [Source: Shot_13/sample_01] A fantastic wide, low-left perspective. Elevation: 27.4°
         CameraShot(pos=(0.98, 0.53, 0.82), target=(0.48, -0.01, 0.44)),
 
