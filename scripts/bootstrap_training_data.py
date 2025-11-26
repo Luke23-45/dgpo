@@ -57,7 +57,7 @@ def robust_rmtree(path):
 
 def main():
     parser = argparse.ArgumentParser(description="SOTA Data Factory")
-    parser.add_argument("--episodes", type=int, default=320, help="Total episodes to generate")
+    parser.add_argument("--episodes", type=int, default=400, help="Total episodes to generate")
     parser.add_argument("--workers", type=int, default=2, help="Number of parallel workers")
     parser.add_argument("--seed", type=int, default=317937, help="Base seed")
     parser.add_argument("--output_dir", type=str, default="/content/fresh_data/", help="Base output directory")
