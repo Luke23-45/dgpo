@@ -123,4 +123,4 @@ if __name__ == "__main__":
 
 
 
-# python -m s4 --dataset "C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\sdf\asdfw2\final_training_set\training_set.lmdb" --episode 0 --output "check_ep0.mp4"
+# 

@@ -68,10 +68,13 @@ def main():
             shot_folder.mkdir(exist_ok=True)
             
             # Reset physics to center the object for consistent viewing
-            env.reset(seed=65) 
+            env.reset(seed=8888) 
             
             # Force the camera to the specific index
             env.debug_force_camera_shot(i)
+
+            if i == 1:
+                break
             
             # Render loop for the "wiggle" animation
             for f in range(frames_per_shot):

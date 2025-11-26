@@ -155,7 +155,7 @@ class ExpertDatasetWriter:
         lmdb_path = self._lmdb_path
 
         # open env (match same args as save())
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=2.0, subdir=False)
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=30, subdir=False)
         try:
             with env.begin(write=True) as txn:
                 for ep_dict in episode_list:
@@ -217,7 +217,7 @@ class ExpertDatasetWriter:
 
         # --- 2. Open LMDB Environment ---
         # Use a large map size for a 25GB+ dataset. 50GB is safe.
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=2.0, subdir=False) 
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=30, subdir=False) 
         
         try:
             with env.begin(write=True) as txn: 

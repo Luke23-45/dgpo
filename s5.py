@@ -99,18 +99,8 @@ def main(args: argparse.Namespace):
     output_dir.mkdir(parents=True, exist_ok=True)
     video_path = output_dir / f"delta_control_seed{args.seed}.mp4"
     log_path = output_dir / f"delta_control_log_seed{args.seed}.csv"
-    expert_config = ExpertConfig(
-        failure_timeout_steps=100_000,      # Prevent global watchdog timeout
-        ignore_timeouts=True,               # Tell expert to warn instead of reset (if supported)
-        move_to_pre_grasp_duration=100_000, # Prevent MOVE_TO_PRE_GRASP timeout
-        prepare_gripper_duration=100_000,
-        descend_to_grasp_duration=100_000,
-        lift_duration_steps=100_000,
-        move_to_goal_duration=100_000,
-        prepare_place_duration=100_000,
-        descend_to_place_duration=100_000,
-        retract_duration_steps=100_000
-    )
+    expert_config = ExpertConfig()
+
     object_to_grasp = ObjectProfile(size=np.array([0.04, 0.04, 0.04]), grasp_width_normalized=0.6)
 
     # --- 1. Initialize Components ---
@@ -240,6 +230,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compare delta and absolute controllers.")
     parser.add_argument("--urdf_path", type=str, default="urdf/panda_mujoco_kinematics.urdf")
     parser.add_argument("--xml_path", type=str, default="envs/panda_pick_place.xml")
-    parser.add_argument("--seed", type=int, default=10099)
+    parser.add_argument("--seed", type=int, default=8888)
     args = parser.parse_args()
     main(args)

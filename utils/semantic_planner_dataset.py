@@ -22,11 +22,10 @@ Architectural Upgrades:
 """
 
 from __future__ import annotations
-
+from torchvision import transforms 
 import logging
 import random
 from typing import Dict, List, Optional, Any, Tuple
-
 import numpy as np
 import torch
 from PIL import Image
@@ -69,7 +68,12 @@ class SemanticPlannerDataset(EgoPlannerDataset):
         
         self.chunk_size = chunk_size
         self.proprio_noise = proprio_noise
-        
+        self.transform_primary = transforms.Compose([
+            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(), # Converts [0, 255] -> [0.0, 1.0]
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]) # Converts [0, 1] -> [-1, 1]
+        ])
+
         # --- SOTA VALIDATION (Explicit Keys) ---
         if self.expert_reader.get_num_episodes() > 0:
             first_ep_meta = self.expert_reader.episode_metadata[0]

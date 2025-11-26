@@ -269,7 +269,10 @@ class PandaEnv(gym.Env):
         self.object_qpos_addr = self.model.jnt_qposadr[self.object_joint_id]
         
         self.object_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "object_geom")
-        if self.object_geom_id == -1:
+
+        self.goal_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "goal_geom")
+
+        if self.object_geom_id == -1 or self.goal_geom_id == -1:
             raise ValueError("Geom 'object_geom' not found in the XML.")
             
         self.left_touch_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "left_finger_touch_sensor")
@@ -1180,6 +1183,8 @@ class PandaEnv(gym.Env):
         """
         super().reset(seed=seed)
         if seed is not None: self.np_random, _ = seeding.np_random(seed)
+
+        print(f"seed - {seed}")
         
         self.timestep = 0
         mujoco.mj_resetData(self.model, self.data)
@@ -1196,26 +1201,82 @@ class PandaEnv(gym.Env):
         qpos_jitter = self.np_random.uniform(-0.05, 0.05, size=home_qpos.shape)
         self.data.qpos[:7] = home_qpos + qpos_jitter
         
-        # 3. Object Placement (Before Camera Randomization)
-        # We use the safe zone we defined
-        safe_full_zone = (np.array([-0.20, -0.20]), np.array([0.15, 0.20]))
+
+
+        #==============================new patches from here to fix the object ===============
+
+        safe_full_zone = (np.array([-0.20, -0.15]), np.array([0.15, 0.15]))
+        MAX_RADIAL_REACH = 0.60
+        base_pos, _ = self.get_base_pose()
+
+        # --- Safe Fallbacks ---
+        anchor_A = np.array([-0.1, 0.1])
+        anchor_B = np.array([-0.1, -0.1])
+        jitter_A = self.np_random.uniform(-0.02, 0.02, size=2)
+        jitter_B = self.np_random.uniform(-0.02, 0.02, size=2)
+        safe_pos_obj = np.append(self.TABLE_CENTER + anchor_A + jitter_A, self.OBJECT_Z_HEIGHT)
+        safe_pos_goal = np.append(self.TABLE_CENTER + anchor_B + jitter_B, self.GOAL_Z_HEIGHT)
+
+        use_fallback = False
+        object_pos = None
+        goal_pos = None
+        place_object_first = self.np_random.random() < 0.5
+
+        if place_object_first:
+            object_pos = self._place_object_in_zone(
+                "object", "full_table", safe_full_zone, self.OBJECT_Z_HEIGHT, "fixed_camera",
+                check_visibility=False, base_pos_for_reach=base_pos, max_reach_distance=MAX_RADIAL_REACH,
+                # PATCH: Pass ID
+                current_geom_id=self.object_geom_id
+            )
+            if object_pos is None: use_fallback = True
+            else:
+                goal_pos = self._place_object_in_zone(
+                    "goal", "full_table", safe_full_zone, self.GOAL_Z_HEIGHT, "fixed_camera",
+                    check_visibility=False, base_pos_for_reach=base_pos, max_reach_distance=MAX_RADIAL_REACH,
+                    # PATCH: Pass List of (pos, ID)
+                    excluded_objects=[(object_pos, self.object_geom_id)],
+                    # PATCH: Pass ID
+                    current_geom_id=self.goal_geom_id
+                )
+                if goal_pos is None: use_fallback = True
+        else:
+            goal_pos = self._place_object_in_zone(
+                "goal", "full_table", safe_full_zone, self.GOAL_Z_HEIGHT, "fixed_camera",
+                check_visibility=False, base_pos_for_reach=base_pos, max_reach_distance=MAX_RADIAL_REACH,
+                # PATCH: Pass ID
+                current_geom_id=self.goal_geom_id
+            )
+            if goal_pos is None: use_fallback = True
+            else:
+                object_pos = self._place_object_in_zone(
+                    "object", "full_table", safe_full_zone, self.OBJECT_Z_HEIGHT, "fixed_camera",
+                    check_visibility=False, base_pos_for_reach=base_pos, max_reach_distance=MAX_RADIAL_REACH,
+                    # PATCH: Pass List of (pos, ID)
+                    excluded_objects=[(goal_pos, self.goal_geom_id)],
+                    # PATCH: Pass ID
+                    current_geom_id=self.object_geom_id
+                )
+                if object_pos is None: use_fallback = True
+
+        # Final Safety Check (using IDs)
+        if not use_fallback:
+             if self._is_overlapping(object_pos, self.object_geom_id, goal_pos, self.goal_geom_id, margin=0.05):
+                 use_fallback = True
+
+        if use_fallback:
+            object_pos = safe_pos_obj
+            goal_pos = safe_pos_goal
+
         
-        # Note: We DISABLE check_visibility here because the camera hasn't moved yet.
-        # We rely on the camera moving TO the object in the next step.
-        object_pos = self._place_object_in_zone(
-            "object", "full_table", safe_full_zone, self.OBJECT_Z_HEIGHT,
-            camera_name="fixed_camera", check_visibility=False
-        )
-        
-        goal_pos = self._place_object_in_zone(
-            "goal", "full_table", safe_full_zone, self.GOAL_Z_HEIGHT,
-            camera_name="fixed_camera", check_visibility=False
-        )
+
+        #=============end of the object pos fix==========
+
 
         # 4. Rotational Randomization
-        obj_yaw = self.np_random.uniform(-np.pi, np.pi)
+        obj_yaw = self.np_random.uniform(-0.2, 0.2)
         obj_quat_wxyz = self._scipy_xyzw_to_mujoco_wxyz(R.from_euler('z', obj_yaw).as_quat())
-        goal_yaw = self.np_random.uniform(-np.pi, np.pi)
+        goal_yaw = self.np_random.uniform(-0.2, 0.2)
         goal_quat_wxyz = self._scipy_xyzw_to_mujoco_wxyz(R.from_euler('z', goal_yaw).as_quat())
 
         # 5. Apply Objects to Physics
@@ -1225,8 +1286,8 @@ class PandaEnv(gym.Env):
         self.data.qpos[qpos_adr+3 : qpos_adr+7] = obj_quat_wxyz
 
         goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "goal")
-        self.data.xpos[goal_body_id] = goal_pos
-        self.data.xquat[goal_body_id] = goal_quat_wxyz
+        self.model.body_pos[goal_body_id] = goal_pos
+        self.model.body_quat[goal_body_id] = goal_quat_wxyz
         
         # Update physics so get_ee_pose is correct
         mujoco.mj_forward(self.model, self.data)
@@ -1256,6 +1317,30 @@ class PandaEnv(gym.Env):
         return self.get_expert_obs(), {}
 
 
+    def _is_overlapping(self, pos1: np.ndarray, geom_id1: int, 
+                       pos2: np.ndarray, geom_id2: int, margin: float = 0.05) -> bool:
+        """
+        Checks overlap using Ground Truth sizes from the MuJoCo model.
+        """
+        # Get half-extents (sizes) directly from the model using the IDs
+        size1 = np.max(self.model.geom_size[geom_id1][:2])
+        size2 = np.max(self.model.geom_size[geom_id2][:2])
+        
+        dx = abs(pos1[0] - pos2[0])
+        dy = abs(pos1[1] - pos2[1])
+        
+        # Minimum required distance (sum of half-extents + margin)
+        safe_dist = size1 + size2 + margin
+        
+
+
+        # If distance is LESS than safe_dist in BOTH x and y, they are overlapping.
+        if dx < safe_dist and dy < safe_dist:
+            return True
+        
+        return False
+    
+
     def _place_object_in_zone(
         self,
         object_name: str,
@@ -1263,57 +1348,53 @@ class PandaEnv(gym.Env):
         zone: Tuple[np.ndarray, np.ndarray],
         z_plane: float,
         camera_name: str,
+        # CHANGED: Accept ID instead of float size
+        current_geom_id: int,
         check_visibility: bool = True,
-        max_attempts: int = 100,
+        max_attempts: int = 1000,
         margin: int = 20,
-    ) -> np.ndarray:
-        """
-        Sample points inside the zone and return the first position that projects
-        inside the provided camera view. Falls back to zone center if none found.
-        Returns an (x,y,z) world position.
-        """
-        # FIX: Moved this line to the top of the function.
-        # It now runs before any logic that depends on it.
+        # CHANGED: Exclusions list is now [(pos, geom_id), ...]
+        excluded_objects: Optional[List[Tuple[np.ndarray, int]]] = None,
+        base_pos_for_reach: Optional[np.ndarray] = None,
+        max_reach_distance: float = 0.6
+    ) -> Optional[np.ndarray]:
+        
+        if excluded_objects is None:
+            excluded_objects = []
+
         min_offset, max_offset = zone
-        if not check_visibility:
-            # Perform a blind placement without any visibility checks.
+        
+        for _ in range(max_attempts):
+            # 1. Sample Random Spot
             offset = self.np_random.uniform(low=min_offset, high=max_offset)
-            return np.append(self.TABLE_CENTER + offset, z_plane)
+            candidate_pos = np.append(self.TABLE_CENTER + offset, z_plane)
 
-        # The rest of the logic for visibility checks.
-        debug_printed = False
-        for attempt in range(max_attempts):
-            offset = self.np_random.uniform(low=min_offset, high=max_offset)
-            candidate = np.append(self.TABLE_CENTER + offset, z_plane)
+            # 2. Reachability Check
+            if base_pos_for_reach is not None:
+                if np.linalg.norm(candidate_pos[:2] - base_pos_for_reach[:2]) > max_reach_distance:
+                    continue 
 
-            visible, debug = self._is_pos_in_camera_view(candidate, camera_name, margin=margin)
-            if visible:
-                return candidate
+            # 3. Overlap Check (Using IDs)
+            is_too_close = False
+            for other_pos, other_geom_id in excluded_objects:
+                # Pass IDs to the helper
+                if self._is_overlapping(candidate_pos, current_geom_id, other_pos, other_geom_id):
+                    is_too_close = True
+                    break
+            
+            if is_too_close:
+                continue 
 
-            if not debug_printed:
-                print("\n" + "="*80)
-                print(f"DEBUG: Visibility Check FAILED for '{object_name}' in zone '{zone_key}'")
-                print(f"Attempt {attempt+1}/{max_attempts}. Candidate: {candidate}")
-                for k,v in debug.items():
-                    if isinstance(v, np.ndarray):
-                        print(f"  - {k}: {np.array2string(v, precision=4, suppress_small=True)}")
-                    else:
-                        print(f"  - {k}: {v}")
-                print("="*80 + "\n")
-                debug_printed = True
+            # 4. Visibility Check
+            if check_visibility:
+                visible, _ = self._is_pos_in_camera_view(candidate_pos, camera_name, margin=margin)
+                if not visible:
+                    continue
 
-        # Fallback to zone center
-        center_offset = 0.5 * (min_offset + max_offset)
-        center = np.append(self.TABLE_CENTER + center_offset, z_plane)
-        visible_center, _ = self._is_pos_in_camera_view(center, camera_name, margin=margin)
-        if visible_center:
-            return center
+            return candidate_pos
+        
+        return None
 
-        warnings.warn(
-            f"Could not find visible position for '{object_name}' in zone '{zone_key}'. "
-            "Falling back to zone center. Check camera placement and table coordinates."
-        )
-        return center
 
     def _camera_extrinsics(self, camera_id: int):
         """Return cam_pos (3,), R_wc (3x3 rotation camera->world), fx, fy, cx, cy, height, width."""

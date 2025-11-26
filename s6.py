@@ -48,18 +48,7 @@ def main(args: argparse.Namespace):
         grasp_width_normalized=0.6 # Close most of the way but not fully
     )
 
-    expert_config = ExpertConfig(
-        failure_timeout_steps=100_000,      # Prevent global watchdog timeout
-        ignore_timeouts=True,               # Tell expert to warn instead of reset (if supported)
-        move_to_pre_grasp_duration=100_000, # Prevent MOVE_TO_PRE_GRASP timeout
-        prepare_gripper_duration=100_000,
-        descend_to_grasp_duration=100_000,
-        lift_duration_steps=100_000,
-        move_to_goal_duration=100_000,
-        prepare_place_duration=100_000,
-        descend_to_place_duration=100_000,
-        retract_duration_steps=100_000
-    )
+    expert_config = ExpertConfig()
     # --- 1. Initialize Core Components ---
     log.info("Initializing components...")
     env = PandaEnv(xml_path=args.xml_path,control_mode='delta')
@@ -181,6 +170,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Verify the PandaEnv+ScriptedExpert trajectory generation.")
     parser.add_argument("--urdf_path", type=str, default="urdf/panda_mujoco_kinematics.urdf")
     parser.add_argument("--xml_path", type=str, default="envs/panda_pick_place.xml")
-    parser.add_argument("--seed", type=int, default=813)
+    parser.add_argument("--seed", type=int, default=850458389)
     args = parser.parse_args()
     main(args)

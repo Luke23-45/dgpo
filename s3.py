@@ -18,14 +18,14 @@ from utils.semantic_planner_dataset import SemanticPlannerDataset
 def main():
     # PATH TO YOUR DATASET
     # Update this to match your actual LMDB path
-    dataset_path = r"C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\sdf\asdfw2\final_training_set\training_set.lmdb" 
+    dataset_path = r"C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\final_training_set\training_set.lmdb" 
     
     print(f"Loading dataset: {dataset_path}")
     
     try:
         dataset = SemanticPlannerDataset(
             dataset_path=dataset_path,
-            use_aug=False, # Look at RAW data, not augmented
+            use_aug=True, # Look at RAW data, not augmented
             chunk_size=1
         )
     except Exception as e:
@@ -56,7 +56,6 @@ def main():
         
         # Simple un-normalization for visualization (assuming mean 0.5)
         img_np = img_tensor.permute(1, 2, 0).numpy()
-        img_np = (img_np * 0.5) + 0.5
         img_np = np.clip(img_np, 0, 1)
         
         # Get Proprio (Z-Height)
