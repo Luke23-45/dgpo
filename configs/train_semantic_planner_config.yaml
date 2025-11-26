@@ -24,19 +24,19 @@ model:
 # --- Dataset Configuration ---
 dataset:
   train_path: "/content/fresh_data/final_training_set/training_set.lmdb"
-  val_path: "/content/fresh_data/final_training_set/training_set.lmdb"
+  val_path: "/content/drive/MyDrive/pda/data/validation/training_set.lmdb"
 
   # train_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb"
   # val_path: "C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/training_ready/training.lmdb"
   num_workers: 2            
-  use_aug: true
+  use_aug: false
 
 # --- Training Loop Configuration ---
 training:
   batch_size: 64 
   val_batch_size: 64
 
-  check_val_every_n_epoch: 900
+  check_val_every_n_epoch: 2
 
   backup_every_n_epochs: 1
 
@@ -48,7 +48,7 @@ training:
   # --- [START OF THE DEFINITIVE PATCH 3] ---
   # Number of old failsafe backups to keep on disk.
   # Keeping at least 2 provides a fallback if the latest is corrupted.
-  backups_to_keep: 1
+  backups_to_keep: 2
 
 
   # [FIX] Moved 'max_epochs' here so the LR Scheduler can access it easily.

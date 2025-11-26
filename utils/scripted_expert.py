@@ -853,7 +853,7 @@ class ScriptedExpert:
             # === CONTINUOUS LOGIC & MONITORING ===
             self._target_pose_7d = self._final_place_pose
             self._gripper_action = -1.0
-            if not is_grasped and self._wait_counter > 5:
+            if not is_grasped and self._wait_counter > 8:
                 print("ERROR: Grasp lost during AWAIT_STABLE_PLACEMENT. Aborting.")
                 self._handle_failure()
                 return self.get_target_pose(expert_obs)

@@ -1,30 +1,22 @@
 # FILE: utils/advantage_calculator.py
-# (Definitive, SOTA, Production-Grade Implementation)
+# (Definitive SOTA v9.2 - Time-Dependent Baseline & Phase Audit)
 
 """
 Advantage Calculator for Advantage-Weighted Regression (AWR).
 
-This script performs offline pre-processing of an existing expert dataset to
-calculate and inject 'advantage' values for every timestep.
+State-of-the-Art Upgrade (v9.2):
+1.  **Time-Dependent Baseline V(t)**: Calculates the value baseline separately 
+    for each timestep t across all episodes. This creates a non-parametric 
+    estimate of V(s) that accounts for the natural decay of Discounted Returns.
+    This mathematically solves the "Negative Advantage Bias" in later task phases (e.g., Grasping).
+    
+2.  **Phase-Aware Auditing**: Explicitly loads semantic phase labels ('gt_phase') 
+    to verify that the Advantage distribution is centered (Mean ~ 0.0) across 
+    ALL phases, specifically monitoring the 'Grasp' phase for recovery.
 
-Pipeline:
-1.  **Safe Replication**: Clones the source dataset to a destination to prevent data corruption.
-2.  **Reward Re-evaluation**: Uses the SOTA `reward_functions.py` to re-compute rewards
-    based on the physical state in the dataset. This allows for reward shaping iteration
-    without re-running expensive simulations.
-3.  **Return Calculation**: Computes Discounted Returns (G_t) using a backwards pass.
-4.  **Baseline Estimation**: Computes a global value baseline (V) to center the returns.
-5.  **Advantage Injection**: Calculates Advantage (A_t = G_t - V) and efficiently writes
-    it back to the LMDB store as a new modality `advantages`.
-
-Usage:
-    python -m utils.advantage_calculator \
-        --source-db path/to/expert.lmdb \
-        --dest-db path/to/enhanced.lmdb \
-        --gamma 0.99
+3.  **Robust Data Loading**: Uses defensive typing and explicit modality extraction
+    to prevent silent failures during high-throughput processing.
 """
-
-#python -m utils.advantage_calculator --source-db "C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\training\expert_expert_run_validation_dataset_6_episodes\expert_expert_run_validation_dataset_6_episodes.lmdb" --dest-db "C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\training_ready\expert_expert_run_validation_dataset_6_episodes\expert_expert_run_validation_dataset_6_episodes.lmdb" --gamma 0.99
 
 from __future__ import annotations
 
@@ -33,16 +25,20 @@ import json
 import logging
 import shutil
 import sys
-import time
+import os
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple, Optional
+from collections import defaultdict
 
 import lmdb
 import numpy as np
+import torch
 from tqdm import tqdm
 
 # Ensure project root is in path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from utils.expert_dataset import ExpertTrajectoryDataset
 from utils.reward_functions import calculate_rewards_for_episode, RewardConfig
@@ -56,10 +52,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AdvantageCalculator")
 
+# Semantic Map for Reporting
+# Maps integer phase labels to human-readable names for the audit report
+PHASE_MAP = {
+    0: "0_Approach",
+    1: "1_Grasp",
+    2: "2_Transport",
+    3: "3_Place",
+    4: "4_Retract"
+}
 
 def compute_discounted_returns(rewards: np.ndarray, gamma: float) -> np.ndarray:
     """
-    Computes the discounted return G_t for each timestep t.
+    Computes the Discounted Return G_t for each timestep t using a backwards pass.
     G_t = r_t + gamma * G_{t+1}
     
     Args:
@@ -73,7 +78,7 @@ def compute_discounted_returns(rewards: np.ndarray, gamma: float) -> np.ndarray:
     returns = np.zeros_like(rewards, dtype=np.float32)
     running_return = 0.0
     
-    # Iterate backwards
+    # Iterate backwards from T-1 to 0
     for t in reversed(range(T)):
         running_return = rewards[t] + gamma * running_return
         returns[t] = running_return
@@ -81,35 +86,47 @@ def compute_discounted_returns(rewards: np.ndarray, gamma: float) -> np.ndarray:
     return returns
 
 
-def load_episode_data_for_rewards(reader: ExpertTrajectoryDataset, ep_idx: int) -> List[Dict[str, Any]]:
+def load_episode_data_for_rewards(reader: ExpertTrajectoryDataset, ep_idx: int) -> Tuple[List[Dict[str, Any]], np.ndarray]:
     """
-    Efficiently extracts only the modalities required for reward calculation
-    from the dataset reader and structures them into a list of observation dicts.
+    Robustly extracts physical states AND Phase labels from the dataset reader.
     
-    This avoids loading heavy image data, ensuring high throughput.
+    Args:
+        reader: The initialized ExpertTrajectoryDataset instance.
+        ep_idx: The index of the episode to load.
+        
+    Returns:
+        episode_obs_list: List of observation dicts for reward calculation.
+        phases: Numpy array of phase integers for auditing.
     """
     ep_meta = reader.episode_metadata[ep_idx]
     length = ep_meta['length']
+    modalities = ep_meta['modalities']
     
-    # Helper to get full array from Reader's LRU cache / LMDB loader
-    def get_mod(name):
-        if name not in ep_meta['modalities']:
-            # Graceful fallback for optional keys if reward function is robust
+    # Helper to safely get full array from Reader's LRU cache / LMDB loader
+    def get_mod(name: str) -> Optional[np.ndarray]:
+        if name not in modalities:
             return None
-        meta = ep_meta['modalities'][name]
+        meta = modalities[name]
         return reader._get_full_modality_array(
             meta['key'], meta['compression'], meta['dtype'], tuple(meta['shape'])
         )
 
-    # Load physical states (fast, low memory)
+    # 1. Load Physical State Modalities (Required for Reward Function)
     ee_poses = get_mod('ee_pose_world')
     obj_pos = get_mod('object_pos_world')
     goal_pos = get_mod('goal_pos_world')
     is_grasped = get_mod('is_grasped')
     proprio = get_mod('proprio')
+    
+    # 2. Load Phase Modality (Required for SOTA Audit)
+    gt_phase = get_mod('gt_phase')
 
     episode_obs_list = []
+    phases_list = []
+    
     for t in range(length):
+        # Construct observation dict for the Reward Function
+        # We explicitly handle None to be defensive, though a valid dataset should have these.
         obs = {
             'ee_pose_world': ee_poses[t] if ee_poses is not None else None,
             'object_pos_world': obj_pos[t] if obj_pos is not None else None,
@@ -119,11 +136,24 @@ def load_episode_data_for_rewards(reader: ExpertTrajectoryDataset, ep_idx: int) 
         }
         episode_obs_list.append(obs)
         
-    return episode_obs_list
+        # Robustly extract phase integer
+        if gt_phase is not None:
+            # Handle cases where data might be a 0-d tensor, numpy scalar, or array
+            raw_val = gt_phase[t]
+            if hasattr(raw_val, 'item'):
+                p = int(raw_val.item())
+            else:
+                p = int(raw_val)
+            phases_list.append(p)
+        else:
+            # Fallback if phase is missing (should not happen in v9.0 dataset)
+            phases_list.append(0)
+
+    return episode_obs_list, np.array(phases_list, dtype=np.int32)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SOTA Advantage Calculator for AWR")
+    parser = argparse.ArgumentParser(description="SOTA Advantage Calculator v9.2 (Time-Dependent Baseline)")
     parser.add_argument("--source-db", type=str, required=True, help="Path to input .lmdb file")
     parser.add_argument("--dest-db", type=str, required=True, help="Path to output .lmdb file")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor for returns")
@@ -133,7 +163,7 @@ def main():
     source_path = Path(args.source_db)
     dest_path = Path(args.dest_db)
     
-    # --- 1. Validation & Replication ---
+    # --- 1. Validation & Safe Replication ---
     if not source_path.exists():
         raise FileNotFoundError(f"Source DB not found: {source_path}")
     
@@ -155,7 +185,7 @@ def main():
         else:
             raise FileExistsError(f"Destination {dest_path} exists. Use --overwrite.")
 
-    # Ensure parent dir
+    # Ensure parent dir exists
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Cloning dataset: {source_path} -> {dest_path}")
@@ -165,10 +195,8 @@ def main():
     shutil.copy(source_index_path, dest_index_path)
     
     # --- 2. Initialization ---
-    # We use the ExpertTrajectoryDataset to read the *Destination* copy.
-    # This ensures we are working on the file we will eventually modify.
-    # Note: The Reader opens LMDB in Read-Only mode. We will open a separate Write handle later.
     logger.info("Initializing Dataset Reader for computation...")
+    # We read from the DESTINATION copy to ensure we are modifying the file we own.
     reader = ExpertTrajectoryDataset(
         demo_path=str(dest_path),
         observation_horizon=1, # Horizon doesn't matter for full-sequence reading
@@ -181,17 +209,20 @@ def main():
     # Helper config for rewards
     reward_config = RewardConfig()
     
-    # Storage for Pass 2
+    # Caches for Pass 2
     episode_returns_cache = {} # ep_idx -> np.ndarray
-    global_return_sum = 0.0
-    global_return_count = 0
-
-    # --- 3. Pass 1: Calculate Returns & Global Stats ---
-    logger.info("--- Pass 1: Calculating Returns & Global Baseline ---")
+    episode_phases_cache = {}  # ep_idx -> np.ndarray
     
-    for ep_idx in tqdm(range(num_episodes), desc="Calculating Returns"):
-        # A. Reconstruct Episode Context
-        obs_list = load_episode_data_for_rewards(reader, ep_idx)
+    # v9.2 CORE: Accumulators for Time-Dependent Baseline V(t)
+    # Key: Timestep t (int), Value: List of returns at that timestep across all episodes
+    returns_per_timestep = defaultdict(list)
+
+    # --- 3. Pass 1: Calculate Returns & Compute V(t) ---
+    logger.info(f"--- Pass 1: Calculating Returns & Computing V(t) Baseline ---")
+    
+    for ep_idx in tqdm(range(num_episodes), desc="Analysis Pass"):
+        # A. Reconstruct Episode Context (Physics + Phases)
+        obs_list, phases = load_episode_data_for_rewards(reader, ep_idx)
         
         # B. Calculate Rewards using SOTA Heuristic
         rewards = calculate_rewards_for_episode(obs_list, config=reward_config)
@@ -199,62 +230,83 @@ def main():
         # C. Calculate Discounted Returns
         returns = compute_discounted_returns(rewards, args.gamma)
         
-        # D. Cache and Accumulate Stats
+        # D. Cache for Pass 2
         episode_returns_cache[ep_idx] = returns
-        global_return_sum += np.sum(returns)
-        global_return_count += len(returns)
-
-    # Calculate Global Baseline (V)
-    if global_return_count == 0:
-        raise ValueError("Dataset appears empty or invalid (0 timesteps).")
+        episode_phases_cache[ep_idx] = phases
         
-    global_baseline = global_return_sum / global_return_count
-    logger.info(f"Global Value Baseline (V): {global_baseline:.4f}")
+        # E. Accumulate for Time-Dependent Baseline
+        for t, val in enumerate(returns):
+            returns_per_timestep[t].append(val)
+
+    # F. Compute Baseline V(t) = Mean(Returns at t)
+    baseline_per_timestep = {}
+    sorted_timesteps = sorted(returns_per_timestep.keys())
     
-    # Close the reader's LMDB handle to free resources/locks before writing
+    for t in sorted_timesteps:
+        baseline_per_timestep[t] = np.mean(returns_per_timestep[t])
+        
+    max_t = sorted_timesteps[-1]
+    logger.info(f"Computed Time-Dependent Baselines for {len(baseline_per_timestep)} timesteps (Max T={max_t}).")
+    
+    # Close the reader to unlock LMDB resources
     del reader
 
-    # --- 4. Pass 2: Calculate Advantage & Write to LMDB ---
-    logger.info("--- Pass 2: Injecting Advantages into LMDB ---")
+    # --- 4. Pass 2: Inject Advantages & Audit ---
+    logger.info("--- Pass 2: Injecting Advantages & Auditing Phase Bias ---")
     
     # Load JSON index to update metadata
     with open(dest_index_path, 'r') as f:
         index_data = json.load(f)
         
-    # Open LMDB for writing (map_size set generously for additions)
-    # Standard 1TB map size for safety, actual file size grows as needed.
-    env = lmdb.open(str(dest_path), map_size=int(32 * 1024**3), subdir=False, readonly=False, lock=True)
+    # Open LMDB for writing
+    env = lmdb.open(str(dest_path), map_size=int(35 * 1024**3), subdir=False, readonly=False, lock=True)
     
-    advantages_stats = []
+    # Stats for Audit Report
+    all_advs = []
+    phase_adv_accumulator = defaultdict(list) # Key: Phase Name, Value: List of Advantages
     
     try:
         with env.begin(write=True) as txn:
             for ep_idx in tqdm(range(num_episodes), desc="Writing Advantages"):
-                # Get cached returns
                 G_t = episode_returns_cache[ep_idx]
+                phases = episode_phases_cache[ep_idx]
                 
-                # A. Calculate Advantage
-                # A_t = G_t - V
-                # Note: We cast to float32 for storage efficiency/DL standard
-                advantages = (G_t - global_baseline).astype(np.float32)
+                # --- CORE LOGIC v9.2: A_t = G_t - V(t) ---
+                advantages = np.zeros_like(G_t)
                 
-                # Stats for logging
-                advantages_stats.append(advantages)
+                for t in range(len(G_t)):
+                    # Robust Lookup: If an episode is longer than any seen in the "average",
+                    # fall back to the baseline of the last known timestep.
+                    # This prevents defaulting to 0.0 which would cause massive bias.
+                    if t in baseline_per_timestep:
+                        b_t = baseline_per_timestep[t]
+                    else:
+                        b_t = baseline_per_timestep[max_t]
+                    
+                    # Calculate Advantage
+                    adv = G_t[t] - b_t
+                    advantages[t] = adv
+                    
+                    # Accumulate for Audit Report
+                    p_name = PHASE_MAP.get(phases[t], "Unknown")
+                    phase_adv_accumulator[p_name].append(adv)
+
+                # Cast to float32 for storage
+                advantages = advantages.astype(np.float32)
+                all_advs.append(advantages)
                 
-                # B. Prepare Metadata
+                # Prepare Metadata
                 ep_meta = index_data['episodes'][ep_idx]
-                ep_id = ep_meta['episode_id'] # e.g. "ep_000000"
-                
+                ep_id = ep_meta['episode_id']
                 key_name = f"{ep_id}_advantages"
                 
-                # C. Write Data (Raw Binary)
+                # Write Data
                 txn.put(key_name.encode('ascii'), advantages.tobytes())
                 
-                # D. Update Index Metadata
-                # Follows the SOTA "Struct of Arrays" schema
+                # Update Index
                 ep_meta['modalities']['advantages'] = {
                     "key": key_name,
-                    "compression": "raw", # No compression for 1D float arrays
+                    "compression": "raw",
                     "dtype": "float32",
                     "shape": list(advantages.shape)
                 }
@@ -264,17 +316,40 @@ def main():
     finally:
         env.close()
         
-    # --- 5. Finalize & Save Index ---
-    logger.info(f"Updating Index JSON at {dest_index_path}...")
+    # Finalize Index
     with open(dest_index_path, 'w') as f:
-        json.dump(index_data, f, indent=None) # Minimal JSON size
+        json.dump(index_data, f, indent=None)
         
-    # --- 6. Report Distribution Stats ---
-    all_advs = np.concatenate(advantages_stats)
-    logger.info(f"Processing Complete.")
-    logger.info(f"Advantage Stats | Mean: {np.mean(all_advs):.4f} | Std: {np.std(all_advs):.4f}")
-    logger.info(f"                | Min:  {np.min(all_advs):.4f} | Max: {np.max(all_advs):.4f}")
-    logger.info(f"Output saved to: {dest_path}")
+    # --- 5. The Final SOTA Audit Report ---
+    logger.info("\n" + "="*60)
+    logger.info("SOTA PHASE ADVANTAGE AUDIT REPORT")
+    logger.info("Objective: Verify Mean Advantage is ~0.0 for ALL phases.")
+    logger.info("-" * 60)
+    logger.info(f"{'PHASE NAME':<20} | {'MEAN ADVANTAGE':<15} | {'STATUS':<10}")
+    logger.info("-" * 60)
+    
+    sorted_phases = sorted(phase_adv_accumulator.keys())
+    for p_name in sorted_phases:
+        vals = np.array(phase_adv_accumulator[p_name])
+        mean_val = np.mean(vals)
+        std_val = np.std(vals)
+        
+        # Diagnostic Logic
+        status = "✅ OK"
+        if abs(mean_val) > 1.0:
+            status = "⚠️ BIASED"
+        
+        # Strict check for critical phases
+        if p_name == "1_Grasp" and abs(mean_val) > 0.5:
+             status = "❌ FAIL"
+            
+        logger.info(f"{p_name:<20} | {mean_val:+.4f} (±{std_val:.2f})  | {status}")
+    
+    flat_advs = np.concatenate(all_advs)
+    logger.info("-" * 60)
+    logger.info(f"Global Stats         | Mean: {np.mean(flat_advs):.4f} | Std: {np.std(flat_advs):.4f}")
+    logger.info("="*60)
+    logger.info(f"Processing Complete. Output saved to: {dest_path}")
 
 if __name__ == "__main__":
     main()

@@ -6,7 +6,9 @@
   <include file="../mujoco_menagerie/franka_emika_panda/panda.xml"/>
 
   <compiler meshdir="../mujoco_menagerie/franka_emika_panda/assets" angle="radian" autolimits="true"/>
-  <option timestep="0.0005" integrator="RK4" gravity="0 0 -9.81" cone="elliptic"/>
+  <!-- <option timestep="0.0005" integrator="RK4" gravity="0 0 -9.81" cone="elliptic"/> -->
+    <!-- <option timestep="0.002" solver="Newton" iterations="50" tolerance="1e-10" jacobian="dense" cone="elliptic"/> -->
+<option timestep="0.0005" solver="Newton" iterations="30" tolerance="1e-9" jacobian="dense" cone="elliptic"/>
 
 
   <visual>

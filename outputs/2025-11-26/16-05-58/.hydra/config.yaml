@@ -1,0 +1,11 @@
+checkpoint_path: /content/drive/MyDrive/pda/models/v1/backups/backup_epoch_015.ckpt
+ik_solver_path: urdf/panda_mujoco_kinematics.urdf
+env:
+  xml_path: envs/panda_pick_place.xml
+  control_mode: delta
+seed: 1103648435
+num_episodes: 10
+max_steps: 400
+output_video_path: evaluation_video.mp4
+output_csv_path: evaluation_metrics.csv
+eval_static_scene: false

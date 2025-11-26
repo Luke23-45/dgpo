@@ -33,7 +33,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True, help="Path to training.lmdb")
     parser.add_argument("--episode", type=int, default=0, help="Episode index to visualize")
-    parser.add_argument("--output", type=str, default="viz_output.mp4", help="Output filename")
+    parser.add_argument("--output", type=str, default="viz_outputa.mp4", help="Output filename")
     args = parser.parse_args()
 
     # 1. Load Dataset (Raw Mode)
@@ -123,4 +123,4 @@ if __name__ == "__main__":
 
 
 
-# 
+# python -m s4 --dataset "C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\er\asdfasdf\final_training_set\training_set.lmdb" --episode 0 

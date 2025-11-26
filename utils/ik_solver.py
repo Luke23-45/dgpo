@@ -392,12 +392,19 @@ class IKSolver:
 
         # --- 2. IMPLEMENT STABLE & TUNED PID CONTROL LAW ---
         # FINAL TUNED GAINS for Kp=40
-        Kp = 200.0
-        Kd = 1.0
-        Ki = 1.0
-        integral_clamp = 0.4
-        damping = 1e-2
+        # Kp = 200.0
+        # Kd = 1.0
+        # Ki = 1.0
+        # integral_clamp = 0.4
+        # damping = 1e-2
+
+        Kp = 139.0  
+        Kd = 3.0    
+        Ki = 0.1    
         
+        integral_clamp = 0.1
+        damping = 2e-2
+
         # Filter for the derivative term to prevent noise amplification
         tau_d = 3.0 * effective_dt # Derivative filter time constant
         alpha = effective_dt / (tau_d + effective_dt)

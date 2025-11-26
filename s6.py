@@ -1,175 +1,159 @@
 # FILE: scripts/verify_expert_trajectory.py
 
 """
-A focused script to verify that the combination of PandaEnv and ScriptedExpert
-can produce a complete, successful pick-and-place trajectory.
+A focused, high-speed script to verify that the PandaEnv and ScriptedExpert
+can physically complete a pick-and-place task using DELTA CONTROL.
 
-This test bypasses the complex ExpertDataset iterator and interacts directly
-with the core components to isolate and validate their behavior.
+This validates the entire pipeline:
+1. Expert Logic (State Machine)
+2. IK Solver (Tuned PID Controller)
+3. Physics Integration (Delta Actions)
 
-It runs one full episode and:
-1. Prints detailed step-by-step diagnostics to the console.
-2. Saves a video of the expert's performance for visual confirmation.
-
-If this script produces a video of a successful pick-and-place, it proves
-that the environment and the expert are working correctly.
+OPTIMIZATIONS:
+- Smart Logging: Reduces I/O overhead by only printing state transitions.
+- Direct Math: Bypasses unnecessary conversions.
 """
+
 import argparse
 import logging
 from pathlib import Path
 import mujoco
 import cv2
 import numpy as np
-from scipy.spatial.transform import Rotation as R
-from utils.scripted_expert import ScriptedExpert, ObjectProfile, ExpertConfig
-# --- Project Imports ---
 import sys
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+# --- Project Imports ---
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
 
 from envs.panda_env import PandaEnv
-from utils.scripted_expert import ScriptedExpert
+from utils.scripted_expert import ScriptedExpert, ObjectProfile, ExpertConfig
 from utils.ik_solver import IKSolver
 
-
+# Configure minimal, high-speed logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s | %(levelname)s | [%(name)s] | %(message)s"
+    level=logging.INFO, 
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
-log = logging.getLogger("VERIFY_TRAJECTORY")
-
+log = logging.getLogger("VERIFY_DELTA")
 
 def main(args: argparse.Namespace):
-    log.info("--- Starting Expert Trajectory Verification Script ---")
+    log.info("--- Starting Optimized Delta Verification ---")
 
+    # 1. Setup Output
     output_dir = Path("verification_output")
     output_dir.mkdir(parents=True, exist_ok=True)
-    video_path = output_dir / f"expert_trajectory_seed{args.seed}.mp4"
+    video_path = output_dir / f"delta_trajectory_seed{args.seed}.mp4"
+
+    # 2. Config
     object_to_grasp = ObjectProfile(
         size=np.array([0.04, 0.04, 0.04]),
-        grasp_width_normalized=0.6 # Close most of the way but not fully
+        grasp_width_normalized=0.6
     )
-
+    
+    # Expert Config (Patient timeouts)
     expert_config = ExpertConfig()
-    # --- 1. Initialize Core Components ---
-    log.info("Initializing components...")
-    env = PandaEnv(xml_path=args.xml_path,control_mode='delta')
-    model = env.model
 
+    # 3. Initialize Components (DELTA MODE)
+    env = PandaEnv(xml_path=args.xml_path, control_mode='delta')
+    
+    # Physics Synchronization (Fast Physics Settings)
+    # N_SUBSTEPS=5 (Standard) -> 0.002 * 5 = 0.01s
+    effective_dt = 0.01 
+    max_dq = env.ACTION_SCALING_FACTOR / effective_dt
+    arm_joint_ids = np.arange(7)
+    
+    log.info(f"Physics Config: dt={effective_dt}s | Scale={env.ACTION_SCALING_FACTOR} | max_dq={max_dq:.1f}")
 
     expert = ScriptedExpert(object_profile=object_to_grasp, cfg=expert_config)
     ik_solver = IKSolver(urdf_path=args.urdf_path)
-    log.info("Components initialized.")
     
-    # === START: CORRECTED JOINT ORDER DIAGNOSTIC ===
-    log.info("--- Verifying Joint Order Between IK Solver and MuJoCo ---")
-    ik_joint_names = list(ik_solver.joint_names())
-    mj_joint_names = []
+    log.info("Components initialized. Control Mode: DELTA")
+
+    # 4. Diagnostic: Verify Joint Mapping
+    ik_joints = list(ik_solver.joint_names())
+    mj_joints = [mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_JOINT, env.model.actuator_trnid[i, 0]) for i in range(7)]
     
-    # Get the first 7 joint names from the MuJoCo model's actuators
-    try:
-        # The arm actuators are the first 7 in the model
-        for i in range(7):
-            actuator_id = i
-            joint_id = env.model.actuator_trnid[actuator_id, 0]
-            joint_name = mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
-            # Modern mujoco bindings return str, so .decode() is not needed and will crash.
-            mj_joint_names.append(joint_name)
-    except Exception as e:
-        log.error(f"Failed to extract joint names from MuJoCo model. Error: {e}", exc_info=True)
-    
-    if ik_joint_names == mj_joint_names:
-        log.info(f"✅ Joint order matches: {ik_joint_names}")
+    if ik_joints != mj_joints:
+        log.error("❌ CRITICAL JOINT MISMATCH")
+        log.error(f"IK: {ik_joints}")
+        log.error(f"MJ: {mj_joints}")
+        return
     else:
-        log.error("❌ JOINT ORDER MISMATCH!")
-        log.error(f"  - IK Solver expects: {ik_joint_names}")
-        log.error(f"  - MuJoCo model has: {mj_joint_names}")
-    # === END: CORRECTED JOINT ORDER DIAGNOSTIC ===
+        log.info("✅ Joint mapping verified.")
 
-    # --- 2. Setup Video Recording ---
-    log.info(f"Setting up video recorder. Frame size will be determined by first render.")
-    # Render once to get frame dimensions
-    frame = env.render()
-    h, w, _ = frame.shape
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video_writer = cv2.VideoWriter(str(video_path), fourcc, 30, (w, h))
-
-    # --- 3. Run One Full Episode ---
-    log.info(f"Starting episode generation. Video will be saved to: {video_path}")
+    # 5. Reset Episode
     env.set_object_size(object_to_grasp.size)
     expert.reset()
+    ik_solver.reset_controller_state() # Important for PID history
     obs, _ = env.reset(seed=args.seed)
-
+    
+    # Video Setup
+    frame0 = env.render()
+    h, w, _ = frame0.shape
+    writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*'mp4v'), 30, (w, h))
+    
+    log.info(f"Running episode (Max steps: {env.max_episode_steps})...")
+    
+    last_state = None
+    
     try:
-        for step_num in range(env.max_episode_steps):
-            # Get the rich observation dictionary needed by the expert
+        for step in range(env.max_episode_steps):
+            # A. Expert Logic (Get Target Cartesian Pose)
             expert_obs = env.get_expert_obs()
-
-            # Get the target pose and gripper command from our stateful expert
-            target_pose, gripper_action,info = expert.get_target_pose(expert_obs)
-
-            log.info(f"--- Step {step_num} | Expert State: {expert.get_state()} ---")
-            # log.info(f"   Object Position (World): {np.round(expert_obs['object_pos_world'], 3)}")
-            # log.info(f"   Object Orientation (World): {np.round(expert_obs['object_orn_world'], 3)}")
-            # Convert the target pose into a joint action via IK
-            base_pos, base_quat = env.get_base_pose()
-            R_world_base = R.from_quat(base_quat)
-            R_base_world = R_world_base.inv()
-            pos_in_base = R_base_world.apply(target_pose[:3] - base_pos)
-            rot_in_base = R_base_world * R.from_quat(target_pose[3:7])
-            target_pose_base = np.concatenate([pos_in_base, rot_in_base.as_quat()]).astype(np.float32)
-
-            current_joints = expert_obs["internal_full_proprio"][:7]
-            arm_action = ik_solver.compute_action(target_pose_base, current_joints)
+            target_pose, gripper_act, _ = expert.get_target_pose(expert_obs)
             
-            # --- START OF FIX ---
-            # The expert already outputs a normalized [-1, 1] gripper action.
-            # The environment is designed to accept this directly.
-            # The `gripper_action_to_ctrl` helper was incorrect and has been removed.
-            final_action = np.concatenate([arm_action, [gripper_action]])
-            # --- END OF FIX ---
+            # SMART LOGGING: Only print when state changes to reduce lag
+            current_state = expert.get_state()
+            if current_state != last_state:
+                log.info(f"Step {step:03d} | State Transition: {last_state} -> {current_state}")
+                last_state = current_state
+
+            # B. Compute Delta Action (Using Tuned PID Controller)
+            arm_delta = ik_solver.compute_delta_action(
+                target_ee_pose=target_pose,
+                model=env.model,
+                data=env.data,
+                ee_site_id=env.ee_site_id,
+                joint_qpos_indices=arm_joint_ids,
+                effective_dt=effective_dt,
+                max_dq=max_dq
+            )
             
-            # Step the environment with the calculated expert action
+            # C. Step Environment
+            final_action = np.concatenate([arm_delta, [gripper_act]])
             obs, _, terminated, truncated, _ = env.step(final_action)
             
-            # Render and write frame
-            frame_rgb = env.render()
-            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-            state_text = f"State: {expert.get_state()}"
-            cv2.putText(
-                img=frame_bgr,
-                text=state_text,
-                org=(10, 30),  # Position (bottom-left corner of text)
-                fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                fontScale=0.8,
-                color=(255, 205, 100),  # White color in BGR
-                thickness=2,
-                lineType=cv2.LINE_AA
-            )
-            video_writer.write(frame_bgr)
+            # D. Render (Overlay Info)
+            frame = env.render()
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            
+            cv2.putText(frame, f"State: {current_state}", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(frame, f"Step: {step}", (10, 55), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+            
+            writer.write(frame)
 
-            # Check for episode completion
             if expert.is_done() or terminated or truncated:
-                log.info(f"Episode finished at step {step_num}. Final expert state: {expert.get_state()}")
+                log.info(f"Episode ended at step {step}. Final State: {current_state}")
                 break
-        
-        # Add a few final frames to the video for padding
-        for _ in range(30): video_writer.write(frame_bgr)
-
+                
     finally:
-        log.info("Releasing resources...")
-        video_writer.release()
+        writer.release()
         env.close()
-
-    if expert.is_done():
-        log.info("✅ SUCCESS: The expert successfully completed its state machine and the episode.")
+        
+    if expert.was_successful():
+        log.info(f"✅ VERIFICATION PASSED. Video: {video_path}")
     else:
-        log.error("❌ FAILURE: The expert did not reach the 'DONE' state.")
-    log.info("--- Verification complete. ---")
-
+        log.error(f"❌ VERIFICATION FAILED. Expert got stuck in: {expert.get_state()}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Verify the PandaEnv+ScriptedExpert trajectory generation.")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--urdf_path", type=str, default="urdf/panda_mujoco_kinematics.urdf")
     parser.add_argument("--xml_path", type=str, default="envs/panda_pick_place.xml")
-    parser.add_argument("--seed", type=int, default=850458389)
+    parser.add_argument("--seed", type=int, default=8888)
     args = parser.parse_args()
     main(args)

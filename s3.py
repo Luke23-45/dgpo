@@ -18,16 +18,18 @@ from utils.semantic_planner_dataset import SemanticPlannerDataset
 def main():
     # PATH TO YOUR DATASET
     # Update this to match your actual LMDB path
-    dataset_path = r"C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\final_training_set\training_set.lmdb" 
+    dataset_path = "data/er/asdfasdf/final_training_set/training_set.lmdb" 
     
     print(f"Loading dataset: {dataset_path}")
     
     try:
         dataset = SemanticPlannerDataset(
             dataset_path=dataset_path,
-            use_aug=True, # Look at RAW data, not augmented
+            use_aug=False, # Look at RAW data, not augmented
             chunk_size=1
         )
+
+        
     except Exception as e:
         print(f"Error loading dataset: {e}")
         return

@@ -114,29 +114,43 @@ class DomainRandomizationConfig:
     #     # [Source: Shot_07/sample_00] A very wide three-quarter view, good for seeing the whole table. Elevation: 23.5° (clamped to 25)
     #     CameraShot(pos=(1.20, 0.55, 0.95), target=(0.52, 0.01, 0.45)),
     # ])
+    # camera_shots: List[CameraShot] = field(default_factory=lambda: [
+    #     # --- Right Three-Quarter Views (Safe High Angles) ---
+    #     CameraShot(pos=(0.90, -0.57, 1.03), target=(0.41, -0.02, 0.45)),
+    #     # CameraShot(pos=(1.07, -0.25, 1.09), target=(0.49, -0.03, 0.44)),
+
+    #     # --- Left Three-Quarter Views (Balanced) ---
+    #     CameraShot(pos=(1.10, 0.41, 1.01), target=(0.52, 0.06, 0.45)),
+        
+    #     # [FIXED] "Side Left" - Raised Z from 0.82 to 0.98 for safety
+    #     CameraShot(pos=(0.98, 0.53, 0.98), target=(0.48, -0.01, 0.44)),
+        
+    #     # Wide Left
+    #     CameraShot(pos=(1.20, 0.55, 0.95), target=(0.52, 0.01, 0.45)),
+
+    #     # --- Frontal Views (Varied Heights) ---
+    #     # Low Front (Face Level) - Lowest safe frontal shot
+    #     CameraShot(pos=(1.09, 0.14, 0.87), target=(0.40, 0.03, 0.44)),
+        
+    #     # Mid Front - Standard view
+    #     CameraShot(pos=(1.02, 0.10, 0.95), target=(0.39, 0.04, 0.45)),
+
+    #     # High Front - Near top-down
+    #     CameraShot(pos=(1.02, 0.05, 1.10), target=(0.45, -0.02, 0.44)),
+    # ])
+
     camera_shots: List[CameraShot] = field(default_factory=lambda: [
-        # --- Right Three-Quarter Views (Safe High Angles) ---
+        # 1. Right Three-Quarter (ID 0 from video)
+        # Strong depth cues, good pixel density on the object.
         CameraShot(pos=(0.90, -0.57, 1.03), target=(0.41, -0.02, 0.45)),
-        CameraShot(pos=(1.07, -0.25, 1.09), target=(0.49, -0.03, 0.44)),
 
-        # --- Left Three-Quarter Views (Balanced) ---
+        # 2. Left Three-Quarter (ID 2 from video)
+        # The clearest view for gripper alignment.
         CameraShot(pos=(1.10, 0.41, 1.01), target=(0.52, 0.06, 0.45)),
-        
-        # [FIXED] "Side Left" - Raised Z from 0.82 to 0.98 for safety
-        CameraShot(pos=(0.98, 0.53, 0.98), target=(0.48, -0.01, 0.44)),
-        
-        # Wide Left
-        CameraShot(pos=(1.20, 0.55, 0.95), target=(0.52, 0.01, 0.45)),
 
-        # --- Frontal Views (Varied Heights) ---
-        # Low Front (Face Level) - Lowest safe frontal shot
-        CameraShot(pos=(1.09, 0.14, 0.87), target=(0.40, 0.03, 0.44)),
-        
-        # Mid Front - Standard view
+        # 3. Mid Front (ID 6 from video)
+        # The standard symmetrical view.
         CameraShot(pos=(1.02, 0.10, 0.95), target=(0.39, 0.04, 0.45)),
-
-        # High Front - Near top-down
-        CameraShot(pos=(1.02, 0.05, 1.10), target=(0.45, -0.02, 0.44)),
     ])
 
     # radius_jitter: float = 0.10      # meters (reduced from 0.15)
@@ -245,7 +259,7 @@ class PandaEnv(gym.Env):
         self.post = post_config or RenderPostConfig()
         
         # 3. Initialize Episode Bookkeeping and RNG
-        self.max_episode_steps = 400
+        self.max_episode_steps = 600
         self.timestep = 0
         self.np_random, _ = seeding.np_random(None)
         self.enable_domain_randomization = enable_domain_randomization
@@ -426,10 +440,23 @@ class PandaEnv(gym.Env):
         return 0.2126 * img_lin[..., 0] + 0.7152 * img_lin[..., 1] + 0.0722 * img_lin[..., 2]
 
     def _auto_exposure_scale(self, img_lin: np.ndarray) -> float:
-        """Percentile-based exposure so that p% luminance maps to target_white."""
-        lum = self._luminance_linear(img_lin).reshape(-1)
+        """
+        Percentile-based exposure so that p% luminance maps to target_white.
+        OPTIMIZATION: Subsample the image stride [::4] for statistic calculation. 
+        This is 16x faster and statistically identical for exposure estimation.
+        """
+        # Subsample: Take every 4th pixel in H and W
+        # (256,256,3) -> (64,64,3) -> Luminance calc is much faster
+        subsampled = img_lin[::4, ::4, :]
+        
+        lum = self._luminance_linear(subsampled).reshape(-1)
+        
         # robust against pure-black frames
-        p = np.percentile(lum, self.post.auto_exposure_percentile * 100.0) if lum.size > 0 else 0.0
+        if lum.size > 0:
+            p = np.percentile(lum, self.post.auto_exposure_percentile * 100.0)
+        else:
+            p = 0.0
+            
         if p <= 1e-6:
             return 1.0
         scale = self.post.target_white / float(p)
@@ -1348,12 +1375,10 @@ class PandaEnv(gym.Env):
         zone: Tuple[np.ndarray, np.ndarray],
         z_plane: float,
         camera_name: str,
-        # CHANGED: Accept ID instead of float size
         current_geom_id: int,
-        check_visibility: bool = True,
+        check_visibility: bool = False, # Default to False for speed
         max_attempts: int = 1000,
         margin: int = 20,
-        # CHANGED: Exclusions list is now [(pos, geom_id), ...]
         excluded_objects: Optional[List[Tuple[np.ndarray, int]]] = None,
         base_pos_for_reach: Optional[np.ndarray] = None,
         max_reach_distance: float = 0.6
@@ -1364,20 +1389,26 @@ class PandaEnv(gym.Env):
 
         min_offset, max_offset = zone
         
+        # OPTIMIZATION: If no strict constraints, return immediately (O(1) complexity)
+        if not check_visibility and base_pos_for_reach is None and not excluded_objects:
+             offset = self.np_random.uniform(low=min_offset, high=max_offset)
+             return np.append(self.TABLE_CENTER + offset, z_plane)
+
         for _ in range(max_attempts):
             # 1. Sample Random Spot
             offset = self.np_random.uniform(low=min_offset, high=max_offset)
             candidate_pos = np.append(self.TABLE_CENTER + offset, z_plane)
 
-            # 2. Reachability Check
+            # 2. Reachability Check (Fast Distance Calc)
             if base_pos_for_reach is not None:
-                if np.linalg.norm(candidate_pos[:2] - base_pos_for_reach[:2]) > max_reach_distance:
+                # Squared distance is faster than sqrt
+                dist_sq = np.sum((candidate_pos[:2] - base_pos_for_reach[:2])**2)
+                if dist_sq > (max_reach_distance**2):
                     continue 
 
             # 3. Overlap Check (Using IDs)
             is_too_close = False
             for other_pos, other_geom_id in excluded_objects:
-                # Pass IDs to the helper
                 if self._is_overlapping(candidate_pos, current_geom_id, other_pos, other_geom_id):
                     is_too_close = True
                     break
@@ -1385,7 +1416,7 @@ class PandaEnv(gym.Env):
             if is_too_close:
                 continue 
 
-            # 4. Visibility Check
+            # 4. Visibility Check (Slowest part - only run if strictly requested)
             if check_visibility:
                 visible, _ = self._is_pos_in_camera_view(candidate_pos, camera_name, margin=margin)
                 if not visible:

@@ -1,0 +1,3 @@
+checkpoint_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/checkpoints/backup/backup_epoch_029.ckpt
+dataset_path: C:/Users/Hellx/Documents/Programming/python/Project/redhot/data/validation/training_set.lmdb
+batch_size: 32

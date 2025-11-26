@@ -51,7 +51,7 @@ class SemanticPlannerDataset(EgoPlannerDataset):
                  dataset_path: str, 
                  use_aug: bool = False,
                  chunk_size: int = 10,          # Prediction Horizon (e.g., 0.3s - 0.5s)
-                 proprio_noise: float = 0.02):  # Noise Std Dev (approx 2cm / 0.02rad)
+                 proprio_noise: float = 0.005):  # Noise Std Dev (approx 2cm / 0.02rad)
         
         log.info(f"Initializing SemanticPlannerDataset (v9.0 SOTA). Path: {dataset_path}")
         log.info(f"Config: Chunk Size={chunk_size}, Proprio Noise={proprio_noise}, History=T-1")

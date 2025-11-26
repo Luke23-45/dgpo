@@ -130,9 +130,10 @@ class SemanticPlanner(nn.Module):
             
         # B. Unfreeze the Last Encoder Layer
         # This allows the model to learn "Geometry" without forgetting "Objects"
-        last_layer = self.vision_backbone.vision_model.encoder.layers[-1]
-        for param in last_layer.parameters():
-            param.requires_grad = True
+        last_layers = self.vision_backbone.vision_model.encoder.layers[-3:]
+        for layer in last_layers:
+            for param in layer.parameters():
+                param.requires_grad = True
             
         # C. Unfreeze the Final LayerNorm (Crucial for feature scaling)
         if hasattr(self.vision_backbone.vision_model, 'post_layernorm'):

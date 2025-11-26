@@ -155,7 +155,7 @@ class ExpertDatasetWriter:
         lmdb_path = self._lmdb_path
 
         # open env (match same args as save())
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=30, subdir=False)
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=32, subdir=False)
         try:
             with env.begin(write=True) as txn:
                 for ep_dict in episode_list:
@@ -217,7 +217,7 @@ class ExpertDatasetWriter:
 
         # --- 2. Open LMDB Environment ---
         # Use a large map size for a 25GB+ dataset. 50GB is safe.
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=30, subdir=False) 
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=32, subdir=False) 
         
         try:
             with env.begin(write=True) as txn: 
@@ -915,14 +915,41 @@ class ExpertDataset(IterableDataset):
                         indices_to_keep = []
                         
                         # 1. Filter using cached qvel (no need for full state)
+                        CRITICAL_INTERACTION_PHASES = {
+                            "PREPARE_GRIPPER",        # Fine alignment (Low Vel)
+                            "DESCEND_TO_GRASP",       # Fine Z-axis control (Low Vel)
+                            "GRASP",                  # Contact initiation (Zero Vel) -> THE KEY FIX
+                            "LIFT",                   # Load bearing dynamics
+                            "PREPARE_PLACE",          # Alignment for placement
+                            "DESCEND_TO_PLACE",       # Fine Z-axis control
+                            "AWAIT_STABLE_PLACEMENT", # Contact release physics
+                            "RELEASE"                 # Gripper actuation
+                        }
+
                         for i, step_data in enumerate(cached_steps):
-                            qvel = step_data["qvel"][:7]
-                            ee_vel = np.linalg.norm(qvel)
-                            if ee_vel < 0.1:
-                                keep = (self._rng.random() < self.p_low_vel)
+                            # Retrieve Ground Truth State from the snapshot
+                            state_str = step_data.get("expert_state_str", "UNKNOWN")
+                            
+                            # Rule A: Critical Phase = FORCE KEEP (Dense Sampling)
+                            # The model needs every millisecond of data here to learn precision.
+                            if state_str in CRITICAL_INTERACTION_PHASES:
+                                keep = True
+                                
+                            # Rule B: Transit Phase = STOCHASTIC FILTER (Sparse Sampling)
+                            # During "Approach" or "Retract", we can safely drop frames to save space.
                             else:
-                                keep = (self._rng.random() < self.p_motion_frame)
-                            if keep: indices_to_keep.append(i)
+                                qvel = step_data["qvel"][:7]
+                                ee_vel = np.linalg.norm(qvel)
+                                
+                                if ee_vel < 0.1:
+                                    # Idle/Start/Stop during transit -> Filter Aggressively
+                                    keep = (self._rng.random() < self.p_low_vel)
+                                else:
+                                    # Moving during transit -> Filter Normally
+                                    keep = (self._rng.random() < self.p_motion_frame)
+                            
+                            if keep: 
+                                indices_to_keep.append(i)
                         
                         # 2. Force Last Frame
                         last_idx = len(cached_steps) - 1

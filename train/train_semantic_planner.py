@@ -103,7 +103,7 @@ class SemanticPlannerDataModule(pl.LightningDataModule):
                 use_aug=self.cfg.dataset.get("use_aug", True),
                 # --- NEW: Pass v9.0 Params ---
                 chunk_size=self.cfg.model.get("chunk_size", 10),
-                proprio_noise=self.cfg.dataset.get("proprio_noise", 0.02)
+                proprio_noise=self.cfg.dataset.get("proprio_noise", 0.005)
             )
 
             if self.cfg.dataset.get("val_path"):
