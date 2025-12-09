@@ -123,4 +123,4 @@ if __name__ == "__main__":
 
 
 
-# python -m s4 --dataset "C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\er\asdfasdf\final_training_set\training_set.lmdb" --episode 0 
+# python -m s4 --dataset "/content/drive/MyDrive/pda/data/validation/training_set.lmdb" --episode 0 

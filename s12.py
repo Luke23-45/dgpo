@@ -1,130 +1,122 @@
-# FILE: scripts/tune_pid_gains.py
+"""
+Script: tune_awr_parameters.py
+Mathematically derives the optimal AWR Temperature (tau) and Max Weight
+based on the actual distribution of Advantages in the dataset.
+"""
 
 import argparse
 import logging
 import sys
-import numpy as np
-import pandas as pd
 from pathlib import Path
+import numpy as np
 from tqdm import tqdm
-import itertools
 
 # --- Project Imports ---
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))
+sys.path.append(str(ROOT))
 
-from envs.panda_env import PandaEnv
-from utils.scripted_expert import ScriptedExpert, ExpertConfig, ObjectProfile
-from utils.ik_solver import IKSolver
-from scipy.spatial.transform import Rotation as R
+from utils.expert_dataset import ExpertTrajectoryDataset
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format="%(message)s")
-log = logging.getLogger("TUNER")
+log = logging.getLogger("AWR_TUNER")
 
-def evaluate_gains(
-    env: PandaEnv, 
-    expert: ScriptedExpert, 
-    solver: IKSolver, 
-    gains: tuple, 
-    max_dq: float, 
-    steps: int = 60 # Reduced: We only need to see Approach+Contact stability
-) -> dict:
-    kp, ki, kd = gains
-    solver.set_gains(kp, ki, kd)
-    solver.reset_controller_state()
-    
-    # Use fixed seed for fair comparison
-    env.reset(seed=8888) 
-    expert.reset()
-    
-    errors = []
-    
-    for _ in range(steps):
-        obs = env.get_expert_obs()
-        target_pose, grip_act, _ = expert.get_target_pose(obs)
-        
-        action_arm = solver.compute_delta_action(
-            target_ee_pose=target_pose,
-            model=env.model,
-            data=env.data,
-            ee_site_id=env.ee_site_id,
-            joint_qpos_indices=np.arange(7),
-            effective_dt=0.01, 
-            max_dq=max_dq
+def calculate_optimal_parameters(dataset_path: str):
+    log.info(f"--- AWR Parameter Auto-Tuner ---")
+    log.info(f"Loading dataset: {dataset_path}")
+
+    # 1. Load Dataset (Lightweight Mode)
+    try:
+        dataset = ExpertTrajectoryDataset(
+            demo_path=dataset_path,
+            observation_horizon=1, # Minimal load
+            action_horizon=1
         )
+    except Exception as e:
+        log.error(f"Failed to load dataset: {e}")
+        return
+
+    num_episodes = dataset.get_num_episodes()
+    log.info(f"Found {num_episodes} episodes.")
+
+    # 2. Extract All Advantages
+    all_advantages = []
+    
+    log.info("Scanning Advantages...")
+    for i in tqdm(range(num_episodes)):
+        ep_meta = dataset.episode_metadata[i]
         
-        env.step(np.concatenate([action_arm, [grip_act]]))
+        if "advantages" not in ep_meta["modalities"]:
+            log.error("Dataset does not contain 'advantages'. Run advantage_calculator.py first!")
+            return
+
+        adv_meta = ep_meta["modalities"]["advantages"]
         
-        # Metric: Distance to target (Accuracy)
-        curr_ee = obs["ee_pose_world"]
-        pos_err = np.linalg.norm(target_pose[:3] - curr_ee[:3])
-        errors.append(pos_err)
+        # Direct LMDB extraction for speed
+        adv_data = dataset._get_full_modality_array(
+            adv_meta["key"], 
+            adv_meta["compression"], 
+            adv_meta["dtype"], 
+            tuple(adv_meta["shape"])
+        )
+        all_advantages.append(adv_data)
 
-        if expert.is_done(): break
-
-    errors = np.array(errors)
+    # Concatenate into one giant array
+    advantages = np.concatenate(all_advantages)
     
-    # Score = RMSE + (Penalty * Jitter)
-    # We punish jitter (std dev) heavily because shaking ruins data
-    rmse = np.sqrt(np.mean(errors**2))
-    jitter = np.std(errors)
-    score = rmse + (3.0 * jitter)
+    # 3. Analyze Statistics
+    mean_adv = np.mean(advantages)
+    std_adv = np.std(advantages)
+    min_adv = np.min(advantages)
+    max_adv = np.max(advantages)
     
-    return {"Kp": kp, "Ki": ki, "Kd": kd, "Score": score, "RMSE": rmse, "Jitter": jitter}
+    print("\n" + "="*40)
+    print("DATASET STATISTICS")
+    print("="*40)
+    print(f"Count: {len(advantages)}")
+    print(f"Mean:  {mean_adv:.4f} (Should be close to 0.0)")
+    print(f"Std:   {std_adv:.4f}")
+    print(f"Min:   {min_adv:.4f}")
+    print(f"Max:   {max_adv:.4f}")
+    print("="*40)
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--urdf", default="urdf/panda_mujoco_kinematics.urdf")
-    parser.add_argument("--xml", default="envs/panda_pick_place.xml")
-    args = parser.parse_args()
-
-    log.info("--- FAST PID TUNER ---")
+    # 4. Derive Optimal Temperature (Tau)
+    # Theory: We want weights w = exp(A/tau).
+    # A common heuristic is to set tau s.t. the 'Best' actions get a weight of ~5.0 to 10.0.
+    # Usually, 'Best' actions are around +2 Standard Deviations.
     
-    # 1. Setup Env (No Rendering = Fast)
-    env = PandaEnv(xml_path=args.xml, control_mode='delta')
-    env.set_rendering_enabled(False)  # <--- SPEED BOOST
+    # Let's target that an Advantage of +1.5 StdDev results in a weight of ~5.0
+    # w = exp(A / tau) -> ln(w) = A / tau -> tau = A / ln(w)
     
-    effective_dt = 0.01 # Fast Physics
-    max_dq = env.ACTION_SCALING_FACTOR / effective_dt
-    log.info(f"Physics: dt={effective_dt}s | max_dq={max_dq:.1f}")
-
-    expert = ScriptedExpert(ObjectProfile(np.array([0.04, 0.04, 0.04]), 0.6), ExpertConfig())
-    solver = IKSolver(urdf_path=args.urdf)
-
-    # 2. Targeted Search Space
-    # We search around Kp=60 (theoretical sweet spot)
-    kp_range = np.arange(80, 200, 1).tolist()
-    kd_range = [1.5, 2.0, 2.5, 3.0]
-    ki_range = [0.0, 0.05, 0.1] 
-
-    combinations = list(itertools.product(kp_range, ki_range, kd_range))
-    log.info(f"Testing {len(combinations)} configs...")
-
-    results = []
-    pbar = tqdm(combinations, desc="Benchmarking")
+    target_weight = 5.0
+    target_sigma = 1.5 # We want the top ~7% of data to have strong weights
     
-    for kp, ki, kd in pbar:
-        try:
-            metrics = evaluate_gains(env, expert, solver, (kp, ki, kd), max_dq)
-            results.append(metrics)
-        except: pass
-
-    # 3. Results
-    df = pd.DataFrame(results).sort_values("Score", ascending=True)
+    advantage_at_target = std_adv * target_sigma
     
-    print("\n" + "="*60)
-    print("🏆 WINNER CONFIGURATION")
-    print("="*60)
-    best = df.iloc[0]
-    print(f"Kp: {best['Kp']} | Ki: {best['Ki']} | Kd: {best['Kd']}")
-    print(f"Metrics: RMSE={best['RMSE']:.4f} | Jitter={best['Jitter']:.4f}")
-    print("="*60)
-    print("Top 5 Candidates:")
-    print(df.head(5)[['Kp','Ki','Kd','Score','RMSE','Jitter']].to_string(index=False))
+    optimal_tau = advantage_at_target / np.log(target_weight)
+    
+    # 5. Determine Max Weight Clipping
+    # We calculate what the weight WOULD be for the absolute max advantage
+    max_theoretical_weight = np.exp(max_adv / optimal_tau)
+    
+    # We clip to avoid exploding gradients, usually to 10.0 or 20.0
+    recommended_clip = min(20.0, max(5.0, max_theoretical_weight))
 
-    env.close()
+    print("\n" + "="*40)
+    print("🏆 RECOMMENDED CONFIGURATION")
+    print("="*40)
+    print(f"awr_temperature: {optimal_tau:.4f}")
+    print(f"awr_max_weight:  {recommended_clip:.1f}")
+    print("="*40 + "\n")
+    
+    print("Logic:")
+    print(f"1. Std Dev is {std_adv:.2f}.")
+    print(f"2. We want actions at +{target_sigma} sigma ({advantage_at_target:.2f}) to have weight {target_weight}.")
+    print(f"3. Max Advantage ({max_adv:.2f}) would yield weight {max_theoretical_weight:.2f} (Clipped to {recommended_clip}).")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", required=True, help="Path to training_set.lmdb")
+    args = parser.parse_args()
+    
+    calculate_optimal_parameters(args.dataset)

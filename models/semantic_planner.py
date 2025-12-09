@@ -110,6 +110,8 @@ class SemanticPlanner(nn.Module):
         super().__init__()
         self.cfg = cfg
 
+        self.chunk_size = cfg.chunk_size
+
 
         logger.info(f"[SemanticPlanner] Initializing v9.0 (Strategist) with config: {cfg}")
 
@@ -202,25 +204,35 @@ class SemanticPlanner(nn.Module):
         
         # A. Trajectory Head (Pose)
         # Output: chunk_size * 7 (3 Pos + 4 Quat)
+        # A. Trajectory Head (Pose)
+        # Output: chunk_size * 7 (3 Pos + 4 Quat)
         self.traj_head = nn.Sequential(
             nn.LayerNorm(cfg.vision_feature_dim),
             nn.Linear(cfg.vision_feature_dim, cfg.vision_feature_dim),
             nn.GELU(),
+            # Existing blocks
             ResidualMLPBlock(cfg.vision_feature_dim, cfg.dropout),
             ResidualMLPBlock(cfg.vision_feature_dim, cfg.dropout),
+            # [NEW] Added extra capacity for fine-grained coordinate geometry
+            ResidualMLPBlock(cfg.vision_feature_dim, cfg.dropout),
+            ResidualMLPBlock(cfg.vision_feature_dim, cfg.dropout),
+            # Output projection
             nn.LayerNorm(cfg.vision_feature_dim),
-            nn.Linear(cfg.vision_feature_dim, cfg.chunk_size * 7) 
+            nn.Linear(cfg.vision_feature_dim, self.chunk_size * 7) 
         )
 
         # B. Gripper Head
-        # Output: chunk_size * 1 (Logit)
+        # Deepened to match pose capacity
         self.gripper_head = nn.Sequential(
             nn.LayerNorm(cfg.vision_feature_dim),
             nn.Linear(cfg.vision_feature_dim, cfg.vision_feature_dim // 2),
             nn.GELU(),
-            ResidualMLPBlock(cfg.vision_feature_dim // 2, cfg.dropout), 
-            nn.Linear(cfg.vision_feature_dim // 2, cfg.chunk_size * 1)
+            ResidualMLPBlock(cfg.vision_feature_dim // 2, cfg.dropout),
+            # [NEW] Added extra capacity
+            ResidualMLPBlock(cfg.vision_feature_dim // 2, cfg.dropout),
+            nn.Linear(cfg.vision_feature_dim // 2, self.chunk_size * 1)
         )
+        
         
         # C. Phase Classification Head (Auxiliary)
         # Output: num_task_phases (Logits)
@@ -246,18 +258,22 @@ class SemanticPlanner(nn.Module):
 
     def train(self, mode: bool = True):
         """
-        Hybrid Train Mode:
+        Hybrid Train Mode (v9.0 - Fine-Tuning):
         - Frozen layers stay in Eval mode (to freeze stats/dropout).
-        - Unfrozen layers go to Train mode.
+        - The last 3 unfrozen layers + PostLN are set to Train mode.
         """
         super().train(mode)
         if mode:
             # 1. Force entire backbone to eval first (default safety)
             self.vision_backbone.eval()
             
-            # 2. Set specifically unfrozen layers to train
-            self.vision_backbone.vision_model.encoder.layers[-1].train()
-            self.vision_backbone.vision_model.post_layernorm.train()
+            # 2. Set the specifically unfrozen layers back to train mode
+            last_layers = self.vision_backbone.vision_model.encoder.layers[-3:]
+            for layer in last_layers:
+                layer.train()
+            
+            if hasattr(self.vision_backbone.vision_model, 'post_layernorm'):
+                self.vision_backbone.vision_model.post_layernorm.train()
         return self
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:

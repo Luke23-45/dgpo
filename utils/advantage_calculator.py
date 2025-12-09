@@ -259,7 +259,7 @@ def main():
         index_data = json.load(f)
         
     # Open LMDB for writing
-    env = lmdb.open(str(dest_path), map_size=int(40 * 1024**3), subdir=False, readonly=False, lock=True)
+    env = lmdb.open(str(dest_path), map_size=int(60 * 1024**3), subdir=False, readonly=False, lock=True)
     
     # Stats for Audit Report
     all_advs = []

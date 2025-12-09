@@ -115,3 +115,43 @@ Epoch 32: 100% 588/588 [12:58<00:00,  1.32s/it, v_num=jwbq, train/loss_step=1.23
 [2025-11-26 07:18:14,271][train_semantic_planner][INFO] - Failsafe backup for epoch 32 saved successfully to /content/drive/MyDrive/pda/models/v1/backups/backup_epoch_032.ckpt.
 [2025-11-26 07:18:14,314][train_semantic_planner][INFO] - Cleaned up old failsafe backup: backup_epoch_030.ckpt
 Epoch 33:  83% 490/588 [10:01<02:00,  1.23s/it, v_num=jwbq, train/loss_step=0.0905, train/loss_pose_step=0.0571, train/loss_grip_step=0.0161, train/loss_phase_step=0.0113, train/loss_epoch=0.273, train/loss_pose_epoch=0.176, train/loss_grip_epoch=0.0456, train/loss_phase_epoch=0.054, train/phase_acc=0.976, val/loss=0.275, val/pos_error_m=0.031]
+
+=============
+============
+=========
+it was all for nothing at all. 
+[2025-11-26 16:31:22,403][train_semantic_planner][INFO] - Failsafe backup for epoch 4 saved successfully to /content/drive/MyDrive/pda/models/v1/backups/backup_epoch_004.ckpt.
+[2025-11-26 16:31:22,447][train_semantic_planner][INFO] - Cleaned up old failsafe backup: backup_epoch_003.ckpt
+Epoch 5: 100% 1248/1248 [29:12<00:00,  1.40s/it, v_num=7ddg, train/loss_step=0.0792, train/loss_pose_step=0.0388, train/loss_grip_step=0.0128, train/loss_phase_step=0.147, train/loss_epoch=0.500, train/loss_pose_epoch=0.209, train/loss_grip_epoch=0.138, train/loss_phase_epoch=0.139, train/phase_acc=0.949][2025-11-26 17:00:35,077][train_semantic_planner][INFO] - End of epoch 5: Triggering atomic failsafe backup...
+[2025-11-26 17:00:51,405][train_semantic_planner][INFO] - Failsafe backup for epoch 5 saved successfully to /content/drive/MyDrive/pda/models/v1/backups/backup_epoch_005.ckpt.
+[2025-11-26 17:00:51,416][train_semantic_planner][INFO] - Cleaned up old failsafe backup: backup_epoch_004.ckpt
+
+Validation: |          | 0/? [00:00<?, ?it/s][2025-11-26 17:00:51,530][lmdb_utils][INFO] -  Opened LMDB at /content/drive/MyDrive/pda/data/validation/training_set.lmdb | mode=RO | file-mode
+[2025-11-26 17:00:51,535][lmdb_utils][INFO] -  Opened LMDB at /content/drive/MyDrive/pda/data/validation/training_set.lmdb | mode=RO | file-mode
+
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation DataLoader 0:   0% 0/54 [00:00<?, ?it/s]
+Validation DataLoader 0:  19% 10/54 [00:11<00:51,  1.18s/it]
+Validation DataLoader 0:  37% 20/54 [00:24<00:41,  1.21s/it]
+Validation DataLoader 0:  56% 30/54 [00:34<00:27,  1.14s/it]
+Validation DataLoader 0:  74% 40/54 [00:44<00:15,  1.10s/it]
+Validation DataLoader 0:  93% 50/54 [00:54<00:04,  1.09s/it]
+Validation DataLoader 0: 100% 54/54 [00:57<00:00,  1.07s/it]
+Epoch 6: 100% 1248/1248 [29:05<00:00,  1.40s/it, v_num=7ddg, train/loss_step=0.166, train/loss_pose_step=0.0579, train/loss_grip_step=0.0398, train/loss_phase_step=0.284, train/loss_epoch=0.481, train/loss_pose_epoch=0.210, train/loss_grip_epoch=0.129, train/loss_phase_epoch=0.133, train/phase_acc=0.954, val/loss=0.172, val/pos_error_m=0.0296][2025-11-26 17:33:56,068][train_semantic_planner][INFO] - End of epoch 6: Triggering atomic failsafe backup...
+[2025-11-26 17:35:45,294][train_semantic_planner][INFO] - Failsafe backup for epoch 6 saved successfully to /content/drive/MyDrive/pda/models/v1/backups/backup_epoch_006.ckpt.
+[2025-11-26 17:35:45,308][train_semantic_planner][INFO] - Cleaned up old failsafe backup: backup_epoch_005.ckpt
+Epoch 7: 100% 1248/1248 [29:10<00:00,  1.40s/it, v_num=7ddg, train/loss_step=0.0593, train/loss_pose_step=0.0355, train/loss_grip_step=0.00607, train/loss_phase_step=0.116, train/loss_epoch=0.443, train/loss_pose_epoch=0.206, train/loss_grip_epoch=0.112, train/loss_phase_epoch=0.129, train/phase_acc=0.953, val/loss=0.172, val/pos_error_m=0.0296][2025-11-26 18:04:55,734][train_semantic_planner][INFO] - End of epoch 7: Triggering atomic failsafe backup...
+[2025-11-26 18:06:22,739][train_semantic_planner][INFO] - Failsafe backup for epoch 7 saved successfully to /content/drive/MyDrive/pda/models/v1/backups/backup_epoch_007.ckpt.
+[2025-11-26 18:06:22,757][train_semantic_planner][INFO] - Cleaned up old failsafe backup: backup_epoch_006.ckpt
+
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation DataLoader 0:   0% 0/54 [00:00<?, ?it/s]
+Validation DataLoader 0:  19% 10/54 [00:08<00:36,  1.20it/s]
+Validation DataLoader 0:  37% 20/54 [00:19<00:32,  1.05it/s]
+Validation DataLoader 0:  56% 30/54 [00:29<00:23,  1.03it/s]
+Validation DataLoader 0:  74% 40/54 [00:36<00:12,  1.08it/s]
+Validation DataLoader 0:  93% 50/54 [00:46<00:03,  1.08it/s]
+Validation DataLoader 0: 100% 54/54 [00:49<00:00,  1.10it/s]
+Epoch 8:   2% 20/1248 [00:27<28:05,  1.37s/it, v_num=7ddg, train/loss_step=0.430, train/loss_pose_step=0.150, train/loss_grip_step=0.131, train/loss_phase_step=0.169, train/loss_epoch=0.428, train/loss_pose_epoch=0.201, train/loss_grip_epoch=0.108, train/loss_phase_epoch=0.105, train/phase_acc=0.962, val/loss=0.187, val/pos_error_m=0.0283]  
+

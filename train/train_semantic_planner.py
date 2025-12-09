@@ -25,7 +25,7 @@ Architecture:
 """
 
 from __future__ import annotations
-
+import time
 import logging
 import os
 import sys
@@ -37,7 +37,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, ListConfig
 from pytorch_lightning.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
@@ -47,6 +47,9 @@ from utils.samplers import EpisodeAwareSampler
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from torch.utils.data import DataLoader
 from transformers import get_cosine_schedule_with_warmup
+from omegaconf.base import ContainerMetadata # <--- NEW IMPORT
+import typing  # <--- NEW IMPORT
+import collections  # <--- NEW IMPORT
 
 # --- Project-Specific Imports ---
 # Robust path handling to ensure utils/models are importable
@@ -68,6 +71,17 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
+
+_original_load = torch.load
+
+def strict_mode_bypass_load(*args, **kwargs):
+    # FORCE weights_only=False, even if Lightning explicitly asks for True.
+    # We overwrite the argument unconditionally.
+    kwargs['weights_only'] = False
+    return _original_load(*args, **kwargs)
+
+# Apply the patch globally
+torch.load = strict_mode_bypass_load
 
 # ==============================================================================
 # 1. SOTA DATA MODULE
@@ -251,10 +265,31 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         gt_phase = batch['gt_phase_label']            # (B,)
         advantage = batch['advantage']                # (B, 1)
 
-        # 3. AWR Weights (Based on Advantage)
-        # Broadcast weights to match chunk dimension: (B, 1, 1)
-        weights = self._compute_awr_weights(advantage.squeeze(-1))
-        weights_expanded = weights.unsqueeze(1) 
+        algo = self.cfg.training.get("algorithm", "awr").lower()
+
+        if algo == "bc":
+            # [Pure Behavior Cloning]
+            # Ignore advantages completely. Every sample has a weight of 1.0.
+            # We construct a tensor of ones on the correct device.
+            weights = torch.ones_like(advantage.squeeze(-1))
+            
+            # (Optional) Log mode once for safety
+            if self.trainer.global_step == 0 and batch_idx == 0:
+                logger.info(">>> TRAINING MODE: PURE BEHAVIOR CLONING (Weights=1.0) <<<")
+
+        elif algo == "awr":
+            # [Advantage Weighted Regression - SOTA]
+            # Calculate exp(A/tau)
+            if self.trainer.global_step == 0 and batch_idx == 0:
+                logger.info(">>> TRAINING MODE: AWR <<<")
+            weights = self._compute_awr_weights(advantage.squeeze(-1))
+        else:
+            error_message = (
+                    f"Invalid training algorithm selection: '{algo}'. "
+                    f"Hint: Only 'bc' or 'awr' allowed."
+                )
+            logger.error(error_message)
+            raise ValueError(error_message)
 
         # 4. Compute Trajectory Losses (Advantage Weighted)
         
@@ -302,9 +337,6 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         return total_loss
 
 
-
-
-# [IN CLASS SemanticPlannerLightningModule]
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         if not batch: return
@@ -494,7 +526,7 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         # 1. Define the path for the NEW backup.
         backup_dir = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
         backup_dir.mkdir(parents=True, exist_ok=True)
-        new_backup_path = backup_dir / f"backup_epoch_{epoch:03d}.ckpt"
+        new_backup_path = backup_dir / f"{self.cfg.training.get("algorithm", "saved")}_backup_epoch_{epoch:03d}.ckpt"
 
         try:
             # 2. SAVE THE NEW CHECKPOINT FIRST. This is the critical step.
@@ -536,9 +568,9 @@ def main(cfg: DictConfig) -> None:
     
     # 2. Logging Setup
     # Hydra sets the working directory, so '.' is the output directory
-    output_dir = Path("/content/drive/MyDrive/pda/logs_awsp_newer/")
+    output_dir = Path("/content/drive/MyDrive/pda/logs/bc/")
     
-    loggers = [TensorBoardLogger(save_dir=".", name="tb_logs")]
+    loggers = [TensorBoardLogger(save_dir=str(output_dir), name="tb_logs")]
     
     if cfg.logging.get("use_wandb", False):
         os.environ["WANDB_MODE"] = cfg.logging.get("wandb_mode", "online")
@@ -594,6 +626,71 @@ def main(cfg: DictConfig) -> None:
         ckpt_arg = resume_path
     else:
         logger.info("No resume checkpoint found. Starting fresh.")
+
+
+    # resume_path = cfg.training.get("resume_from_checkpoint")
+    # ckpt_arg = None # Default: Start fresh (Epoch 0)
+
+    # if resume_path and os.path.exists(resume_path):
+    #     logger.info(f"--- DETECTED CHECKPOINT: {resume_path} ---")
+        
+    #     # [SOTA PATCH v9.3] Perform a "Surgical Migration" to handle architectural changes.
+    #     # This creates a new, compatible checkpoint on the fly.
+    #     try:
+    #         # 1. Load the original checkpoint to CPU memory.
+    #         logger.info("Loading original checkpoint to CPU...")
+    #         checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+    #         src_state_dict = checkpoint['state_dict']
+            
+    #         # 2. Log the differences by attempting a non-strict load into the new model.
+    #         # This doesn't change the model, it just tells us what's different.
+    #         keys = model.load_state_dict(src_state_dict, strict=False)
+    #         logger.info("Analyzing architectural changes...")
+            
+    #         if keys.missing_keys:
+    #             logger.warning(f"New layers found (will be randomly initialized): {keys.missing_keys}")
+    #         if keys.unexpected_keys:
+    #             logger.warning(f"Old layers not found in new model (weights will be discarded): {keys.unexpected_keys}")
+
+    #         migrated_checkpoint = {
+    #             'epoch': checkpoint.get('epoch', 0),
+    #             'global_step': checkpoint.get('global_step', 0),
+    #             'pytorch-lightning_version': checkpoint.get('pytorch-lightning_version', '2.0.0'),
+    #             'state_dict': model.state_dict(), # <--- CORRECTED: Save the adapted weights
+    #         }
+
+    #         if 'lr_schedulers' in checkpoint:
+    #              migrated_checkpoint['lr_schedulers'] = checkpoint['lr_schedulers']
+
+    #         # 4. Save this sanitized checkpoint to a temporary file.
+    #         temp_ckpt_path = Path(os.path.dirname(resume_path)) / f"temp_migrated_{int(time.time())}.ckpt"
+    #         torch.save(migrated_checkpoint, temp_ckpt_path)
+            
+    #         # 5. Set the trainer's resume path to our new, safe checkpoint.
+    #         ckpt_arg = str(temp_ckpt_path)
+    #         logger.info(f"✅ Migration successful. Resuming from sanitized checkpoint: {ckpt_arg}")
+    #         logger.warning("Optimizer state will be reset due to architectural changes.")
+
+    #         # 3. Migration Complete (Weights loaded in memory).
+    #         # We explicitly set ckpt_arg to None. This tells PL to use the model (which now has 
+    #         # the loaded weights) but initialize a FRESH optimizer and start from Epoch 0.
+    #         # This avoids the KeyError regarding missing optimizer states.
+    #         ckpt_arg = None
+            
+    #         logger.info("✅ Migration successful. Weights loaded. Starting fresh training phase (Epoch 0).")
+    #         logger.warning("Optimizer state reset due to architectural changes.")
+
+    #     except Exception as e:
+    #         logger.error(f"CRITICAL: Surgical migration failed: {e}", exc_info=True)
+    #         logger.warning("Falling back to loading weights only and starting from Epoch 0.")
+    #         # Fallback: Just load weights if the full migration fails for some reason
+    #         model.load_state_dict(torch.load(resume_path)['state_dict'], strict=False)
+    #         ckpt_arg = None # Start from scratch
+            
+    # else:
+    #     logger.info("No checkpoint found. Starting from scratch.")
+
+
 
 
     # resume_path = cfg.training.get("resume_from_checkpoint")
@@ -662,9 +759,6 @@ def main(cfg: DictConfig) -> None:
     except Exception as e:
         logger.exception(f"Training failed with exception: {e}")
         raise e
-    
-
-
     
     finally:
         for lg in loggers:

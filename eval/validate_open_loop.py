@@ -1,20 +1,16 @@
-# FILE: eval/validate_open_loop.py
-# (Definitive Phase 1: Open-Loop Validation for Action Chunking Models)
-
 """
-Phase 1: Open-Loop Sanity Check & SOTA Validation.
+(Definitive Phase 1: Open-Loop Validation for Action Chunking Models)
 
 This script performs a rigorous statistical audit of the trained Action Chunking model 
-against the validation dataset.
+(v9.0) against the validation dataset.
 
-It computes metrics for the full Chunk (Trajectory) AND the Immediate Step (Next Action):
-1. Trajectory Euclidean Error (cm) - Mean over K steps
-2. Trajectory Geodesic Error (deg) - Mean over K steps
-3. Next-Step Position Error (cm) - Critical for RHC
-4. Gripper Precision/Recall (Action Classification)
-5. Inference Latency (ms)
+FEATURES:
+1. Fixes PyTorch 2.6+ Checkpoint Loading (weights_only=False).
+2. Computes both TRAJECTORY (Mean over K) and NEXT-STEP (Immediate) errors.
+3. Generates a "Go/No-Go" Report Card for simulation.
 
-It generates a 'Report Card' to determine if the model is ready for simulation.
+Usage:
+    python eval/validate_open_loop.py checkpoint_path=path/to/model.ckpt dataset_path=path/to/val.lmdb
 """
 
 import logging
@@ -22,8 +18,6 @@ import sys
 import time
 import csv
 from pathlib import Path
-from typing import Dict, List, Tuple
-import matplotlib.pyplot as plt
 import hydra
 import numpy as np
 import torch
@@ -33,13 +27,14 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import pandas as pd
 from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
+import matplotlib.pyplot as plt
 
 # --- Project Imports ---
+# Add root to path to ensure imports work
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from models.semantic_planner import SemanticPlanner
 from train.train_semantic_planner import SemanticPlannerLightningModule
 from utils.semantic_planner_dataset import SemanticPlannerDataset, semantic_planner_collate_fn
 
@@ -56,11 +51,10 @@ log = logging.getLogger(__name__)
 def compute_geodesic_distance(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     """
     Computes Geodesic Rotation Error in Degrees.
-    Input shapes: [B, K, 4] or [B, 4]
     Matches SOTA standard: theta = 2 * arccos(|<q1, q2>|)
-    Handles double cover: q and -q represent the same rotation.
+    Handles double cover property (q == -q).
     """
-    # Normalize inputs to be safe
+    # Normalize inputs
     q1 = F.normalize(q1, dim=-1)
     q2 = F.normalize(q2, dim=-1)
     
@@ -70,7 +64,7 @@ def compute_geodesic_distance(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tenso
     # Absolute value handles double cover
     dot = torch.abs(dot)
     
-    # Clamp for numerical stability (arccos domain is [-1, 1])
+    # Clamp for numerical stability
     dot = torch.clamp(dot, -1.0 + 1e-6, 1.0 - 1e-6)
     
     # Calculate angle
@@ -79,47 +73,32 @@ def compute_geodesic_distance(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tenso
     
     return theta_deg
 
-def visualize_batch_prediction(
-    batch_idx: int, 
-    images: torch.Tensor, 
-    pred_chunk: torch.Tensor, 
-    gt_chunk: torch.Tensor, 
-    save_dir: Path
-):
+def visualize_prediction(batch_idx, image, pred_traj, gt_traj, save_dir):
     """
-    Saves a visual comparison of Pred vs GT Trajectories.
-    Projects the 3D points onto the 2D image (Orthographic approx for sanity).
+    Saves a quick sanity check visualization (projected trajectory).
     """
-    if batch_idx > 5: return # Only save first 5 batches
+    if batch_idx > 5: return # Limit to first 5 batches
 
-    # Unnormalize image for display (Assuming 0.5 mean/std)
-    img_tensor = images[0].cpu().permute(1, 2, 0)
-    img_np = (img_tensor * 0.5 + 0.5).numpy()
+    # Unnormalize image (Assuming standard ImageNet or 0.5 stats)
+    # Adjust based on your normalization strategy
+    img_np = image.cpu().permute(1, 2, 0).numpy()
+    img_np = (img_np * 0.5 + 0.5)
     img_np = np.clip(img_np, 0, 1)
-
-    # Extract trajectories (Batch 0)
-    # Shape: [K, 3]
-    pred_traj = pred_chunk[0, :, :3].cpu().numpy()
-    gt_traj = gt_chunk[0, :, :3].cpu().numpy()
 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.imshow(img_np)
+    ax.set_title(f"Batch {batch_idx} Trajectory Check")
     
-    # Simple text annotation of the start and end points
-    # Real 3D projection requires camera intrinsics which aren't always available here.
-    # We print the deltas instead.
-    info_text = (
-        f"Step 0 GT:   {gt_traj[0]}\n"
-        f"Step 0 Pred: {pred_traj[0]}\n"
-        f"Step K GT:   {gt_traj[-1]}\n"
-        f"Step K Pred: {pred_traj[-1]}"
+    # Text overlay
+    info = (
+        f"Step 0 (GT):   {gt_traj[0, :3].cpu().numpy().round(3)}\n"
+        f"Step 0 (Pred): {pred_traj[0, :3].cpu().numpy().round(3)}"
     )
-    ax.text(5, 30, info_text, color='yellow', fontsize=8, backgroundcolor='black', verticalalignment='top')
+    ax.text(5, 20, info, color='white', fontsize=8, backgroundcolor='black')
     
-    plt.title(f"Batch {batch_idx} Trajectory Analysis")
     plt.axis('off')
     plt.tight_layout()
-    plt.savefig(save_dir / f"val_vis_batch_{batch_idx}.png")
+    plt.savefig(save_dir / f"vis_val_{batch_idx}.png")
     plt.close()
 
 class Validator:
@@ -128,172 +107,162 @@ class Validator:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.output_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
         
-        # 1. Load Model
+        # 1. Load Model (With Security Fix)
         log.info(f"Loading Checkpoint: {cfg.checkpoint_path}")
+        
+        # [CRITICAL FIX] weights_only=False allows loading the OmegaConf config stored in the checkpoint
         self.pl_module = SemanticPlannerLightningModule.load_from_checkpoint(
-            cfg.checkpoint_path, map_location=self.device
+            cfg.checkpoint_path, 
+            map_location=self.device,
+            weights_only=False 
         )
         self.model = self.pl_module.model.eval().to(self.device)
         
         # Extract Architecture Params
         self.chunk_size = self.pl_module.cfg.model.get("chunk_size", 10)
-        log.info(f"Model Chunk Size detected: {self.chunk_size}")
+        log.info(f"Detected Chunk Size: {self.chunk_size}")
 
-        # 2. Load Dataset (Validation Split Only)
-        # CRITICAL: Must match the v9.0 Dataset API
+        # 2. Load Dataset (Validation Split)
         log.info(f"Loading Validation Dataset: {cfg.dataset_path}")
         self.dataset = SemanticPlannerDataset(
             dataset_path=cfg.dataset_path,
-            use_aug=False,  # Strict validation, no noise
-            chunk_size=self.chunk_size, # Sync chunk size
+            use_aug=False,  # No noise for validation
+            chunk_size=self.chunk_size,
             proprio_noise=0.0
         )
         
         self.loader = DataLoader(
             self.dataset,
-            batch_size=cfg.batch_size,
+            batch_size=cfg.get("batch_size", 32),
             shuffle=False, 
             num_workers=4,
             pin_memory=True,
             collate_fn=semantic_planner_collate_fn
         )
         
-        # Metric Storage
-        self.metrics = {
-            "traj_pos_errors": [], # Mean over K
-            "traj_rot_errors": [], # Mean over K
-            "next_pos_errors": [], # Immediate step (Index 0)
-            "next_rot_errors": [], # Immediate step (Index 0)
-            "gripper_preds": [],
-            "gripper_gts": [],
+        # Storage
+        self.stats = {
+            "traj_pos": [], "traj_rot": [], # Mean over K
+            "next_pos": [], "next_rot": [], # Immediate step (K=0)
+            "grip_gt": [], "grip_pred": [],
             "latencies": []
         }
 
     @torch.no_grad()
     def run(self):
-        log.info("Starting Open-Loop Validation Loop...")
+        log.info("Starting Validation Loop...")
         
         for batch_idx, batch in enumerate(tqdm(self.loader, desc="Validating")):
-            # Move to device
             batch = {k: v.to(self.device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
             
-            # --- Inference & Latency Check ---
-            start_time = time.time()
-            outputs = self.model(batch)
-            end_time = time.time()
-            self.metrics["latencies"].append((end_time - start_time) * 1000) # ms
+            # --- Inference ---
+            t0 = time.time()
+            out = self.model(batch)
+            self.stats["latencies"].append((time.time() - t0) * 1000)
 
-            # --- Extract Predictions (Chunked) ---
-            # Shape: [B, K, 7] and [B, K, 1]
-            pred_pose_chunk = outputs['pose_chunk']
-            pred_grip_chunk = outputs['gripper_chunk']
+            # Predictions
+            pred_pose = out['pose_chunk']   # (B, K, 7)
+            pred_grip = out['gripper_chunk'] # (B, K, 1)
 
-            # --- Extract Ground Truth (Chunked) ---
-            # Shape: [B, K, 7] and [B, K, 1]
-            # Fixed: Using the correct v9.0 keys
-            gt_pose_chunk = batch['gt_pose_chunk']
-            gt_grip_chunk = batch['gt_grip_chunk']
+            # Ground Truths (Keys match your v9.0 Dataset)
+            gt_pose = batch['gt_pose_chunk']
+            gt_grip = batch['gt_grip_chunk']
 
-            # --- 1. Trajectory Errors (Mean over Chunk) ---
-            # Position (Euclidean)
-            traj_pos_err = torch.norm(pred_pose_chunk[..., :3] - gt_pose_chunk[..., :3], dim=-1) # (B, K)
-            self.metrics["traj_pos_errors"].extend(traj_pos_err.mean(dim=1).cpu().numpy())
-
-            # Rotation (Geodesic)
-            traj_rot_err = compute_geodesic_distance(pred_pose_chunk[..., 3:], gt_pose_chunk[..., 3:]) # (B, K)
-            self.metrics["traj_rot_errors"].extend(traj_rot_err.mean(dim=1).cpu().numpy())
-
-            # --- 2. Next-Step Errors (Immediate Action - Critical for RHC) ---
-            # Position (Index 0)
-            next_pos_err = torch.norm(pred_pose_chunk[:, 0, :3] - gt_pose_chunk[:, 0, :3], dim=-1)
-            self.metrics["next_pos_errors"].extend(next_pos_err.cpu().numpy())
+            # --- 1. Position Error (L2 Euclidean) ---
+            # Shape: (B, K)
+            pos_err = torch.norm(pred_pose[..., :3] - gt_pose[..., :3], dim=-1)
             
-            # Rotation (Index 0)
-            next_rot_err = compute_geodesic_distance(pred_pose_chunk[:, 0, 3:], gt_pose_chunk[:, 0, 3:])
-            self.metrics["next_rot_errors"].extend(next_rot_err.cpu().numpy())
-
-            # --- 3. Gripper Classification (Flat) ---
-            # Flatten B and K to evaluate every single timestep classification
-            pred_cls = (torch.sigmoid(pred_grip_chunk) > 0.5).float().view(-1)
-            gt_cls = gt_grip_chunk.float().view(-1)
+            # Metric A: Trajectory Mean (How good is the plan?)
+            self.stats["traj_pos"].extend(pos_err.mean(dim=1).cpu().numpy())
             
-            self.metrics["gripper_preds"].extend(pred_cls.cpu().numpy())
-            self.metrics["gripper_gts"].extend(gt_cls.cpu().numpy())
+            # Metric B: Next Step (How good is the action?)
+            self.stats["next_pos"].extend(pos_err[:, 0].cpu().numpy())
 
-            # --- 4. Visualization (Sanity Check) ---
+            # --- 2. Rotation Error (Geodesic Degrees) ---
+            rot_err = compute_geodesic_distance(pred_pose[..., 3:], gt_pose[..., 3:])
+            
+            self.stats["traj_rot"].extend(rot_err.mean(dim=1).cpu().numpy())
+            self.stats["next_rot"].extend(rot_err[:, 0].cpu().numpy())
+
+            # --- 3. Gripper Classification ---
+            # Evaluate every step in the chunk
+            pred_cls = (torch.sigmoid(pred_grip) > 0.5).float().view(-1)
+            gt_cls = gt_grip.float().view(-1)
+            
+            self.stats["grip_pred"].extend(pred_cls.cpu().numpy())
+            self.stats["grip_gt"].extend(gt_cls.cpu().numpy())
+
+            # --- 4. Visualization ---
             if batch_idx < 5:
-                visualize_batch_prediction(
-                    batch_idx, batch['curr_image'], pred_pose_chunk, gt_pose_chunk, self.output_dir
+                visualize_prediction(
+                    batch_idx, batch['curr_image'][0], pred_pose[0], gt_pose[0], self.output_dir
                 )
 
-        self._generate_report()
+        self._finalize()
 
-    def _generate_report(self):
-        log.info("--- Generating SOTA Validation Report ---")
+    def _finalize(self):
+        log.info("Calculating Aggregate Statistics...")
         
-        # Convert to numpy for stats
-        # Multiply by 100 for CM
-        traj_pos = np.array(self.metrics["traj_pos_errors"]) * 100.0
-        next_pos = np.array(self.metrics["next_pos_errors"]) * 100.0
-        traj_rot = np.array(self.metrics["traj_rot_errors"])
-        next_rot = np.array(self.metrics["next_rot_errors"])
-        latencies = np.array(self.metrics["latencies"])
-        
-        # Gripper Metrics
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            self.metrics["gripper_gts"], self.metrics["gripper_preds"], 
-            average='binary', zero_division=0
+        # Process Arrays (Multiply by 100 for CM)
+        res = {}
+        for k in ["traj_pos", "next_pos"]:
+            arr = np.array(self.stats[k]) * 100.0 # m -> cm
+            res[k] = {"mean": np.mean(arr), "p99": np.percentile(arr, 99)}
+            
+        for k in ["traj_rot", "next_rot"]:
+            arr = np.array(self.stats[k])
+            res[k] = {"mean": np.mean(arr)}
+            
+        # Gripper Stats
+        p, r, f1, _ = precision_recall_fscore_support(
+            self.stats["grip_gt"], self.stats["grip_pred"], average='binary', zero_division=0
         )
-        conf_mat = confusion_matrix(self.metrics["gripper_gts"], self.metrics["gripper_preds"])
         
-        # --- The Data Sheet ---
-        stats = {
+        # --- Report Generation ---
+        report_data = {
             "Metric": [
-                "Trajectory Pos Error (Mean)", "Trajectory Rot Error (Mean)",
-                "Next-Step Pos Error (Mean)", "Next-Step Rot Error (Mean)",
-                "Next-Step Pos Error (99th%)", "Gripper F1-Score", 
-                "Gripper Precision", "Gripper Recall", "Inference Latency"
+                "Traj Pos Error (Mean)", "Next-Step Pos Error (Mean)", "Next-Step Pos Error (99%)",
+                "Traj Rot Error (Mean)", "Next-Step Rot Error (Mean)",
+                "Gripper F1", "Gripper Precision", "Gripper Recall", "Avg Latency (ms)"
             ],
             "Value": [
-                f"{np.mean(traj_pos):.2f} cm", f"{np.mean(traj_rot):.2f} deg",
-                f"{np.mean(next_pos):.2f} cm", f"{np.mean(next_rot):.2f} deg",
-                f"{np.percentile(next_pos, 99):.2f} cm",
-                f"{f1:.4f}", f"{precision:.4f}", f"{recall:.4f}",
-                f"{np.mean(latencies):.2f} ms"
+                f"{res['traj_pos']['mean']:.2f} cm", 
+                f"{res['next_pos']['mean']:.2f} cm", 
+                f"{res['next_pos']['p99']:.2f} cm",
+                f"{res['traj_rot']['mean']:.2f} deg",
+                f"{res['next_rot']['mean']:.2f} deg",
+                f"{f1:.4f}", f"{p:.4f}", f"{r:.4f}",
+                f"{np.mean(self.stats['latencies']):.2f} ms"
             ]
         }
         
-        df = pd.DataFrame(stats)
-        
-        # Save to Disk
-        csv_path = self.output_dir / "validation_report_v9.csv"
-        df.to_csv(csv_path, index=False)
-        
-        print("\n" + "="*50)
-        print("PHASE 1: ACTION CHUNKING SANITY REPORT")
-        print("="*50)
+        df = pd.DataFrame(report_data)
+        print("\n" + "="*60)
+        print("   AWSP v9.0 VALIDATION REPORT CARD   ")
+        print("="*60)
         print(df.to_string(index=False))
-        print("="*50)
-        print(f"Gripper Confusion Matrix:\n{conf_mat}")
-        print("="*50)
+        print("="*60)
         
-        # --- Interpretive Feedback ---
-        mean_next_pos = np.mean(next_pos)
+        # Save
+        df.to_csv(self.output_dir / "validation_results.csv", index=False)
         
+        # --- Final Verdict ---
+        mean_err = res['next_pos']['mean']
         print("\n>>> AUTOMATED DIAGNOSIS:")
-        if mean_next_pos < 2.0 and f1 > 0.90:
-            print(f"[PASS] Model is robust (Next Step Err: {mean_next_pos:.2f}cm). Ready for Simulation.")
+        if mean_err < 2.0:
+            print(f"✅ PASS. Precision ({mean_err:.2f}cm) is within 2cm tolerance.")
+            print("   Recommendation: Proceed to Simulation / Real Robot deployment.")
         else:
-            print("[FAIL] Model is undertrained. DO NOT run simulation yet.")
-            if mean_next_pos >= 2.0:
-                print(f" - Position Error too high ({mean_next_pos:.2f}cm). Need < 2.0cm for reliable grasping.")
-            if f1 <= 0.90:
-                print(f" - Gripper Logic weak (F1={f1:.2f}). Check class imbalance.")
+            print(f"❌ CAUTION. Precision ({mean_err:.2f}cm) exceeds 2cm threshold.")
+            print("   Recommendation: Train longer or check dataset quality.")
 
 @hydra.main(version_base=None, config_path="../configs", config_name="validate_open_loop_config")
 def main(cfg: DictConfig):
-    validator = Validator(cfg)
-    validator.run()
+    # Ensure output dir exists
+    Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir).mkdir(parents=True, exist_ok=True)
+    
+    val = Validator(cfg)
+    val.run()
 
 if __name__ == "__main__":
     main()

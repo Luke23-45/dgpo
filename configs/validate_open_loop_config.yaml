@@ -1,4 +1,4 @@
-checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_029.ckpt"
+checkpoint_path: "/content/drive/MyDrive/pda/models/v1/backups/backup_epoch_017.ckpt"
 dataset_path: "/content/drive/MyDrive/pda/data/validation/training_set.lmdb"
-batch_size: 32
+batch_size: 64
 
