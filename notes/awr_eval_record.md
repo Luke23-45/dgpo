@@ -892,3 +892,47 @@ Next-Step Rot Error (Mean)   1.35 deg
 >>> AUTOMATED DIAGNOSIS:
 ✅ PASS. Precision (1.02cm) is within 2cm tolerance.
    Recommendation: Proceed to Simulation / Real Robot deployment.
+
+
+for epoch 98:::
+
+========================================================
+   AWSP v9.0 VALIDATION REPORT CARD   
+============================================================
+                    Metric      Value
+     Traj Pos Error (Mean)    1.54 cm
+Next-Step Pos Error (Mean)    1.39 cm
+ Next-Step Pos Error (99%)    3.77 cm
+     Traj Rot Error (Mean)   1.20 deg
+Next-Step Rot Error (Mean)   1.25 deg
+                Gripper F1     0.9592
+         Gripper Precision     0.9263
+            Gripper Recall     0.9944
+          Avg Latency (ms) 2127.01 ms
+============================================================
+
+>>> AUTOMATED DIAGNOSIS:
+✅ PASS. Precision (1.39cm) is within 2cm tolerance.
+   Recommendation: Proceed to Simulation / Real Robot deployment.
+
+
+for epoch 100::
+
+====================================================
+   AWSP v9.0 VALIDATION REPORT CARD   
+============================================================
+                    Metric      Value
+     Traj Pos Error (Mean)    1.31 cm
+Next-Step Pos Error (Mean)    1.23 cm
+ Next-Step Pos Error (99%)    3.36 cm
+     Traj Rot Error (Mean)   1.09 deg
+Next-Step Rot Error (Mean)   1.17 deg
+                Gripper F1     0.9666
+         Gripper Precision     0.9463
+            Gripper Recall     0.9877
+          Avg Latency (ms) 2077.60 ms
+============================================================
+
+>>> AUTOMATED DIAGNOSIS:
+✅ PASS. Precision (1.23cm) is within 2cm tolerance.
+   Recommendation: Proceed to Simulation / Real Robot deployment.

@@ -53,7 +53,7 @@ training:
   backups_to_keep: 2
 
   # [FIX] Moved 'max_epochs' here so the LR Scheduler can access it easily.
-  max_epochs: 100 
+  max_epochs: 110 
 
   # [FIX] Moved 'gradient_clip_val' here to match Python script access pattern.
 
@@ -61,14 +61,14 @@ training:
 
   # --- AWR Parameters ---
   awr_temperature: 6.1953  # for awr it should be 6.1953     
-  awr_max_weight: 17.5 # 1 for bc or 8 and above for awr
+  awr_max_weight: 12 # 1 for bc or 8 and above for awr
   gradient_clip_val: 0.5
   
   loss_weights:
     lambda_gripper: 1.0  
     lambda_phase: 0.5   
 
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/awr/awr_backup_epoch_089.ckpt"
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/awr/awr_backup_epoch_096.ckpt"
 
 # --- Optimizer ---
 optimizer:

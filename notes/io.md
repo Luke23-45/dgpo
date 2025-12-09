@@ -786,6 +786,51 @@ Validation DataLoader 0:  93% 50/54 [00:45<00:03,  1.09it/s]
 Validation DataLoader 0: 100% 54/54 [00:48<00:00,  1.11it/s]
 Epoch 90:  29% 
 
+ining: |          | 0/? [00:00<?, ?it/s]/usr/local/lib/python3.12/dist-packages/pytorch_lightning/loops/training_epoch_loop.py:224: You're resuming from a checkpoint that ended before the epoch ended and your dataloader is not resumable. This can cause unreliable results if further training is done. Consider using an end-of-epoch checkpoint or make your dataloader resumable by implementing the `state_dict` / `load_state_dict` interface.
+/usr/local/lib/python3.12/dist-packages/torch/utils/data/_utils/pin_memory.py:57: DeprecationWarning: The argument 'device' of Tensor.pin_memory() is deprecated. Please do not pass this argument. (Triggered internally at /pytorch/aten/src/ATen/native/Memory.cpp:46.)
+  return data.pin_memory(device)
+/usr/local/lib/python3.12/dist-packages/torch/utils/data/_utils/pin_memory.py:57: DeprecationWarning: The argument 'device' of Tensor.is_pinned() is deprecated. Please do not pass this argument. (Triggered internally at /pytorch/aten/src/ATen/native/Memory.cpp:31.)
+  return data.pin_memory(device)
+Training: |          | 1930/? [15:19<00:00,  2.10it/s, v_num=d6w3, train/loss_step=0.110, train/loss_pose_step=0.0361, train/loss_grip_step=0.0384, train/loss_phase_step=0.0715][2025-12-09 13:28:45,934][train_semantic_planner][INFO] - End of epoch 96: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-09 13:29:19,880][train_semantic_planner][INFO] - Failsafe backup for epoch 96 saved successfully to /content/drive/MyDrive/pda/models/backups/awr/awr_backup_epoch_096.ckpt.
+Epoch 97: 100% 1939/1939 [46:13<00:00,  1.43s/it, v_num=d6w3, train/loss_step=0.116, train/loss_pose_step=0.0587, train/loss_grip_step=0.0358, train/loss_phase_step=0.0437, train/loss_epoch=0.433, train/loss_pose_epoch=0.0711, train/loss_grip_epoch=0.298, train/loss_phase_epoch=0.129, train/phase_acc=0.969][2025-12-09 14:15:33,088][train_semantic_planner][INFO] - End of epoch 97: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-09 14:16:31,559][train_semantic_planner][INFO] - Failsafe backup for epoch 97 saved successfully to /content/drive/MyDrive/pda/models/backups/awr/awr_backup_epoch_097.ckpt.
+
+Validation: |          | 0/? [00:00<?, ?it/s][2025-12-09 14:16:32,788][lmdb_utils][INFO] -  Opened LMDB at /content/drive/MyDrive/pda/data/validation/training_set.lmdb | mode=RO | file-mode
+[2025-12-09 14:16:32,789][lmdb_utils][INFO] -  Opened LMDB at /content/drive/MyDrive/pda/data/validation/training_set.lmdb | mode=RO | file-mode
+
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation DataLoader 0:   0% 0/54 [00:00<?, ?it/s]
+Validation DataLoader 0:  19% 10/54 [00:11<00:50,  1.15s/it]
+Validation DataLoader 0:  37% 20/54 [00:20<00:34,  1.02s/it]
+Validation DataLoader 0:  56% 30/54 [00:30<00:24,  1.03s/it]
+Validation DataLoader 0:  74% 40/54 [00:40<00:14,  1.01s/it]
+Validation DataLoader 0:  93% 50/54 [00:49<00:03,  1.01it/s]
+Validation DataLoader 0: 100% 54/54 [00:52<00:00,  1.03it/s]
+Epoch 98: 100% 1939/1939 [45:56<00:00,  1.42s/it, v_num=d6w3, train/loss_step=0.0386, train/loss_pose_step=0.0132, train/loss_grip_step=0.0204, train/loss_phase_step=0.0098, train/loss_epoch=0.236, train/loss_pose_epoch=0.0614, train/loss_grip_epoch=0.139, train/loss_phase_epoch=0.0725, train/phase_acc=0.975, val/loss=0.0987, val/pos_error_m=0.0106][2025-12-09 15:03:44,881][train_semantic_planner][INFO] - End of epoch 98: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-09 15:04:20,270][train_semantic_planner][INFO] - Failsafe backup for epoch 98 saved successfully to /content/drive/MyDrive/pda/models/backups/awr/awr_backup_epoch_098.ckpt.
+Epoch 99: 100% 1939/1939 [46:16<00:00,  1.43s/it, v_num=d6w3, train/loss_step=0.0298, train/loss_pose_step=0.0214, train/loss_grip_step=0.00423, train/loss_phase_step=0.00837, train/loss_epoch=0.192, train/loss_pose_epoch=0.0563, train/loss_grip_epoch=0.110, train/loss_phase_epoch=0.0514, train/phase_acc=0.981, val/loss=0.0987, val/pos_error_m=0.0106][2025-12-09 15:50:36,786][train_semantic_planner][INFO] - End of epoch 99: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-09 15:52:12,017][train_semantic_planner][INFO] - Failsafe backup for epoch 99 saved successfully to /content/drive/MyDrive/pda/models/backups/awr/awr_backup_epoch_099.ckpt.
+
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation DataLoader 0:   0% 0/54 [00:00<?, ?it/s]
+Validation DataLoader 0:  19% 10/54 [00:08<00:35,  1.23it/s]
+Validation DataLoader 0:  37% 20/54 [00:18<00:31,  1.07it/s]
+Validation DataLoader 0:  56% 30/54 [00:29<00:23,  1.02it/s]
+Validation DataLoader 0:  74% 40/54 [00:37<00:13,  1.07it/s]
+Validation DataLoader 0:  93% 50/54 [00:46<00:03,  1.07it/s]
+Validation DataLoader 0: 100% 54/54 [00:49<00:00,  1.08it/s]
+Epoch 100: 100% 1939/1939 [46:42<00:00,  1.45s/it, v_num=d6w3, train/loss_step=0.550, train/loss_pose_step=0.0956, train/loss_grip_step=0.445, train/loss_phase_step=0.0192, train/loss_epoch=0.168, train/loss_pose_epoch=0.0551, train/loss_grip_epoch=0.0932, train/loss_phase_epoch=0.0392, train/phase_acc=0.986, val/loss=0.0921, val/pos_error_m=0.0108] [2025-12-09 16:39:45,517][train_semantic_planner][INFO] - End of epoch 100: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-09 16:41:27,338][train_semantic_planner][INFO] - Failsafe backup for epoch 100 saved successfully to /content/drive/MyDrive/pda/models/backups/awr/awr_backup_epoch_100.ckpt.
+Epoch 101:   3% 50/1939 [01:14<46:58,  1.49s/it, v_num=d6w3, train/loss_step=0.294, train/loss_pose_step=0.0716, train/loss_grip_step=0.204, train/loss_phase_step=0.0365, train/loss_epoch=0.141, train/loss_pose_epoch=0.0521, train/loss_grip_epoch=0.0736, train/loss_phase_epoch=0.0297, train/phase_acc=0.989, val/loss=0.0921, val/pos_error_m=0.0108]   
+Detected KeyboardInterrupt, attempting graceful shutdown ...
+
 
 
 ============================================================

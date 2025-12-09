@@ -1,0 +1,17 @@
+# FILE: configs/eval_residual_config.yaml
+# Configuration for evaluating residual policy
+
+# BC checkpoint (base policy)
+bc_checkpoint: "checkpoints/semantic_planner_best.ckpt"  # UPDATE THIS
+
+# RL-trained residual checkpoint (optional - leave empty for BC-only baseline)
+residual_checkpoint: null  # e.g., "outputs/best_residual_policy.pt"
+
+# Environment
+env:
+  xml_path: "envs/panda_pick_place.xml"
+
+# Evaluation
+num_episodes: 10
+max_steps: 200
+seed: 42

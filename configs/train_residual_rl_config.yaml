@@ -1,0 +1,43 @@
+# FILE: configs/train_residual_rl_config.yaml
+# Configuration for Residual RL Fine-tuning (SOTA Version)
+
+# Base BC Policy checkpoint - UPDATE THIS PATH
+checkpoint_path: "checkpoints/semantic_planner_best.ckpt"
+
+# Environment
+env:
+  xml_path: "envs/panda_pick_place.xml"
+
+# Residual Policy Architecture
+residual:
+  hidden_dim: 256
+  num_layers: 2
+  initial_scale: 0.1     # Start with small corrections
+
+# Value Network
+value_net:
+  hidden_dim: 256
+  num_layers: 3
+
+# PPO Hyperparameters (SOTA tuned for residual learning)
+ppo:
+  clip_epsilon: 0.2      # Policy clipping
+  entropy_coef: 0.005    # Reduced - residual needs less exploration
+  value_loss_coef: 0.5   # Value function weight
+  max_grad_norm: 0.5     # Gradient clipping
+  epochs: 4              # PPO epochs per iteration (reduced from 10)
+  batch_size: 128        # Mini-batch size (increased for stability)
+  gamma: 0.99            # Discount factor
+  gae_lambda: 0.95       # GAE lambda
+  target_kl: 0.015       # KL early stopping threshold
+
+# Training
+training:
+  num_iterations: 100    # Total PPO iterations
+  steps_per_iteration: 4096  # Steps before each PPO update (increased)
+  max_episode_steps: 200 # Max steps per episode
+  policy_lr: 1e-4        # Residual network LR (reduced for stability)
+  value_lr: 1e-3         # Value network LR
+
+# Logging
+seed: 42
