@@ -1,0 +1,62 @@
+# FILE: configs/train_dgpo_config.yaml
+# DGPO-Foundation Training Configuration
+
+seed: 42
+
+# --- BC Checkpoint (Pre-trained SemanticPlanner) ---
+bc_checkpoint: "checkpoints/semantic_planner_best.ckpt"
+freeze_vision: true  # Freeze vision backbone to save compute
+
+# --- Model Configuration ---
+model:
+  proprio_dim: 22
+  chunk_size: 10
+
+# --- Value Network ---
+value_net:
+  hidden_dim: 256
+
+# --- Environment ---
+environment:
+  xml_path: "envs/panda_pick_place.xml"
+  urdf_path: "urdf/panda_mujoco_kinematics.urdf"
+
+# --- Scripted Expert Configuration ---
+expert:
+  object_size: [0.04, 0.04, 0.04]  # Cube dimensions
+  grasp_width: 0.6  # Normalized gripper width for grasp
+
+# --- Reward Configuration ---
+reward:
+  # Task reward
+  w_dist: 1.0  # Weight for distance-to-goal penalty
+  
+  # Divergence reward (DENSE per-step)
+  w_div: 1.0  # Weight for divergence penalty
+  position_weight: 1.0  # Position error weight in divergence
+  orientation_weight: 0.1  # Orientation error weight in divergence
+  
+  # Success bonus (sparse, terminal)
+  success_bonus: 100.0
+
+# --- PPO Hyperparameters ---
+ppo:
+  gamma: 0.99  # Discount factor
+  gae_lambda: 0.95  # GAE lambda
+  epochs: 4  # Number of PPO epochs per iteration
+  batch_size: 64  # Mini-batch size
+  value_coef: 0.5  # Value loss coefficient
+  max_grad_norm: 0.5  # Gradient clipping
+  temperature: 1.0  # AWR temperature for advantage weighting
+
+# --- Optimizer ---
+optimizer:
+  policy_lr: 1.0e-5  # Lower LR for fine-tuning
+  value_lr: 1.0e-4
+
+# --- Training Loop ---
+training:
+  total_iterations: 200
+  steps_per_iter: 2048  # Steps collected per iteration
+  save_freq: 10  # Save checkpoint every N iterations
+  output_dir: "outputs/dgpo_runs"

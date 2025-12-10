@@ -262,6 +262,7 @@ class ResidualPolicy(nn.Module):
         B = proprio_for_residual.shape[0]
         
         # 3. Sample or use mean
+        # 3. Sample or use mean
         if self.cfg.stochastic and not deterministic:
             # Clamp log_std for numerical stability
             pose_log_std = torch.clamp(pose_res_log_std, 
@@ -275,15 +276,19 @@ class ResidualPolicy(nn.Module):
             pose_dist = Normal(pose_res_mean, pose_log_std.exp())
             grip_dist = Normal(grip_res_mean, grip_log_std.exp())
             
-            pose_residual_raw = pose_dist.rsample()
-            grip_residual_raw = grip_dist.rsample()
+            pose_residual_raw = pose_dist.rsample()  # (B, K*7)
+            grip_residual_raw = grip_dist.rsample()  # (B, K*1)
             
-            # Compute log probabilities
-            pose_log_prob = pose_dist.log_prob(pose_residual_raw).sum(dim=-1)
-            grip_log_prob = grip_dist.log_prob(grip_residual_raw).sum(dim=-1)
-            log_prob = pose_log_prob + grip_log_prob
+            # Compute log probabilities per step
+            # Reshape to (B, K, -1) to sum over feature dims but keep time dim
+            pose_log_prob_steps = pose_dist.log_prob(pose_residual_raw).view(B, self.chunk_size, 7).sum(dim=-1)
+            grip_log_prob_steps = grip_dist.log_prob(grip_residual_raw).view(B, self.chunk_size, 1).sum(dim=-1)
             
-            # Compute entropy
+            step_log_probs = pose_log_prob_steps + grip_log_prob_steps # (B, K)
+            
+            log_prob = step_log_probs.sum(dim=-1) # Total log prob for the chunk (B,)
+            
+            # Compute entropy (sum over all dims)
             pose_entropy = pose_dist.entropy().sum(dim=-1)
             grip_entropy = grip_dist.entropy().sum(dim=-1)
             entropy = pose_entropy + grip_entropy
@@ -291,6 +296,7 @@ class ResidualPolicy(nn.Module):
             pose_residual_raw = pose_res_mean
             grip_residual_raw = grip_res_mean
             log_prob = None
+            step_log_probs = None
             entropy = None
         
         # 4. Apply tanh squashing and clip
@@ -310,26 +316,37 @@ class ResidualPolicy(nn.Module):
         quat_norm = F.normalize(quat_raw, p=2, dim=-1, eps=1e-6)
         final_pose = torch.cat([pos_xyz, quat_norm], dim=-1)
         
+        # SOTA FIX: Return raw_residuals for correct PPO updates
+        # Reshape to (B, K, 8) so it can be indexed correctly
+        pose_raw_reshaped = pose_residual_raw.view(B, self.chunk_size, 7)
+        grip_raw_reshaped = grip_residual_raw.view(B, self.chunk_size, 1)
+        raw_residuals = torch.cat([pose_raw_reshaped, grip_raw_reshaped], dim=-1) # (B, K, 8)
+
         return {
             'pose_chunk': final_pose,
             'gripper_chunk': final_grip,
             'phase_logits': phase_logits,
             'log_prob': log_prob,
+            'step_log_probs': step_log_probs, # (B, K)
             'entropy': entropy,
             # Also return base outputs for analysis
             'base_pose_chunk': base_pose,
             'base_gripper_chunk': base_grip,
+            'raw_residuals': raw_residuals
         }
     
     def get_action(
         self,
         batch: Dict[str, torch.Tensor],
         deterministic: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Convenience method for RL training.
         
-        Returns first action of chunk (receding horizon) as [pose, gripper].
+        Returns:
+            action: (B, 8) First action of chunk
+            log_prob: (B,) Log prob of residual of FIRST STEP
+            raw_residual: (B, 8) Raw pre-tanh residual sample of first step (for buffer)
         """
         outputs = self.forward(batch, deterministic=deterministic)
         
@@ -338,25 +355,80 @@ class ResidualPolicy(nn.Module):
         grip = outputs['gripper_chunk'][:, 0, :] # (B, 1)
         
         action = torch.cat([pose, grip], dim=-1)  # (B, 8)
-        log_prob = outputs.get('log_prob', None)
         
-        return action, log_prob
+        # Use log prob of the first step only, as we only execute and train on the first step
+        step_log_probs = outputs.get('step_log_probs')
+        if step_log_probs is not None:
+             log_prob = step_log_probs[:, 0] # (B,)
+        else:
+             log_prob = None
+        
+        # Also extract first step of raw residuals
+        raw_residual_chunk = outputs['raw_residuals'] # (B, K, 8)
+        raw_residual = raw_residual_chunk[:, 0, :]    # (B, 8)
+        
+        return action, log_prob, raw_residual
     
     def evaluate_actions(
         self,
         batch: Dict[str, torch.Tensor],
-        actions: torch.Tensor
+        raw_residuals: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Evaluate log probability and entropy for given actions.
+        Evaluate log probability and entropy for given raw residuals.
         Used during PPO update to recompute log probs with new policy params.
         
-        Note: This is an approximation - we compute log_prob of the residual,
-        not the full action, since the base policy is frozen.
+        Args:
+            batch: Inputs
+            raw_residuals: (B, 8) The pre-tanh residual samples 'u' stored in buffer (first step).
+            
+        Returns:
+            log_prob: (B,)
+            entropy: (B,)
         """
-        outputs = self.forward(batch, deterministic=False)
-        return outputs.get('log_prob', torch.zeros(actions.shape[0])), \
-               outputs.get('entropy', torch.zeros(actions.shape[0]))
+        # NO need to run base_policy here since we are evaluating P(u|s), 
+        # and 'u' distribution only depends on 's' via residual_nets.
+        # But we might need 'proprio_norm' from batch.
+        
+        proprio_for_residual = batch.get('proprio_norm', batch['curr_proprio'])
+        
+        pose_res_mean_all, pose_res_log_std_all = self.pose_residual_net(proprio_for_residual)
+        grip_res_mean_all, grip_res_log_std_all = self.grip_residual_net(proprio_for_residual)
+        
+        # Slice to get only the first step distribution parameters
+        # Network outputs (B, K*7), reshape to (B, K, 7) and take index 0
+        B = pose_res_mean_all.shape[0]
+        K = self.chunk_size
+        
+        pose_res_mean = pose_res_mean_all.view(B, K, 7)[:, 0, :]
+        pose_res_log_std = pose_res_log_std_all.view(B, K, 7)[:, 0, :]
+        
+        grip_res_mean = grip_res_mean_all.view(B, K, 1)[:, 0, :]
+        grip_res_log_std = grip_res_log_std_all.view(B, K, 1)[:, 0, :]
+        
+        # Clamp log_std
+        pose_log_std = torch.clamp(pose_res_log_std, self.cfg.log_std_min, self.cfg.log_std_max)
+        grip_log_std = torch.clamp(grip_res_log_std, self.cfg.log_std_min, self.cfg.log_std_max)
+        
+        # Create Distributions for the first step
+        pose_dist = Normal(pose_res_mean, pose_log_std.exp())
+        grip_dist = Normal(grip_res_mean, grip_log_std.exp())
+        
+        # Split raw_residuals into pose and grip parts
+        # raw_residuals is (B, 8). Pose is 7, Grip is 1.
+        u_pose = raw_residuals[:, :7]
+        u_grip = raw_residuals[:, 7:]
+        
+        # Evaluate log_prob of u under the CURRENT distribution
+        new_pose_log_prob = pose_dist.log_prob(u_pose).sum(dim=-1)
+        new_grip_log_prob = grip_dist.log_prob(u_grip).sum(dim=-1)
+        
+        log_prob = new_pose_log_prob + new_grip_log_prob
+        
+        # Entropy (of the first step only)
+        entropy = pose_dist.entropy().sum(dim=-1) + grip_dist.entropy().sum(dim=-1)
+        
+        return log_prob, entropy
     
     def get_trainable_parameters(self):
         """Returns only the trainable residual network parameters."""

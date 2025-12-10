@@ -526,7 +526,7 @@ class SemanticPlannerLightningModule(pl.LightningModule):
         # 1. Define the path for the NEW backup.
         backup_dir = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
         backup_dir.mkdir(parents=True, exist_ok=True)
-        new_backup_path = backup_dir / f"{self.cfg.training.get("algorithm", "saved")}_backup_epoch_{epoch:03d}.ckpt"
+        new_backup_path = backup_dir / f"{self.cfg.training.get('algorithm', 'saved')}_backup_epoch_{epoch:03d}.ckpt"
 
         try:
             # 2. SAVE THE NEW CHECKPOINT FIRST. This is the critical step.

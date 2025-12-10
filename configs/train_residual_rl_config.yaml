@@ -2,7 +2,7 @@
 # Configuration for Residual RL Fine-tuning (SOTA Version)
 
 # Base BC Policy checkpoint - UPDATE THIS PATH
-checkpoint_path: "checkpoints/semantic_planner_best.ckpt"
+checkpoint_path: "/content/drive/MyDrive/pda/bc/bc_backup_epoch_088.ckpt"
 
 # Environment
 env:
@@ -34,7 +34,7 @@ ppo:
 # Training
 training:
   num_iterations: 100    # Total PPO iterations
-  steps_per_iteration: 4096  # Steps before each PPO update (increased)
+  steps_per_iteration: 2048    # Steps before each PPO update (increased)
   max_episode_steps: 200 # Max steps per episode
   policy_lr: 1e-4        # Residual network LR (reduced for stability)
   value_lr: 1e-3         # Value network LR

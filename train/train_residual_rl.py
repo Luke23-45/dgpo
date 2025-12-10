@@ -173,9 +173,11 @@ class RolloutBuffer:
     curr_images: List[torch.Tensor] = field(default_factory=list)
     goal_images: List[torch.Tensor] = field(default_factory=list)
     proprios: List[torch.Tensor] = field(default_factory=list)
+    proprio_norms: List[torch.Tensor] = field(default_factory=list) # Store specific normalized obs
     
     # Actions and values
     actions: List[torch.Tensor] = field(default_factory=list)
+    raw_residuals: List[torch.Tensor] = field(default_factory=list) # Stored raw residuals
     log_probs: List[torch.Tensor] = field(default_factory=list)
     values: List[torch.Tensor] = field(default_factory=list)
     
@@ -194,7 +196,9 @@ class RolloutBuffer:
         curr_image: torch.Tensor,
         goal_image: torch.Tensor,
         proprio: torch.Tensor,
+        proprio_norm: torch.Tensor,
         action: torch.Tensor,
+        raw_residual: torch.Tensor,
         log_prob: torch.Tensor,
         value: torch.Tensor,
         reward: float,
@@ -204,7 +208,9 @@ class RolloutBuffer:
         self.curr_images.append(curr_image.cpu())
         self.goal_images.append(goal_image.cpu())
         self.proprios.append(proprio.cpu())
+        self.proprio_norms.append(proprio_norm.cpu())
         self.actions.append(action.cpu())
+        self.raw_residuals.append(raw_residual.cpu())
         self.log_probs.append(log_prob.cpu())
         self.values.append(value.cpu())
         self.rewards.append(reward)
@@ -225,7 +231,7 @@ class RolloutBuffer:
             rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
         
         dones = np.array(self.dones, dtype=np.float32)
-        values = torch.stack(self.values).numpy()
+        values = torch.stack(self.values).numpy().flatten() # Flatten to (T,) to match rewards
         
         T = len(rewards)
         advantages = np.zeros(T)
@@ -261,8 +267,10 @@ class RolloutBuffer:
                 'curr_image': torch.stack([self.curr_images[i] for i in batch_indices]).to(device),
                 'goal_image': torch.stack([self.goal_images[i] for i in batch_indices]).to(device),
                 'curr_proprio': torch.stack([self.proprios[i] for i in batch_indices]).to(device),
+                'proprio_norms': torch.stack([self.proprio_norms[i] for i in batch_indices]).to(device),
                 'actions': torch.stack([self.actions[i] for i in batch_indices]).to(device),
-                'old_log_probs': torch.stack([self.log_probs[i] for i in batch_indices]).to(device),
+                'raw_residuals': torch.stack([self.raw_residuals[i] for i in batch_indices]).to(device),
+                'old_log_probs': torch.stack([self.log_probs[i] for i in batch_indices]).flatten().to(device),
                 'old_values': self.old_values[batch_indices].to(device),  # For value clipping
                 'advantages': self.advantages[batch_indices].to(device),
                 'returns': self.returns[batch_indices].to(device),
@@ -273,7 +281,9 @@ class RolloutBuffer:
         self.curr_images.clear()
         self.goal_images.clear()
         self.proprios.clear()
+        self.proprio_norms.clear()
         self.actions.clear()
+        self.raw_residuals.clear()
         self.log_probs.clear()
         self.values.clear()
         self.rewards.clear()
@@ -504,11 +514,11 @@ class ResidualRLTrainer:
                     'curr_image': curr_tensor,
                     'goal_image': goal_tensor,
                     'curr_proprio': proprio_tensor,
-                    'proprio_norm': proprio_norm_tensor  # Use normalized for residual net
+                    'proprio_norm': proprio_norm_tensor
                 }
                 
                 with torch.no_grad():
-                    action, log_prob = self.policy.get_action(batch, deterministic=False)
+                    action, log_prob, raw_residual = self.policy.get_action(batch, deterministic=False)
                     value = self.value_net(proprio_norm_tensor)
                 
                 pose_7d = action[0, :7].cpu().numpy()
@@ -558,8 +568,10 @@ class ResidualRLTrainer:
                     prev_image=self.prev_img_buffer.squeeze(0),
                     curr_image=curr_tensor.squeeze(0),
                     goal_image=goal_tensor.squeeze(0),
-                    proprio=proprio_tensor.squeeze(0),  # Raw proprio for policy
+                    proprio=proprio_tensor.squeeze(0),
+                    proprio_norm=proprio_norm_tensor.squeeze(0), # STORED NORM
                     action=action.squeeze(0),
+                    raw_residual=raw_residual.squeeze(0),
                     log_prob=log_prob,
                     value=value,
                     reward=reward,
@@ -595,7 +607,7 @@ class ResidualRLTrainer:
             'success_rate': successes / num_episodes if num_episodes > 0 else 0,
             'num_episodes': num_episodes
         }
-    
+
     def update_policy(self) -> Dict[str, float]:
         """Perform PPO update with SOTA features."""
         self.policy.train()
@@ -611,20 +623,20 @@ class ResidualRLTrainer:
             if early_stop:
                 break
                 
-                curr_proprio_raw_np = batch['curr_proprio'].cpu().numpy()
-                curr_proprio_norm_np = self.proprio_normalizer.normalize(curr_proprio_raw_np)
-                curr_proprio_norm = torch.from_numpy(curr_proprio_norm_np).float().to(self.device)
+            for batch in self.buffer.get_batches(self.batch_size, self.device):
+                # Use stored normalized proprio for consistency
+                curr_proprio_norm = batch['proprio_norms']
 
-                outputs = self.policy.forward({
-                    'prev_image': batch['prev_image'],
-                    'curr_image': batch['curr_image'],
-                    'goal_image': batch['goal_image'],
-                    'curr_proprio': batch['curr_proprio'],
-                    'proprio_norm': curr_proprio_norm
-                }, deterministic=False)
-                
-                new_log_prob = outputs['log_prob']
-                entropy = outputs['entropy']
+                new_log_prob, entropy = self.policy.evaluate_actions(
+                    batch={
+                        'prev_image': batch['prev_image'],
+                        'curr_image': batch['curr_image'],
+                        'goal_image': batch['goal_image'],
+                        'curr_proprio': batch['curr_proprio'],
+                        'proprio_norm': curr_proprio_norm
+                    },
+                    raw_residuals=batch['raw_residuals']
+                )
                 
                 # SOTA: Compute approx KL for early stopping
                 approx_kl = (batch['old_log_probs'] - new_log_prob).mean().item()
@@ -684,6 +696,12 @@ class ResidualRLTrainer:
                 total_entropy += entropy_val.item()
                 total_kl += approx_kl
                 num_updates += 1
+                
+                # DEBUG PROBE
+                if epoch == 0 and num_updates == 1:
+                     logger.info(f"DEBUG: PGradNorm: {policy_grad_norm:.4f}, VGradNorm: {value_grad_norm:.4f}, "
+                                 f"Adv Mean: {advantages.mean():.4f}, Adv Std: {advantages.std():.4f}, "
+                                 f"KL: {approx_kl:.6f}, Ratio Mean: {ratio.mean():.4f}")
         
         # Step LR scheduler
         self.policy_scheduler.step()

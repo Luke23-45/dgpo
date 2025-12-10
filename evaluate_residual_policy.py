@@ -43,7 +43,6 @@ class ResidualPolicyEvaluator:
             # Load from RL-trained checkpoint
             logger.info(f"Loading RL-trained residual policy: {cfg.residual_checkpoint}")
             self.policy = create_residual_policy(cfg.bc_checkpoint, self.device)
-            self.policy = create_residual_policy(cfg.bc_checkpoint, self.device)
             ckpt = torch.load(cfg.residual_checkpoint, map_location=self.device)
             self.policy.load_state_dict(ckpt['policy_state_dict'])
             
