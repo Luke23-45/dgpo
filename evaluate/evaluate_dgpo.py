@@ -183,8 +183,11 @@ class DGPOEvaluator:
             if 'policy_state_dict' in ckpt:
                 self.policy.load_state_dict(ckpt['policy_state_dict'])
                 log.info(f"Loaded DGPO weights from iteration {ckpt.get('iteration', '?')}")
+            elif 'model_state_dict' in ckpt:
+                self.policy.load_state_dict(ckpt['model_state_dict'])
+                log.info(f"Loaded DAgger/Model weights from iteration {ckpt.get('iteration', '?')}")
             else:
-                log.warning("Checkpoint doesn't contain 'policy_state_dict'. Using BC weights.")
+                log.warning("Checkpoint doesn't contain 'policy_state_dict' or 'model_state_dict'. Using BC weights.")
         else:
             log.warning(f"DGPO checkpoint not found: {dgpo_checkpoint}. Using BC weights.")
         

@@ -6,7 +6,7 @@ seed: 42
 
 # --- BC Checkpoint (Pre-trained SemanticPlanner) ---
 bc_checkpoint: "/content/drive/MyDrive/pda/bc/bc_backup_epoch_088.ckpt"
-freeze_vision: true  # Freeze vision backbone to save compute
+freeze_vision: false  # Freeze vision backbone to save compute
 
 # --- Model Configuration ---
 model:
@@ -30,11 +30,12 @@ training:
   total_iterations: 100
   steps_per_iter: 1024  # Steps per rollout (fewer needed since expert succeeds)
   epochs_per_iter: 4  # Gradient updates per iteration
-  batch_size: 64
+  batch_size: 16  # Reduced from 64 for unfrozen backbone (saves GPU memory)
   learning_rate: 1.0e-5  # Conservative for fine-tuning
   max_grad_norm: 1.0
-  save_freq: 10
+  save_freq: 3
   output_dir: "outputs/dagger_runs"
+  gradient_accumulation_steps: 4
 
 # --- Loss Weights ---
 loss:

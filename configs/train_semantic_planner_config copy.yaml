@@ -33,7 +33,7 @@ dataset:
 
 # --- Training Loop Configuration ---
 training:
-  algorithm: "bc" # "bc" or "awr" for (Advantage Weighted Regression) 
+  algorithm: "awr" # "bc" or "awr" for (Advantage Weighted Regression) 
 
   batch_size: 64 
   val_batch_size: 64
@@ -42,7 +42,7 @@ training:
 
   backup_every_n_epochs: 1
 
-  backup_dir: "/content/drive/MyDrive/pda/models/backups/bc/"
+  backup_dir: "/content/drive/MyDrive/pda/models/backups/awr/"
 
   # backup_dir: "/content/dgpo/checkpoints/backup"
 
@@ -60,15 +60,15 @@ training:
   val_check_interval: 1.0
 
   # --- AWR Parameters ---
-  awr_temperature: 0  # for awr it should be 6.1953     
-  awr_max_weight: 1 # 1 for bc or 8 and above for awr
+  awr_temperature: 6.1953  # for awr it should be 6.1953     
+  awr_max_weight: 12 # 1 for bc or 8 and above for awr
   gradient_clip_val: 0.5
   
   loss_weights:
     lambda_gripper: 1.0  
     lambda_phase: 0.5   
 
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/bc/bc_backup_epoch_088.ckpt"
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/awr/awr_backup_epoch_096.ckpt"
 
 # --- Optimizer ---
 optimizer:
@@ -95,5 +95,5 @@ logging:
   use_wandb: true
   wandb_project: "AWSP-v1"
   wandb_mode: "offline" # Change to 'online' to sync
-  run_name: "bc_baseline_v1" #awsp_siglip_phase_aware or bc_baseline_v1
+  run_name: "awsp_siglip_phase_aware" #awsp_siglip_phase_aware or bc_baseline_v1
   log_grad_freq: 500

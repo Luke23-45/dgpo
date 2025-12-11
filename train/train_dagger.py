@@ -58,30 +58,31 @@ log = logging.getLogger("DAgger")
 class DAggerReplayBuffer:
     """
     Simple replay buffer for DAgger rollouts.
-    Stores observation-action pairs from expert demonstrations.
+    Stores PRE-TRANSFORMED tensors for fast training.
     """
-    prev_images: List[np.ndarray] = field(default_factory=list)
-    curr_images: List[np.ndarray] = field(default_factory=list)
-    goal_images: List[np.ndarray] = field(default_factory=list)
-    proprios: List[np.ndarray] = field(default_factory=list)
-    expert_poses: List[np.ndarray] = field(default_factory=list)  # 7D target poses
+    # Store pre-transformed tensors for speed (transforms done once during collection)
+    prev_images: List[torch.Tensor] = field(default_factory=list)
+    curr_images: List[torch.Tensor] = field(default_factory=list)
+    goal_images: List[torch.Tensor] = field(default_factory=list)
+    proprios: List[torch.Tensor] = field(default_factory=list)
+    expert_poses: List[torch.Tensor] = field(default_factory=list)  # 7D target poses
     expert_grippers: List[float] = field(default_factory=list)  # -1.0 (close) or 1.0 (open)
     
     def add(
         self,
-        prev_img: np.ndarray,
-        curr_img: np.ndarray,
-        goal_img: np.ndarray,
+        prev_img_t: torch.Tensor,  # Pre-transformed tensor
+        curr_img_t: torch.Tensor,  # Pre-transformed tensor
+        goal_img_t: torch.Tensor,  # Pre-transformed tensor
         proprio: np.ndarray,
         expert_pose: np.ndarray,
         expert_gripper: float,
     ):
         """Add a single timestep to the buffer."""
-        self.prev_images.append(prev_img.copy())
-        self.curr_images.append(curr_img.copy())
-        self.goal_images.append(goal_img.copy())
-        self.proprios.append(proprio.copy())
-        self.expert_poses.append(expert_pose.copy())
+        self.prev_images.append(prev_img_t.cpu())  # Store on CPU to save GPU memory
+        self.curr_images.append(curr_img_t.cpu())
+        self.goal_images.append(goal_img_t.cpu())
+        self.proprios.append(torch.from_numpy(proprio.copy()).float())
+        self.expert_poses.append(torch.from_numpy(expert_pose.copy()).float())
         self.expert_grippers.append(expert_gripper)
     
     def clear(self):
@@ -239,36 +240,30 @@ class DAggerTrainer:
     ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         """
         Prepares a batch of samples from the buffer for training.
+        Buffer already contains pre-transformed tensors for speed.
         Returns: (input_batch, expert_poses, expert_grippers)
         """
-        prev_imgs = []
-        curr_imgs = []
-        goal_imgs = []
-        proprios = []
-        expert_poses = []
-        expert_grippers = []
+        # Just stack pre-transformed tensors - no PIL transforms needed!
+        prev_imgs = torch.stack([self.buffer.prev_images[idx] for idx in indices])
+        curr_imgs = torch.stack([self.buffer.curr_images[idx] for idx in indices])
+        goal_imgs = torch.stack([self.buffer.goal_images[idx] for idx in indices])
+        proprios = torch.stack([self.buffer.proprios[idx] for idx in indices])
+        expert_poses = torch.stack([self.buffer.expert_poses[idx] for idx in indices])
         
-        for idx in indices:
-            prev_imgs.append(self.transform(Image.fromarray(self.buffer.prev_images[idx])))
-            curr_imgs.append(self.transform(Image.fromarray(self.buffer.curr_images[idx])))
-            goal_imgs.append(self.transform(Image.fromarray(self.buffer.goal_images[idx])))
-            proprios.append(torch.from_numpy(self.buffer.proprios[idx]).float())
-            expert_poses.append(torch.from_numpy(self.buffer.expert_poses[idx]).float())
-            # Convert gripper to binary: -1.0 (close) -> 1.0, 1.0 (open) -> 0.0
-            grip_binary = 1.0 if self.buffer.expert_grippers[idx] < 0 else 0.0
-            expert_grippers.append(grip_binary)
+        # Convert gripper to binary: -1.0 (close) -> 1.0, 1.0 (open) -> 0.0
+        expert_grippers = torch.tensor(
+            [1.0 if self.buffer.expert_grippers[idx] < 0 else 0.0 for idx in indices],
+            dtype=torch.float32
+        ).unsqueeze(1)
         
         batch = {
-            "prev_image": torch.stack(prev_imgs).to(self.device),
-            "curr_image": torch.stack(curr_imgs).to(self.device),
-            "goal_image": torch.stack(goal_imgs).to(self.device),
-            "curr_proprio": torch.stack(proprios).to(self.device)
+            "prev_image": prev_imgs.to(self.device),
+            "curr_image": curr_imgs.to(self.device),
+            "goal_image": goal_imgs.to(self.device),
+            "curr_proprio": proprios.to(self.device)
         }
         
-        expert_poses_t = torch.stack(expert_poses).to(self.device)
-        expert_grippers_t = torch.tensor(expert_grippers, dtype=torch.float32).unsqueeze(1).to(self.device)
-        
-        return batch, expert_poses_t, expert_grippers_t
+        return batch, expert_poses.to(self.device), expert_grippers.to(self.device)
     
     def collect_rollouts(self, n_steps: int) -> Dict[str, float]:
         """
@@ -281,43 +276,35 @@ class DAggerTrainer:
         
         episode_count = 0
         success_count = 0
-        total_divergence = 0.0
-        divergence_count = 0
         
         # Reset environment and expert
         self.env.reset()
         obs = self.env.get_expert_obs()
         self.expert.reset()
         
-        # Render goal image once per episode
-        goal_img = render_goal_image(self.env, obs['goal_pos_world'])
-        prev_img = obs['image_primary'].copy()
+        # Render goal image once per episode and pre-transform
+        goal_img_np = render_goal_image(self.env, obs['goal_pos_world'])
+        goal_img_t = self.transform(Image.fromarray(goal_img_np))
+        prev_img_np = obs['image_primary'].copy()
+        prev_img_t = self.transform(Image.fromarray(prev_img_np))
         
         pbar = tqdm(total=n_steps, desc=f"Collecting rollouts (Iter {self.iteration})")
         
         for step in range(n_steps):
-            curr_img = obs['image_primary']
+            curr_img_np = obs['image_primary']
             proprio = obs['proprio']
+            
+            # Pre-transform current image
+            curr_img_t = self.transform(Image.fromarray(curr_img_np))
             
             # 1. Get Expert's target pose (this is what we'll EXECUTE)
             expert_pose, expert_grip, info = self.expert.get_target_pose(obs)
             
-            # 2. Get Policy's predicted pose (for divergence logging only)
-            batch = self._prepare_batch(prev_img, curr_img, goal_img, proprio)
-            with torch.no_grad():
-                policy_out = self.policy(batch)
-            policy_pose = policy_out['pose_chunk'][0, 0].cpu().numpy()  # (7,)
-            
-            # 3. Compute divergence (for logging)
-            pos_div = np.linalg.norm(policy_pose[:3] - expert_pose[:3])
-            total_divergence += pos_div
-            divergence_count += 1
-            
-            # 4. Store in buffer (expert's action as ground truth)
+            # 2. Store in buffer (pre-transformed tensors for fast training)
             self.buffer.add(
-                prev_img=prev_img,
-                curr_img=curr_img,
-                goal_img=goal_img,
+                prev_img_t=prev_img_t,
+                curr_img_t=curr_img_t,
+                goal_img_t=goal_img_t,
                 proprio=proprio,
                 expert_pose=expert_pose,
                 expert_gripper=expert_grip,
@@ -345,8 +332,8 @@ class DAggerTrainer:
             next_obs = self.env.get_expert_obs()
             done = terminated or truncated or self.expert.is_done()
             
-            # 7. Update state
-            prev_img = curr_img.copy()
+            # 7. Update state - carry tensor forward
+            prev_img_t = curr_img_t
             obs = next_obs
             self.total_steps += 1
             pbar.update(1)
@@ -361,19 +348,20 @@ class DAggerTrainer:
                 if np.linalg.norm(obj_pos - goal_pos) < 0.05:
                     success_count += 1
                 
-                # Reset for next episode
+                # Reset for next episode and pre-transform new images
                 self.env.reset()
                 obs = self.env.get_expert_obs()
                 self.expert.reset()
-                goal_img = render_goal_image(self.env, obs['goal_pos_world'])
-                prev_img = obs['image_primary'].copy()
+                goal_img_np = render_goal_image(self.env, obs['goal_pos_world'])
+                goal_img_t = self.transform(Image.fromarray(goal_img_np))
+                prev_img_np = obs['image_primary'].copy()
+                prev_img_t = self.transform(Image.fromarray(prev_img_np))
         
         pbar.close()
         
         return {
             "n_episodes": episode_count,
             "success_rate": success_count / max(episode_count, 1),
-            "mean_divergence": total_divergence / max(divergence_count, 1),
             "buffer_size": len(self.buffer)
         }
     
@@ -455,11 +443,11 @@ class DAggerTrainer:
         }
     
     def save_checkpoint(self, path: str):
-        """Saves model checkpoint."""
+        """Saves model checkpoint (compatible with evaluate_dgpo.py)."""
         checkpoint = {
             "iteration": self.iteration,
             "total_steps": self.total_steps,
-            "model_state_dict": self.policy.state_dict(),
+            "policy_state_dict": self.policy.state_dict(),  # Match DGPO format
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
         torch.save(checkpoint, path)
@@ -485,7 +473,7 @@ class DAggerTrainer:
                 f"Iter {self.iteration:4d} | "
                 f"Eps: {rollout_stats['n_episodes']:2d} | "
                 f"Succ: {rollout_stats['success_rate']:.1%} | "
-                f"Div: {rollout_stats['mean_divergence']:.4f} | "
+                f"Buf: {rollout_stats['buffer_size']} | "
                 f"PL: {update_stats['pose_loss']:.4f} | "
                 f"GL: {update_stats['grip_loss']:.4f}"
             )

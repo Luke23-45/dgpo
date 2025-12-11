@@ -26,12 +26,12 @@ import mujoco
 
 def main():
     # Config
-    BC_CHECKPOINT = "checkpoints/bc_backup_epoch_088.ckpt"  # Adjust path as needed
+    BC_CHECKPOINT = "/content/drive/MyDrive/pda/models/backups/bc/bc_backup_epoch_094.ckpt"  # Adjust path as needed
     
     # Check if checkpoint exists locally
     for path in [
         BC_CHECKPOINT,
-        "/content/drive/MyDrive/pda/bc/bc_backup_epoch_088.ckpt", 
+        "/content/drive/MyDrive/pda/models/backups/bc/bc_backup_epoch_094.ckpt", 
     ]:
         if Path(path).exists():
             BC_CHECKPOINT = path

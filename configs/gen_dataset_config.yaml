@@ -15,7 +15,7 @@ run_name: "expert_run_validation_dataset"
 
 # The master seed for the entire generation process. All other seeds are derived
 # deterministically from this, ensuring full reproducibility.
-seed: 105132456731
+seed: 105132456731 # for validation
 
 # seed: 701
 
