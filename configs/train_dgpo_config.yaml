@@ -1,10 +1,11 @@
 # FILE: configs/train_dgpo_config.yaml
-# DGPO-Foundation Training Configuration
+# DGPO-Foundation Training Configuration (Production-Grade)
 
 seed: 42
 
 # --- BC Checkpoint (Pre-trained SemanticPlanner) ---
-bc_checkpoint: "checkpoints/semantic_planner_best.ckpt"
+bc_checkpoint: "/content/drive/MyDrive/pda/bc/bc_backup_epoch_088.ckpt"
+
 freeze_vision: true  # Freeze vision backbone to save compute
 
 # --- Model Configuration ---
@@ -58,5 +59,19 @@ optimizer:
 training:
   total_iterations: 200
   steps_per_iter: 2048  # Steps collected per iteration
-  save_freq: 10  # Save checkpoint every N iterations
-  output_dir: "outputs/dgpo_runs"
+
+# --- Logging Configuration ---
+logging:
+  log_dir: "/content/drive/MyDrive/pda/logs/"           # Base directory for all outputs
+  csv_log_name: "training_metrics.csv"   # CSV metrics filename
+  use_tensorboard: true                  # Enable TensorBoard logging
+  log_every_n_iters: 1                   # How often to log (every N iterations)
+
+# --- Checkpoint & Resume Configuration ---
+checkpoint:
+  save_dir: "outputs/dgpo_runs/checkpoints"   # Directory for regular checkpoints
+  save_freq: 10                               # Save checkpoint every N iterations
+  backup_dir: "outputs/dgpo_runs/backups"     # Directory for failsafe backups
+  backup_freq: 3                              # Save backup every N iterations
+  backups_to_keep: 3                          # Number of old backups to retain
+  resume_from: null                           # Path to checkpoint to resume from (set to .pt path)

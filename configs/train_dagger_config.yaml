@@ -1,0 +1,49 @@
+# FILE: configs/train_dagger_config.yaml
+# DAgger-Style Training Configuration
+# Executes expert actions, trains policy via imitation learning
+
+seed: 42
+
+# --- BC Checkpoint (Pre-trained SemanticPlanner) ---
+bc_checkpoint: "/content/drive/MyDrive/pda/bc/bc_backup_epoch_088.ckpt"
+freeze_vision: true  # Freeze vision backbone to save compute
+
+# --- Model Configuration ---
+model:
+  proprio_dim: 22
+  chunk_size: 10
+
+# --- Environment ---
+environment:
+  xml_path: "envs/panda_pick_place.xml"
+  urdf_path: "urdf/panda_mujoco_kinematics.urdf"
+
+# --- Expert Configuration ---
+expert:
+  object_size: [0.04, 0.04, 0.04]  # Cube dimensions
+  grasp_width: 0.6  # Normalized gripper width for grasp
+  hover_height: 0.15
+  grasp_offset_z: 0.025
+
+# --- Training Configuration ---
+training:
+  total_iterations: 100
+  steps_per_iter: 1024  # Steps per rollout (fewer needed since expert succeeds)
+  epochs_per_iter: 4  # Gradient updates per iteration
+  batch_size: 64
+  learning_rate: 1.0e-5  # Conservative for fine-tuning
+  max_grad_norm: 1.0
+  save_freq: 10
+  output_dir: "outputs/dagger_runs"
+
+# --- Loss Weights ---
+loss:
+  pose_weight: 1.0
+  gripper_weight: 0.1
+  position_weight: 1.0  # Within pose loss
+  orientation_weight: 0.3  # Within pose loss
+
+# --- Logging ---
+logging:
+  log_every: 1  # Log every N iterations
+  verbose: true

@@ -1,0 +1,10 @@
+Metric,Value
+Trajectory Pos Error (Mean),5.14 cm
+Trajectory Rot Error (Mean),10.99 deg
+Next-Step Pos Error (Mean),4.87 cm
+Next-Step Rot Error (Mean),11.01 deg
+Next-Step Pos Error (99th%),18.46 cm
+Gripper F1-Score,0.9548
+Gripper Precision,0.9490
+Gripper Recall,0.9607
+Inference Latency,1181.39 ms

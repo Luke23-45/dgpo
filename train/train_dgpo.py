@@ -1,6 +1,7 @@
 # FILE: train/train_dgpo.py
 """
 DGPO-Foundation Trainer (Dense Expert-Guided PPO Fine-Tuning)
+[Production-Grade with Robust Logging and Resume Training]
 
 This script implements the DGPO-Foundation algorithm for post-training a 
 pre-trained SemanticPlanner policy using:
@@ -8,15 +9,20 @@ pre-trained SemanticPlanner policy using:
 2. PPO for policy optimization
 3. GAE for advantage estimation
 
-The key innovation is using the expert's recommended EE pose at each step
-to provide immediate feedback to the policy, solving the credit assignment problem.
+Features:
+- CSV metrics logging for all training metrics
+- TensorBoard integration for visualization
+- Atomic checkpoint saving with backup rotation
+- Resume training from any checkpoint
 """
 
 from __future__ import annotations
 
+import csv
 import logging
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -29,8 +35,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
+from scipy.spatial.transform import Rotation
 from torchvision import transforms
 from tqdm import tqdm
+
+# TensorBoard (optional, with graceful fallback)
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
+    SummaryWriter = None
 
 # --- Robust Path Injection ---
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +57,7 @@ from models.semantic_planner import SemanticPlanner, SemanticPlannerConfig
 from train.train_semantic_planner import SemanticPlannerLightningModule
 from utils.ik_solver import IKSolver
 from utils.divergence import compute_step_divergence
-from utils.scripted_expert import ScriptedExpert, ObjectProfile, ExpertConfig
+from utils.dgpo_expert import DGPOExpert, DGPOExpertConfig, ObjectProfile
 
 # Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -68,6 +83,101 @@ class ValueNetwork(nn.Module):
     
     def forward(self, proprio: torch.Tensor) -> torch.Tensor:
         return self.net(proprio).squeeze(-1)
+
+
+# ==============================================================================
+# 1.5. METRICS LOGGER (Production-Grade CSV Logging)
+# ==============================================================================
+
+class MetricsLogger:
+    """
+    Production-grade CSV logger for DGPO training metrics.
+    
+    Features:
+    - Automatic header detection and writing
+    - Timestamp for each log entry
+    - Atomic file operations with flush
+    - Resume-aware (appends if file exists with matching headers)
+    """
+    
+    HEADERS = [
+        "iteration", "timestamp",
+        "mean_reward", "success_rate", "n_episodes",
+        "policy_loss", "value_loss",
+        "shadow_pos_div_cm", "shadow_orn_div_rad", "grip_agreement",
+        "total_steps"
+    ]
+    
+    def __init__(self, csv_path: Path, resume: bool = False):
+        """
+        Initialize the metrics logger.
+        
+        Args:
+            csv_path: Path to the CSV file
+            resume: If True, append to existing file; if False, start fresh
+        """
+        self.csv_path = Path(csv_path)
+        self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Determine write mode
+        if resume and self.csv_path.exists():
+            # Verify headers match before resuming
+            with open(self.csv_path, 'r', newline='') as f:
+                reader = csv.reader(f)
+                existing_headers = next(reader, None)
+                if existing_headers != self.HEADERS:
+                    log.warning(f"CSV headers mismatch. Starting fresh.")
+                    self._write_header = True
+                    self._mode = 'w'
+                else:
+                    self._write_header = False
+                    self._mode = 'a'
+        else:
+            self._write_header = True
+            self._mode = 'w'
+        
+        # Open file and write header if needed
+        self.file = open(self.csv_path, self._mode, newline='')
+        self.writer = csv.DictWriter(self.file, fieldnames=self.HEADERS)
+        
+        if self._write_header:
+            self.writer.writeheader()
+            self.file.flush()
+            log.info(f"CSV logger initialized: {self.csv_path}")
+        else:
+            log.info(f"CSV logger appending to: {self.csv_path}")
+    
+    def log_step(
+        self,
+        iteration: int,
+        rollout_stats: Dict[str, Any],
+        update_stats: Dict[str, Any],
+        total_steps: int
+    ):
+        """Log a single training iteration."""
+        row = {
+            "iteration": iteration,
+            "timestamp": datetime.now().isoformat(),
+            "mean_reward": f"{rollout_stats['mean_reward']:.4f}",
+            "success_rate": f"{rollout_stats['success_rate']:.4f}",
+            "n_episodes": rollout_stats['n_episodes'],
+            "policy_loss": f"{update_stats['policy_loss']:.6f}",
+            "value_loss": f"{update_stats['value_loss']:.6f}",
+            "shadow_pos_div_cm": f"{rollout_stats['shadow_pos_div'] * 100:.4f}",
+            "shadow_orn_div_rad": f"{rollout_stats['shadow_orn_div']:.6f}",
+            "grip_agreement": f"{rollout_stats['grip_agreement']:.4f}",
+            "total_steps": total_steps
+        }
+        self.writer.writerow(row)
+        self.file.flush()  # Ensure data is written immediately
+    
+    def close(self):
+        """Close the CSV file."""
+        if hasattr(self, 'file') and self.file:
+            self.file.close()
+    
+    def __del__(self):
+        self.close()
 
 
 # ==============================================================================
@@ -195,6 +305,14 @@ def render_goal_image(env: PandaEnv, goal_pos: np.ndarray) -> np.ndarray:
 class DGPOTrainer:
     """
     DGPO-Foundation Trainer implementing dense divergence-guided PPO.
+    
+    Features:
+    - Dense divergence rewards from expert
+    - PPO for policy optimization
+    - CSV metrics logging
+    - TensorBoard integration
+    - Resume training from checkpoint
+    - Atomic checkpoint saving with backup rotation
     """
     
     def __init__(self, cfg: DictConfig):
@@ -232,14 +350,19 @@ class DGPOTrainer:
         # 4. Initialize IK Solver
         self.ik_solver = IKSolver(urdf_path=cfg.environment.urdf_path)
         
-        # 5. Initialize Scripted Expert
-        self.object_profile = ObjectProfile(
-            size=np.array(cfg.expert.object_size),
-            grasp_width_normalized=cfg.expert.grasp_width
+        # 5. Initialize DGPO Expert (robust FSM without timeouts)
+        # Create object profile for standard cube (matches dataset generation)
+        object_profile = ObjectProfile(
+            size=np.array([0.04, 0.04, 0.04]),  # Standard cube dimensions
+            grasp_width_normalized=0.6
         )
-        self.expert = ScriptedExpert(
-            object_profile=self.object_profile,
-            cfg=ExpertConfig()
+        expert_cfg = DGPOExpertConfig(
+            hover_height=cfg.expert.get('hover_height', 0.15),
+            grasp_offset_z=cfg.expert.get('grasp_offset_z', 0.025),
+        )
+        self.expert = DGPOExpert(
+            object_profile=object_profile,
+            cfg=expert_cfg,
         )
         
         # 6. Control calibration
@@ -266,10 +389,143 @@ class DGPOTrainer:
         self.buffer = RolloutBuffer()
         
         # 10. Statistics
+        self.start_iteration = 0  # Will be updated if resuming
         self.iteration = 0
         self.total_steps = 0
         
+        # 11. TensorBoard setup (optional)
+        self.tb_writer = None
+        if cfg.logging.get("use_tensorboard", False) and TENSORBOARD_AVAILABLE:
+            tb_dir = Path(cfg.logging.log_dir) / "tensorboard"
+            tb_dir.mkdir(parents=True, exist_ok=True)
+            self.tb_writer = SummaryWriter(log_dir=str(tb_dir))
+            log.info(f"TensorBoard logging enabled: {tb_dir}")
+        elif cfg.logging.get("use_tensorboard", False) and not TENSORBOARD_AVAILABLE:
+            log.warning("TensorBoard requested but not available. Install with: pip install tensorboard")
+        
+        # 12. Resume from checkpoint if specified
+        resume_path = cfg.checkpoint.get("resume_from")
+        if resume_path and Path(resume_path).exists():
+            self._load_checkpoint(resume_path)
+        
         log.info("DGPO Trainer initialized.")
+    
+    # ==========================================================================
+    # CHECKPOINT & RESUME METHODS
+    # ==========================================================================
+    
+    def _load_checkpoint(self, path: str) -> None:
+        """
+        Resume training from a saved checkpoint.
+        
+        Loads policy, value network, optimizers, and training state.
+        """
+        log.info(f"Resuming from checkpoint: {path}")
+        ckpt = torch.load(path, map_location=self.device)
+        
+        # Load model states
+        self.policy.load_state_dict(ckpt['policy_state_dict'])
+        self.value_net.load_state_dict(ckpt['value_state_dict'])
+        
+        # Load optimizer states
+        self.policy_optimizer.load_state_dict(ckpt['policy_optimizer'])
+        self.value_optimizer.load_state_dict(ckpt['value_optimizer'])
+        
+        # Restore training state
+        self.start_iteration = ckpt['iteration'] + 1
+        self.total_steps = ckpt.get('total_steps', 0)
+        
+        log.info(f"Resumed at iteration {self.start_iteration} with {self.total_steps} total steps")
+    
+    def _save_checkpoint(self, iteration: int, is_backup: bool = False) -> Path:
+        """
+        Save checkpoint atomically with all training state.
+        
+        Args:
+            iteration: Current training iteration
+            is_backup: If True, save to backup directory with rotation
+            
+        Returns:
+            Path to saved checkpoint
+        """
+        if is_backup:
+            save_dir = Path(self.cfg.checkpoint.backup_dir)
+            filename = f"dgpo_backup_iter_{iteration+1:04d}.pt"
+        else:
+            save_dir = Path(self.cfg.checkpoint.save_dir)
+            filename = f"dgpo_iter_{iteration+1:04d}.pt"
+        
+        save_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = save_dir / filename
+        
+        # Save complete training state
+        checkpoint = {
+            'iteration': iteration,
+            'policy_state_dict': self.policy.state_dict(),
+            'value_state_dict': self.value_net.state_dict(),
+            'policy_optimizer': self.policy_optimizer.state_dict(),
+            'value_optimizer': self.value_optimizer.state_dict(),
+            'total_steps': self.total_steps,
+            'config': OmegaConf.to_container(self.cfg, resolve=True),
+            'timestamp': datetime.now().isoformat(),
+        }
+        
+        torch.save(checkpoint, ckpt_path)
+        log.info(f"Saved {'backup' if is_backup else 'checkpoint'}: {ckpt_path}")
+        
+        # Cleanup old backups if this was a backup save
+        if is_backup:
+            self._cleanup_old_backups()
+        
+        return ckpt_path
+    
+    def _cleanup_old_backups(self) -> None:
+        """Keep only N most recent backups, delete older ones."""
+        backup_dir = Path(self.cfg.checkpoint.backup_dir)
+        if not backup_dir.exists():
+            return
+        
+        backups = sorted(backup_dir.glob("dgpo_backup_*.pt"))
+        keep = self.cfg.checkpoint.get("backups_to_keep", 3)
+        
+        if len(backups) > keep:
+            for old_backup in backups[:-keep]:
+                try:
+                    old_backup.unlink()
+                    log.info(f"Cleaned up old backup: {old_backup.name}")
+                except OSError as e:
+                    log.warning(f"Could not delete old backup {old_backup}: {e}")
+    
+    def _log_to_tensorboard(
+        self,
+        iteration: int,
+        rollout_stats: Dict[str, Any],
+        update_stats: Dict[str, Any]
+    ) -> None:
+        """Log metrics to TensorBoard."""
+        if not self.tb_writer:
+            return
+        
+        # Reward and success metrics
+        self.tb_writer.add_scalar("reward/mean", rollout_stats['mean_reward'], iteration)
+        self.tb_writer.add_scalar("reward/success_rate", rollout_stats['success_rate'], iteration)
+        
+        # Shadow mode metrics (policy vs expert)
+        self.tb_writer.add_scalar("shadow/pos_div_cm", rollout_stats['shadow_pos_div'] * 100, iteration)
+        self.tb_writer.add_scalar("shadow/orn_div_rad", rollout_stats['shadow_orn_div'], iteration)
+        self.tb_writer.add_scalar("shadow/grip_agreement", rollout_stats['grip_agreement'], iteration)
+        
+        # Loss metrics
+        self.tb_writer.add_scalar("loss/policy", update_stats['policy_loss'], iteration)
+        self.tb_writer.add_scalar("loss/value", update_stats['value_loss'], iteration)
+        
+        # Training progress
+        self.tb_writer.add_scalar("training/total_steps", self.total_steps, iteration)
+        self.tb_writer.add_scalar("training/episodes", rollout_stats['n_episodes'], iteration)
+    
+    # ==========================================================================
+    # BATCH PREPARATION
+    # ==========================================================================
     
     def _prepare_batch(
         self,
@@ -293,7 +549,15 @@ class DGPOTrainer:
     
     def collect_rollouts(self, n_steps: int) -> Dict[str, float]:
         """
-        Collects rollout data for n_steps using policy + divergence rewards.
+        Collects rollout data for n_steps using EXPERT EXECUTION (DAgger-style).
+        
+        KEY CHANGE: Expert actions are EXECUTED, policy predictions are for LEARNING only.
+        This guarantees successful trajectories while training the policy to match expert.
+        
+        Shadow Mode Logging:
+        - position_divergence: How far policy prediction is from expert target
+        - orientation_divergence: Rotation error between policy and expert
+        - gripper_agreement: Whether policy agrees with expert gripper command
         """
         self.buffer.clear()
         self.policy.eval()
@@ -301,6 +565,12 @@ class DGPOTrainer:
         episode_rewards = []
         episode_successes = []
         current_ep_reward = 0.0
+        
+        # === SHADOW MODE METRICS ===
+        shadow_pos_divergences = []  # Policy vs Expert position error
+        shadow_orn_divergences = []  # Policy vs Expert orientation error
+        gripper_agreements = []      # Policy agrees with expert gripper?
+        expert_phases = []           # Track expert FSM phases
         
         # Reset environment and expert
         self.env.reset()
@@ -315,10 +585,11 @@ class DGPOTrainer:
             curr_img = obs['image_primary']
             proprio = obs['proprio']
             
-            # 1. Get Expert's recommended pose
-            expert_pose, expert_grip, _ = self.expert.get_target_pose(obs)  # Returns (pose, gripper, info)
+            # 1. Get Expert's target pose (DGPOExpert FSM)
+            expert_pose, expert_grip, info = self.expert.get_target_pose(obs)
+            expert_phases.append(info.get('phase', 'UNKNOWN'))
             
-            # 2. Get Policy's predicted pose
+            # 2. Get Policy's predicted pose (SHADOW MODE - for learning only)
             batch = self._prepare_batch(prev_img, curr_img, goal_img, proprio)
             with torch.no_grad():
                 policy_out = self.policy(batch)
@@ -326,37 +597,60 @@ class DGPOTrainer:
             # Extract first step of pose chunk
             policy_pose = policy_out['pose_chunk'][0, 0].cpu().numpy()  # (7,)
             policy_grip_logit = policy_out['gripper_chunk'][0, 0].cpu().numpy()[0]
-            gripper_cmd = -1.0 if policy_grip_logit > 0 else 1.0
+            policy_grip_cmd = -1.0 if policy_grip_logit > 0 else 1.0
             
-            # 3. Compute joint action via IK
-            current_joints = self.env.data.qpos[:7].copy()
-            delta_joints = self.ik_solver.compute_delta_action(
-                target_ee_pose=policy_pose,
-                model=self.env.model,
-                data=self.env.data,
-                ee_site_id=self.env.ee_site_id,
-                joint_qpos_indices=np.arange(7),
-                effective_dt=self.effective_dt,
-                max_dq=self.max_dq
-            )
+            # === SHADOW MODE LOGGING ===
+            # Position divergence (meters)
+            pos_div = np.linalg.norm(policy_pose[:3] - expert_pose[:3])
+            shadow_pos_divergences.append(pos_div)
+            
+            # Orientation divergence (radians) - using quaternion distance
+            from scipy.spatial.transform import Rotation as R
+            try:
+                R_policy = R.from_quat(policy_pose[3:])
+                R_expert = R.from_quat(expert_pose[3:])
+                orn_div = (R_expert.inv() * R_policy).magnitude()
+            except:
+                orn_div = 0.0
+            shadow_orn_divergences.append(orn_div)
+            
+            # Gripper agreement
+            grip_agree = (policy_grip_cmd == expert_grip)
+            gripper_agreements.append(float(grip_agree))
+            
+            # 3. Compute joint action via IK - USING EXPERT POSE (THE FIX!)
+            try:
+                delta_joints = self.ik_solver.compute_delta_action(
+                    target_ee_pose=expert_pose,  # ← EXPERT pose, not policy!
+                    model=self.env.model,
+                    data=self.env.data,
+                    ee_site_id=self.env.ee_site_id,
+                    joint_qpos_indices=np.arange(7),
+                    effective_dt=self.effective_dt,
+                    max_dq=self.max_dq
+                )
+            except Exception as e:
+                log.warning(f"IK failed at step {step}: {e}")
+                delta_joints = np.zeros(7)
 
-            action = np.concatenate([delta_joints, [gripper_cmd]])
+            # Use EXPERT gripper command
+            action = np.concatenate([delta_joints, [expert_grip]])
             
-            # 4. Step environment
-            next_obs, base_reward, terminated, truncated, info = self.env.step(action)
+            # 4. Step environment (executing EXPERT action)
+            next_obs, base_reward, terminated, truncated, _ = self.env.step(action)
             next_obs = self.env.get_expert_obs()
-            done = terminated or truncated
+            done = terminated or truncated or self.expert.is_done()
             
-            # 5. Calculate DENSE divergence reward
-            achieved_ee = self.env.get_ee_pose()
+            # 5. Calculate DENSE divergence reward (policy vs expert)
+            # Note: This now measures policy PREDICTION quality, not execution quality
+            achieved_ee = self.env.get_ee_pose()  # Where robot actually is
             div_penalty = compute_step_divergence(
-                achieved_ee, expert_pose,
+                policy_pose, expert_pose,  # Compare policy prediction to expert
                 position_weight=self.cfg.reward.position_weight,
                 orientation_weight=self.cfg.reward.orientation_weight
             )
             
             # 6. Compute total reward
-            # Task reward: distance to goal
             obj_pos = next_obs['object_pos_world']
             goal_pos = next_obs['goal_pos_world']
             dist_to_goal = np.linalg.norm(obj_pos - goal_pos)
@@ -376,14 +670,14 @@ class DGPOTrainer:
             with torch.no_grad():
                 value = self.value_net(proprio_t).item()
             
-            # 8. Store in buffer (log_prob is placeholder for action-chunking policy)
+            # 8. Store in buffer
             self.buffer.add(
                 prev_img=prev_img,
                 curr_img=curr_img,
                 goal_img=goal_img,
                 proprio=proprio,
                 action=action,
-                log_prob=0.0,  # Note: For chunking policies, we use MSE loss instead
+                log_prob=0.0,
                 reward=total_reward,
                 value=value,
                 done=done,
@@ -411,6 +705,11 @@ class DGPOTrainer:
         
         self.policy.train()
         
+        # === SHADOW MODE SUMMARY ===
+        mean_pos_div = np.mean(shadow_pos_divergences) if shadow_pos_divergences else 0.0
+        mean_orn_div = np.mean(shadow_orn_divergences) if shadow_orn_divergences else 0.0
+        grip_agreement_rate = np.mean(gripper_agreements) if gripper_agreements else 0.0
+        
         return {
             "mean_reward": np.mean(episode_rewards) if episode_rewards else 0.0,
             "success_rate": np.mean(episode_successes) if episode_successes else 0.0,
@@ -418,7 +717,11 @@ class DGPOTrainer:
             "mean_div": np.mean([
                 compute_step_divergence(a, e)
                 for a, e in zip(self.buffer.achieved_ee_poses, self.buffer.expert_ee_poses)
-            ])
+            ]),
+            # Shadow Mode Metrics
+            "shadow_pos_div": mean_pos_div,
+            "shadow_orn_div": mean_orn_div,
+            "grip_agreement": grip_agreement_rate,
         }
     
     def update_policy(self) -> Dict[str, float]:
@@ -534,45 +837,91 @@ class DGPOTrainer:
         }
     
     def train(self):
-        """Main training loop."""
-        log.info(f"Starting DGPO training for {self.cfg.training.total_iterations} iterations")
+        """
+        Main training loop with robust logging and checkpointing.
         
-        # Create output directory
-        output_dir = Path(self.cfg.training.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        Features:
+        - Resumes from start_iteration if resuming from checkpoint
+        - CSV metrics logging for all training metrics
+        - TensorBoard logging for visualization
+        - Regular checkpoints at save_freq intervals
+        - Backup checkpoints at backup_freq intervals with rotation
+        """
+        total_iters = self.cfg.training.total_iterations
+        log.info(f"Starting DGPO training for {total_iters} iterations")
+        if self.start_iteration > 0:
+            log.info(f"Resuming from iteration {self.start_iteration}")
         
-        for iteration in range(self.cfg.training.total_iterations):
-            self.iteration = iteration
-            
-            # Collect rollouts
-            rollout_stats = self.collect_rollouts(self.cfg.training.steps_per_iter)
-            
-            # Update policy
-            update_stats = self.update_policy()
-            
-            # Logging
-            log.info(
-                f"Iter {iteration:4d} | "
-                f"R: {rollout_stats['mean_reward']:.2f} | "
-                f"Succ: {rollout_stats['success_rate']*100:.1f}% | "
-                f"Div: {rollout_stats['mean_div']:.4f} | "
-                f"PL: {update_stats['policy_loss']:.4f} | "
-                f"VL: {update_stats['value_loss']:.4f}"
-            )
-            
-            # Save checkpoint
-            if (iteration + 1) % self.cfg.training.save_freq == 0:
-                ckpt_path = output_dir / f"dgpo_iter_{iteration+1:04d}.pt"
-                torch.save({
-                    'iteration': iteration,
-                    'policy_state_dict': self.policy.state_dict(),
-                    'value_state_dict': self.value_net.state_dict(),
-                    'policy_optimizer': self.policy_optimizer.state_dict(),
-                    'value_optimizer': self.value_optimizer.state_dict(),
-                }, ckpt_path)
-                log.info(f"Saved checkpoint: {ckpt_path}")
+        # Setup directories
+        log_dir = Path(self.cfg.logging.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
         
-        log.info("Training complete!")
+        # Initialize CSV logger
+        csv_path = log_dir / self.cfg.logging.csv_log_name
+        is_resuming = self.start_iteration > 0
+        csv_logger = MetricsLogger(csv_path, resume=is_resuming)
+        
+        try:
+            # Main training loop - resumes from start_iteration
+            for iteration in range(self.start_iteration, total_iters):
+                self.iteration = iteration
+                
+                # Collect rollouts
+                rollout_stats = self.collect_rollouts(self.cfg.training.steps_per_iter)
+                
+                # Update policy
+                update_stats = self.update_policy()
+                
+                # Console logging - Main metrics
+                log.info(
+                    f"Iter {iteration:4d} | "
+                    f"R: {rollout_stats['mean_reward']:.2f} | "
+                    f"Succ: {rollout_stats['success_rate']*100:.1f}% | "
+                    f"Eps: {rollout_stats['n_episodes']} | "
+                    f"PL: {update_stats['policy_loss']:.4f} | "
+                    f"VL: {update_stats['value_loss']:.4f}"
+                )
+                
+                # Console logging - Shadow Mode Performance
+                log.info(
+                    f"         Shadow Mode | "
+                    f"PosDiv: {rollout_stats['shadow_pos_div']*100:.2f}cm | "
+                    f"OrnDiv: {rollout_stats['shadow_orn_div']:.3f}rad | "
+                    f"GripAgree: {rollout_stats['grip_agreement']*100:.1f}%"
+                )
+                
+                # CSV logging
+                if (iteration + 1) % self.cfg.logging.get("log_every_n_iters", 1) == 0:
+                    csv_logger.log_step(
+                        iteration=iteration,
+                        rollout_stats=rollout_stats,
+                        update_stats=update_stats,
+                        total_steps=self.total_steps
+                    )
+                
+                # TensorBoard logging
+                self._log_to_tensorboard(iteration, rollout_stats, update_stats)
+                
+                # Regular checkpoint saving
+                save_freq = self.cfg.checkpoint.get("save_freq", 10)
+                if (iteration + 1) % save_freq == 0:
+                    self._save_checkpoint(iteration, is_backup=False)
+                
+                # Backup checkpoint saving (more frequent for safety)
+                backup_freq = self.cfg.checkpoint.get("backup_freq", 5)
+                if (iteration + 1) % backup_freq == 0:
+                    self._save_checkpoint(iteration, is_backup=True)
+            
+            # Save final checkpoint
+            self._save_checkpoint(total_iters - 1, is_backup=False)
+            log.info("Training complete!")
+            
+        finally:
+            # Cleanup resources
+            csv_logger.close()
+            if self.tb_writer:
+                self.tb_writer.close()
+                log.info("TensorBoard writer closed.")
 
 
 # ==============================================================================

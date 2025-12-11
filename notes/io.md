@@ -791,6 +791,8 @@ ining: |          | 0/? [00:00<?, ?it/s]/usr/local/lib/python3.12/dist-packages/
   return data.pin_memory(device)
 /usr/local/lib/python3.12/dist-packages/torch/utils/data/_utils/pin_memory.py:57: DeprecationWarning: The argument 'device' of Tensor.is_pinned() is deprecated. Please do not pass this argument. (Triggered internally at /pytorch/aten/src/ATen/native/Memory.cpp:31.)
   return data.pin_memory(device)
+
+  
 Training: |          | 1930/? [15:19<00:00,  2.10it/s, v_num=d6w3, train/loss_step=0.110, train/loss_pose_step=0.0361, train/loss_grip_step=0.0384, train/loss_phase_step=0.0715][2025-12-09 13:28:45,934][train_semantic_planner][INFO] - End of epoch 96: Triggering atomic failsafe backup...
 `weights_only` was not set, defaulting to `False`.
 [2025-12-09 13:29:19,880][train_semantic_planner][INFO] - Failsafe backup for epoch 96 saved successfully to /content/drive/MyDrive/pda/models/backups/awr/awr_backup_epoch_096.ckpt.
