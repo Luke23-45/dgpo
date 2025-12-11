@@ -155,7 +155,7 @@ class ExpertDatasetWriter:
         lmdb_path = self._lmdb_path
 
         # open env (match same args as save())
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=60, subdir=False)
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=40, subdir=False)
         try:
             with env.begin(write=True) as txn:
                 for ep_dict in episode_list:
@@ -185,6 +185,12 @@ class ExpertDatasetWriter:
 
                     gt_gripper_arr = np.stack([o["gt_gripper"] for o in ep_dict["obs_list"]]).astype(np.float32)
                     self._write_raw_numpy(txn, ep_meta, prefix, "gt_gripper", gt_gripper_arr)
+
+                    # [CRITICAL FIX] Write the EXPERT TARGET POSE - the commanded targets, NOT achieved poses
+                    # This is the correct supervision signal for goal-directed behavior
+                    if "expert_target_pose" in ep_dict["obs_list"][0]:
+                        target_poses_arr = np.stack([o["expert_target_pose"] for o in ep_dict["obs_list"]]).astype(np.float32)
+                        self._write_raw_numpy(txn, ep_meta, prefix, "expert_target_pose", target_poses_arr)
 
                     self.index_data["episodes"].append(ep_meta)
                     self._episode_id_counter += 1
@@ -217,7 +223,7 @@ class ExpertDatasetWriter:
 
         # --- 2. Open LMDB Environment ---
         # Use a large map size for a 25GB+ dataset. 50GB is safe.
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=60, subdir=False) 
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=40, subdir=False) 
         
         try:
             with env.begin(write=True) as txn: 
@@ -260,6 +266,12 @@ class ExpertDatasetWriter:
                     # F) 'camera_params' (Pickled List of Dictionaries)
                     camera_params_list = [o["camera_params"] for o in ep_dict["obs_list"]]
                     self._write_pickled_modality(txn, ep_meta, episode_key_prefix, "camera_params", camera_params_list)
+                    
+                    # G) 'expert_target_pose' - [CRITICAL FIX] The commanded targets for training
+                    if "expert_target_pose" in ep_dict["obs_list"][0]:
+                        target_poses_arr = np.stack([o["expert_target_pose"] for o in ep_dict["obs_list"]]).astype(np.float32)
+                        self._write_raw_numpy(txn, ep_meta, episode_key_prefix, "expert_target_pose", target_poses_arr)
+                    
                     # --- 4. Add this episode's metadata to the main index ---
                     self.index_data["episodes"].append(ep_meta)
 
@@ -900,6 +912,10 @@ class ExpertDataset(IterableDataset):
                             "py_grasp_state": self._env._is_physically_grasped,
                             "action": full_action,
                             "expert_info": info,
+                            # [CRITICAL FIX] Store the EXPERT TARGET POSE - this is where
+                            # the expert FSM wants the EE to go, NOT where it actually is.
+                            # Training on this teaches the model goal-directed behavior.
+                            "expert_target_pose": target_pose.copy(),
                             "ik_failed": ik_failed,
                             "expert_state_str": info["expert_state_str"]
                         }
@@ -986,6 +1002,8 @@ class ExpertDataset(IterableDataset):
                             full_obs["gt_phase"] = np.array([step_data["expert_info"]["gt_phase"]], dtype=np.int32)
                             full_obs["gt_gripper"] = np.array([step_data["expert_info"]["gt_gripper_intent"]], dtype=np.float32)
                             full_obs["expert_state"] = step_data["expert_state_str"]
+                            # [CRITICAL FIX] Store the expert's COMMANDED target pose for training
+                            full_obs["expert_target_pose"] = step_data["expert_target_pose"].astype(np.float32)
                             
                             processed_obs_list.append({k: copy.deepcopy(v) for k, v in full_obs.items()})
                             processed_act_list.append(step_data["action"].copy())

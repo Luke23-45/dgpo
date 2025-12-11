@@ -84,7 +84,6 @@ class SemanticPlannerDataset(EgoPlannerDataset):
                 "advantages", 
                 "gt_phase", 
                 "gt_gripper", 
-                "ee_pose_world", 
                 "image_primary",
                 "proprio"
             ]
@@ -95,6 +94,15 @@ class SemanticPlannerDataset(EgoPlannerDataset):
                     f"Dataset is missing required modalities: {missing_keys}. "
                     "Please regenerate data with the updated Expert and Advantage Calculator."
                 )
+            
+            # Check for the critical expert_target_pose modality
+            if "expert_target_pose" in modalities:
+                log.info("✓ Dataset has 'expert_target_pose' - will train on CORRECT targets")
+            else:
+                log.warning("⚠ Dataset missing 'expert_target_pose' - falling back to 'ee_pose_world'")
+                log.warning("  This will cause the HOVERING BUG. Please regenerate the dataset!")
+                if "ee_pose_world" not in modalities:
+                    raise RuntimeError("Dataset missing both 'expert_target_pose' and 'ee_pose_world'")
         
         log.info("Dataset loaded successfully. Ready for Trajectory & Phase training.")
 
@@ -165,7 +173,19 @@ class SemanticPlannerDataset(EgoPlannerDataset):
 
             # 3. Load Raw Data
             all_images = get_mod("image_primary")
-            all_poses = get_mod("ee_pose_world")
+            
+            # [CRITICAL FIX] Use EXPERT TARGET POSE for training, NOT achieved ee_pose_world
+            # Target poses are what the expert FSM commanded - where the EE should GO
+            # Achieved poses (ee_pose_world) are where the EE ended up - nearly identical to previous pose
+            # Training on achieved poses caused the model to predict static positions (hovering bug)
+            if "expert_target_pose" in ep_meta["modalities"]:
+                all_poses = get_mod("expert_target_pose")
+            else:
+                # Fallback for old datasets without expert_target_pose
+                log.warning(f"Dataset missing 'expert_target_pose', falling back to 'ee_pose_world'. "
+                           "This will NOT fix the hovering bug. Please regenerate the dataset.")
+                all_poses = get_mod("ee_pose_world")
+            
             all_advantages = get_mod("advantages")
             all_proprio = get_mod("proprio")
             all_gt_phases = get_mod("gt_phase")
