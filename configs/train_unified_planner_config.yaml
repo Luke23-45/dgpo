@@ -1,0 +1,96 @@
+# FILE: configs/train_unified_planner_config.yaml
+# Production-grade config for UnifiedDiffusionPlanner training
+
+# Seed for reproducibility
+seed: 42
+
+# ==============================================================================
+# MODEL CONFIGURATION
+# ==============================================================================
+model:
+  # Action space
+  action_chunk_size: 8          # K future steps to predict
+  action_dim: 7                 # Delta pose (dx, dy, dz, dqx, dqy, dqz, dqw)
+  proprio_dim: 22               # Proprioception dimension
+  
+  # Vision backbone
+  vision_backbone_model: "google/siglip-base-patch16-224"
+  vision_feature_dim: 768       # SigLIP-base output dim
+  
+  # Fusion transformer
+  fusion_layers: 4
+  fusion_heads: 8
+  
+  # Diffusion head
+  d_model: 512                  # Diffusion transformer dimension
+  denoiser_layers: 6
+  denoiser_heads: 8
+  dropout: 0.1
+  
+  # Diffusion process
+  diffusion_timesteps: 100
+  inference_steps: 10           # DDIM sampling steps
+  beta_schedule: "cosine"
+  
+  # Classifier-free guidance
+  p_uncond: 0.1                 # Unconditional training probability
+  guidance_scale: 1.5           # CFG scale during inference
+  
+  # SemanticPlanner features
+  use_phase_prediction: true    # Auxiliary phase prediction loss
+  use_separate_heads: true      # Separate pose/gripper heads
+  phase_loss_weight: 0.1        # Weight for phase classification loss
+  num_task_phases: 5
+
+# ==============================================================================
+# DATASET CONFIGURATION
+# ==============================================================================
+dataset:
+  train_path: "/path/to/your/training_dataset.lmdb"
+  val_path: "/path/to/your/validation_dataset.lmdb"  # Optional
+  num_workers: 4
+  use_augmentation: true
+
+# ==============================================================================
+# TRAINING CONFIGURATION
+# ==============================================================================
+training:
+  # Optimization
+  batch_size: 32
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  backbone_lr_factor: 0.1       # Vision backbone gets 0.1x LR
+  
+  # Schedule
+  warmup_steps: 1000
+  max_epochs: 100
+  max_steps: -1                 # -1 = unlimited (use epochs)
+  
+  # Regularization
+  gradient_clip_val: 1.0
+  
+  # Checkpointing
+  val_check_interval: 1.0       # Validate every epoch
+  log_every_n_steps: 50
+  early_stopping_patience: 15   # 0 = disabled
+  
+  # Failsafe backups
+  backup_every_n_epochs: 5
+  backups_to_keep: 3
+  backup_dir: "checkpoints/backup"
+  
+  # Pretrained initialization (from BC transfer)
+  pretrained_checkpoint: null   # e.g., "checkpoints/unified_planner_initialized.ckpt"
+  resume_from_checkpoint: null  # Resume full training state
+  
+  # Output
+  output_dir: "outputs/unified_planner"
+
+# ==============================================================================
+# LOGGING CONFIGURATION
+# ==============================================================================
+logging:
+  use_wandb: true
+  wandb_mode: "offline"         # "offline" or "online"
+  wandb_project: "unified-diffusion-planner"
+  run_name: "udp-training-v1"

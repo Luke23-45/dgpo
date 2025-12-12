@@ -18,6 +18,75 @@ import logging
 
 logger = logging.getLogger("lmdb_utils")
 
+
+# =============================================================================
+# DYNAMIC MAP SIZE CALCULATION
+# =============================================================================
+
+# Constants for size estimation (bytes per episode)
+BYTES_PER_EPISODE_ESTIMATE = 100 * 1024 * 1024  # ~100 MB per episode (conservative)
+MIN_MAP_SIZE_GB = 1.0  # Minimum 1 GB
+MAX_MAP_SIZE_GB = 100.0  # Maximum 100 GB (reasonable limit)
+SAFETY_FACTOR = 1.5  # 50% extra for safety margin
+
+
+def calculate_lmdb_map_size_gb(
+    num_episodes: int,
+    bytes_per_episode: int = BYTES_PER_EPISODE_ESTIMATE,
+    safety_factor: float = SAFETY_FACTOR,
+    min_size_gb: float = MIN_MAP_SIZE_GB,
+    max_size_gb: float = MAX_MAP_SIZE_GB,
+) -> float:
+    """
+    Calculate the appropriate LMDB map size based on expected number of episodes.
+    
+    This function dynamically computes the map size to avoid:
+    - MDB_MAP_FULL errors from undersized databases
+    - Wasted disk space from oversized allocations
+    
+    Args:
+        num_episodes: Expected number of episodes to store
+        bytes_per_episode: Estimated bytes per episode (~100MB typical for robot demos)
+        safety_factor: Multiplier for safety margin (1.5 = 50% extra)
+        min_size_gb: Minimum map size in GB
+        max_size_gb: Maximum map size in GB
+        
+    Returns:
+        Recommended map size in GB
+        
+    Example:
+        >>> calculate_lmdb_map_size_gb(100)  # 100 episodes
+        15.0  # Returns ~15 GB (100 ep * 100MB * 1.5 safety)
+    """
+    # Calculate raw estimate
+    raw_bytes = num_episodes * bytes_per_episode * safety_factor
+    raw_gb = raw_bytes / (1024 ** 3)
+    
+    # Clamp to bounds
+    clamped_gb = max(min_size_gb, min(raw_gb, max_size_gb))
+    
+    # Round up to nearest 0.5 GB for cleaner values
+    rounded_gb = round(clamped_gb * 2) / 2
+    
+    logger.debug(f"LMDB map size: {num_episodes} episodes -> {rounded_gb:.1f} GB")
+    
+    return rounded_gb
+
+
+def calculate_lmdb_map_size_bytes(num_episodes: int, **kwargs) -> int:
+    """
+    Calculate LMDB map size in bytes (for direct use with lmdb.open).
+    
+    Args:
+        num_episodes: Expected number of episodes
+        **kwargs: Additional args passed to calculate_lmdb_map_size_gb
+        
+    Returns:
+        Map size in bytes
+    """
+    size_gb = calculate_lmdb_map_size_gb(num_episodes, **kwargs)
+    return int(size_gb * 1024 ** 3)
+
 def open_lmdb_env(
     path: str,
     readonly: bool = False,

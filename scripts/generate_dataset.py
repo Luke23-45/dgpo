@@ -63,7 +63,12 @@ def merge_sota_shards(shard_dirs: list[Path], out_dir: Path, run_name: str, tota
 
     # We need a central LMDB writer for the merged data
     final_lmdb_path = final_dataset_path / f"{final_dataset_name}.lmdb"
-    map_size = int(2 * 1024**3)  # 100 GB, adjust as needed
+    
+    # Dynamic map size based on expected episodes
+    from utils.lmdb_utils import calculate_lmdb_map_size_bytes
+    map_size = calculate_lmdb_map_size_bytes(total_target)
+    logger.info(f"LMDB map size: {map_size / (1024**3):.1f} GB for {total_target} episodes")
+    
     final_env = lmdb.open(str(final_lmdb_path), map_size=map_size, subdir=False, readonly=False, lock=True)
 
     try:

@@ -300,7 +300,12 @@ def main(args):
 
     worker_args = [{"episode_idx": i, "source_db_path": str(dest_path), "heatmap_config": {"height": 56, "width": 56, "sigma": args.sigma}} for i in range(num_episodes)]
 
-    dest_env = lmdb.open(str(dest_path), map_size=int(7.8 * 1024**3), subdir=False, readonly=False, lock=True)
+    # Dynamic map size based on episode count
+    from utils.lmdb_utils import calculate_lmdb_map_size_bytes
+    map_size = calculate_lmdb_map_size_bytes(num_episodes)
+    logger.info(f"LMDB map size: {map_size / (1024**3):.1f} GB for {num_episodes} episodes")
+    
+    dest_env = lmdb.open(str(dest_path), map_size=map_size, subdir=False, readonly=False, lock=True)
 
     try:
         if args.num_workers > 0:

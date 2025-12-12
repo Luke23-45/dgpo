@@ -92,7 +92,8 @@ class ExpertDatasetWriter:
         out_dir: str,
         run_name: Optional[str] = None,
         image_compression: str = "jpeg",
-        jpeg_quality: int = 90
+        jpeg_quality: int = 90,
+        expected_episodes: int = 100,  # NEW: For dynamic LMDB map size
     ):
         if not CV2_AVAILABLE:
             raise ImportError("cv2 (OpenCV) is required for the SOTA ExpertDatasetWriter. Please install it.")
@@ -111,8 +112,13 @@ class ExpertDatasetWriter:
         self.image_compression = image_compression
         self.jpeg_quality = jpeg_quality
         self.index_data = {"episodes": []}
-
+        
+        # Dynamic LMDB map size based on expected episodes (~100MB per episode)
+        from utils.lmdb_utils import calculate_lmdb_map_size_gb
+        self.map_size_gb = calculate_lmdb_map_size_gb(expected_episodes)
+        
         logger.info(f"SOTA ExpertDatasetWriter initialized. Compression: {self.image_compression}")
+        logger.info(f"  Expected episodes: {expected_episodes}, Map size: {self.map_size_gb:.1f} GB")
 
     def add_episode(self, ep_dict: Dict[str, Any]):
         """
@@ -154,8 +160,8 @@ class ExpertDatasetWriter:
 
         lmdb_path = self._lmdb_path
 
-        # open env (match same args as save())
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=2, subdir=False)
+        # open env with dynamic map size
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=self.map_size_gb, subdir=False)
         try:
             with env.begin(write=True) as txn:
                 for ep_dict in episode_list:
@@ -222,8 +228,8 @@ class ExpertDatasetWriter:
         logger.info(f"Saving {len(self.episodes_in_memory)} episodes to {lmdb_path}...")
 
         # --- 2. Open LMDB Environment ---
-        # Use a large map size for a 25GB+ dataset. 50GB is safe.
-        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=2, subdir=False) 
+        # Dynamic map size based on expected episodes
+        env = open_lmdb_env(str(lmdb_path), readonly=False, lock=True, map_size_gb=self.map_size_gb, subdir=False) 
         
         try:
             with env.begin(write=True) as txn: 

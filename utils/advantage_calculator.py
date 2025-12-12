@@ -258,8 +258,10 @@ def main():
     with open(dest_index_path, 'r') as f:
         index_data = json.load(f)
         
-    # Open LMDB for writing
-    env = lmdb.open(str(dest_path), map_size=int(2 * 1024**3), subdir=False, readonly=False, lock=True)
+    # Open LMDB for writing with dynamic map size
+    from utils.lmdb_utils import calculate_lmdb_map_size_bytes
+    map_size = calculate_lmdb_map_size_bytes(num_episodes)
+    env = lmdb.open(str(dest_path), map_size=map_size, subdir=False, readonly=False, lock=True)
     
     # Stats for Audit Report
     all_advs = []
