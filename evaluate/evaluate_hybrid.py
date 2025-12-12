@@ -1,19 +1,20 @@
 # FILE: evaluate/evaluate_hybrid.py
 """
-Hybrid Policy-Expert Evaluation Script
+Hybrid Policy-Expert Evaluation Script (Enhanced Phase-Based Handoff)
 
-This diagnostic script tests whether the trained policy can handle LIFT and PLACE
-phases if the expert handles the initial APPROACH and GRASP phases.
+This diagnostic script tests policy capabilities by having the expert handle
+initial phases and then handing off to the policy at a specified phase.
 
-Flow:
-1. EXPERT handles: moving to object and grasping it
-2. POLICY takes over: lifting, moving to goal, and placing
-
-This helps diagnose whether the policy has learned post-grasp behavior even if
-it struggles with the initial approach phase.
+Supported Handoff Phases:
+- MOVE_TO_PRE_GRASP: Handoff before any approach (pure policy)
+- DESCEND_TO_GRASP: Expert positions above object, policy descends
+- GRASP: Expert grasps, policy handles post-grasp
+- LIFT: Expert lifts, policy moves to goal
+- MOVE_TO_GOAL: Expert moves near goal, policy places
+- DONE: Expert handles entire task (pure expert)
 
 Usage:
-    python evaluate/evaluate_hybrid.py --checkpoint outputs/dagger_runs/dagger_iter_0009.pt
+    python evaluate/evaluate_hybrid.py --checkpoint outputs/dagger_runs/dagger_iter_0009.pt --handoff_phase GRASP
 """
 
 import argparse
@@ -50,6 +51,44 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 log = logging.getLogger("Hybrid_Eval")
+
+# Expert phases in order of task progression
+EXPERT_PHASES = [
+    "MOVE_TO_PRE_GRASP",
+    "PREPARE_GRIPPER",
+    "DESCEND_TO_GRASP",
+    "GRASP",
+    "LIFT",
+    "MOVE_TO_GOAL",
+    "PREPARE_PLACE",
+    "DESCEND_TO_PLACE",
+    "AWAIT_STABLE_PLACEMENT",
+    "RELEASE",
+    "RETRACT",
+    "DONE"
+]
+
+# Simplified handoff points for command line
+HANDOFF_CHOICES = [
+    "policy_only",       # Pure policy from start
+    "after_approach",    # Expert moves above object, then handoff
+    "after_descend",     # Expert descends to grasp height, then handoff
+    "after_grasp",       # Expert grasps object, then handoff
+    "after_lift",        # Expert lifts object, then handoff
+    "after_move",        # Expert moves to goal area, then handoff
+    "expert_only"        # Expert handles entire task
+]
+
+# Map handoff choices to the phase after which handoff occurs
+HANDOFF_PHASE_MAP = {
+    "policy_only": None,  # Immediate handoff
+    "after_approach": "PREPARE_GRIPPER",
+    "after_descend": "DESCEND_TO_GRASP",
+    "after_grasp": "GRASP",
+    "after_lift": "LIFT",
+    "after_move": "MOVE_TO_GOAL",
+    "expert_only": "DONE"
+}
 
 
 # ==============================================================================
@@ -225,6 +264,18 @@ class HybridEvaluator:
         
         return np.concatenate([delta_joints, [gripper_cmd]]), target_pose
     
+    def _get_expert_state(self, expert) -> str:
+        """Get current expert state machine phase as string."""
+        # ScriptedExpert uses self._state as a string
+        if hasattr(expert, '_state') and isinstance(expert._state, str):
+            return expert._state
+        elif hasattr(expert, 'state') and isinstance(expert.state, str):
+            return expert.state
+        elif hasattr(expert, 'state') and hasattr(expert.state, 'name'):
+            return expert.state.name
+        else:
+            return "UNKNOWN"
+    
     def run_episode(
         self,
         episode_id: int,
@@ -233,13 +284,16 @@ class HybridEvaluator:
         handoff_mode: str = "after_grasp"
     ) -> Tuple[bool, str, Dict]:
         """
-        Run a single hybrid evaluation episode.
+        Run a single hybrid evaluation episode with phase-based handoff.
         
-        handoff_mode options:
-        - "after_grasp": Expert until object is grasped, then policy takes over
-        - "after_lift": Expert until object is lifted, then policy takes over
-        - "policy_only": Pure policy evaluation (for baseline comparison)
-        - "expert_only": Pure expert evaluation (sanity check)
+        handoff_mode options (from HANDOFF_CHOICES):
+        - "policy_only": Policy from start
+        - "after_approach": Expert positions above object
+        - "after_descend": Expert descends to grasp height
+        - "after_grasp": Expert grasps object
+        - "after_lift": Expert lifts object
+        - "after_move": Expert moves to goal area
+        - "expert_only": Expert handles entire task
         """
         # Reset environment
         self.env.reset(seed=seed)
@@ -304,21 +358,32 @@ class HybridEvaluator:
             
             # === HANDOFF LOGIC ===
             if current_mode == self.EXPERT_MODE:
-                # Check handoff conditions
-                should_handoff = False
+                # Get current expert phase
+                expert_state_str = self._get_expert_state(expert)
                 
-                if handoff_mode == "after_grasp" and grasp_achieved:
-                    should_handoff = True
-                elif handoff_mode == "after_lift" and lift_achieved:
-                    should_handoff = True
+                # Check handoff conditions based on phase map
+                should_handoff = False
+                handoff_trigger_phase = HANDOFF_PHASE_MAP.get(handoff_mode)
+                
+                if handoff_mode == "policy_only":
+                    should_handoff = True  # Immediate handoff
                 elif handoff_mode == "expert_only":
                     should_handoff = False  # Never handoff
+                elif handoff_trigger_phase:
+                    # Check if expert has completed the trigger phase
+                    trigger_idx = EXPERT_PHASES.index(handoff_trigger_phase) if handoff_trigger_phase in EXPERT_PHASES else -1
+                    current_idx = EXPERT_PHASES.index(expert_state_str) if expert_state_str in EXPERT_PHASES else 0
+                    
+                    if current_idx > trigger_idx:
+                        should_handoff = True
+                        log.info(f"  Step {step}: Phase {expert_state_str} > {handoff_trigger_phase}")
                 
                 if should_handoff:
                     current_mode = self.POLICY_MODE
                     handoff_step = step
                     metrics["handoff_step"] = step
-                    log.info(f"  Step {step}: === HANDOFF TO POLICY ===")
+                    metrics["handoff_phase"] = expert_state_str
+                    log.info(f"  Step {step}: === HANDOFF TO POLICY (after {expert_state_str}) ===")
             
             # === GET ACTION ===
             if current_mode == self.EXPERT_MODE:
@@ -518,8 +583,8 @@ def main():
     )
     parser.add_argument(
         "--handoff_mode", type=str, default="after_grasp",
-        choices=["after_grasp", "after_lift", "policy_only", "expert_only"],
-        help="When to handoff from expert to policy"
+        choices=HANDOFF_CHOICES,
+        help="When to handoff from expert to policy. Options: " + ", ".join(HANDOFF_CHOICES)
     )
     parser.add_argument(
         "--xml_path", type=str, default="envs/panda_pick_place.xml",

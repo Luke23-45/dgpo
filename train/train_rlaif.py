@@ -359,10 +359,15 @@ class RLAIFTrainer:
             self.value_net.parameters(), lr=cfg.optimizer.value_lr
         )
         
-        # 8. Image transform
+        # 8. Image transform - MUST EXACTLY MATCH BC TRAINING!
+        # BC model was trained with:
+        #   Resize(224, BICUBIC)
+        #   ToTensor() -> [0, 1]
+        #   Normalize(mean=[0.5]*3, std=[0.5]*3) -> [-1, 1]
         self.transform = transforms.Compose([
-            transforms.Resize((224, 224), antialias=True),
-            transforms.ToTensor()
+            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
         
         # 9. Rollout buffer
@@ -502,6 +507,11 @@ class RLAIFTrainer:
         episode_rewards = []
         episode_successes = []
         current_ep_reward = 0.0
+        episode_step = 0  # Track steps within current episode
+        
+        # Episode length limits from config
+        max_episode_steps = self.cfg.training.get("max_episode_steps", 300)
+        div_threshold = self.cfg.training.get("divergence_threshold", 0.15)  # 15cm
         
         # Expert alignment metrics
         pos_divergences = []
@@ -537,6 +547,15 @@ class RLAIFTrainer:
             pos_div = np.linalg.norm(policy_pose[:3] - expert_pose[:3])
             pos_divergences.append(pos_div)
             
+            # DEBUG: Log first 5 steps of first episode to diagnose
+            if step < 5 and len(episode_rewards) == 0:
+                current_ee = obs['ee_pose_world'][:3]
+                log.info(f"[DEBUG Step {step}] State: {info.get('expert_state_str', '?')}")
+                log.info(f"  Current EE:  {current_ee}")
+                log.info(f"  Policy Pred: {policy_pose[:3]} (diff from EE: {np.linalg.norm(policy_pose[:3] - current_ee)*100:.1f}cm)")
+                log.info(f"  Expert Tgt:  {expert_pose[:3]} (diff from EE: {np.linalg.norm(expert_pose[:3] - current_ee)*100:.1f}cm)")
+                log.info(f"  PosDiv: {pos_div*100:.1f}cm")
+            
             try:
                 from scipy.spatial.transform import Rotation as R
                 R_policy = R.from_quat(policy_pose[3:])
@@ -567,7 +586,16 @@ class RLAIFTrainer:
             # 4. Step environment (executing POLICY action)
             next_obs, _, terminated, truncated, _ = self.env.step(action)
             next_obs = self.env.get_expert_obs()
-            done = terminated or truncated or self.expert.is_done()
+            episode_step += 1
+            
+            # Episode termination conditions:
+            # 1. Environment terminated/truncated
+            # 2. Expert says done (task complete)
+            # 3. Episode too long (prevent runaway)
+            # 4. Policy diverged too much (reset and try again)
+            episode_timeout = episode_step >= max_episode_steps
+            high_divergence = pos_div > div_threshold
+            done = terminated or truncated or self.expert.is_done() or episode_timeout or high_divergence
             
             # 5. Calculate reward based on expert alignment and task success
             div_penalty = compute_step_divergence(
@@ -588,7 +616,10 @@ class RLAIFTrainer:
             success = dist_to_goal < 0.05
             success_bonus = self.cfg.reward.success_bonus if success else 0.0
             
-            total_reward = task_reward + alignment_reward + success_bonus
+            # Penalty for timeout/divergence (encourage completing quickly)
+            termination_penalty = -10.0 if (episode_timeout or high_divergence) and not success else 0.0
+            
+            total_reward = task_reward + alignment_reward + success_bonus + termination_penalty
             current_ep_reward += total_reward
             
             # 6. Get value estimate
@@ -621,6 +652,7 @@ class RLAIFTrainer:
                 episode_rewards.append(current_ep_reward)
                 episode_successes.append(float(success))
                 current_ep_reward = 0.0
+                episode_step = 0  # Reset episode step counter
                 
                 # Reset
                 self.env.reset()

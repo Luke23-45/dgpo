@@ -64,6 +64,8 @@ optimizer:
 training:
   total_iterations: 200
   steps_per_iter: 2048  # Steps collected per iteration (on-policy)
+  max_episode_steps: 300  # Terminate episodes after this many steps
+  divergence_threshold: 0.15  # Terminate if policy diverges > 15cm from expert
 
 # --- Logging Configuration ---
 logging:

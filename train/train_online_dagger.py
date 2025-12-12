@@ -106,10 +106,12 @@ class DAggerOrchestrator:
             use_aug=False
         )
         
-        # Transforms
+        # Transforms - MUST EXACTLY MATCH BC TRAINING!
+        # BC uses: Resize(224, BICUBIC) + ToTensor() + Normalize(0.5, 0.5) -> [-1, 1]
         self.transform = transforms.Compose([
-            transforms.Resize((224, 224), antialias=True),
-            transforms.ToTensor()
+            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
 
         # Tuned Thresholds
