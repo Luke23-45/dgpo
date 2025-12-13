@@ -27,7 +27,7 @@ logger = logging.getLogger("lmdb_utils")
 BYTES_PER_EPISODE_ESTIMATE = 100 * 1024 * 1024  # ~100 MB per episode (conservative)
 MIN_MAP_SIZE_GB = 1.0  # Minimum 1 GB
 MAX_MAP_SIZE_GB = 100.0  # Maximum 100 GB (reasonable limit)
-SAFETY_FACTOR = 1.5  # 50% extra for safety margin
+SAFETY_FACTOR = 1.2  # 50% extra for safety margin
 
 
 def calculate_lmdb_map_size_gb(

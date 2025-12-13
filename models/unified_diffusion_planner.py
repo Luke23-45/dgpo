@@ -159,9 +159,13 @@ class ActionNormalizer(nn.Module):
             log.warning("ActionNormalizer not fitted, using identity")
             return actions
         
+        # Ensure buffers are on the same device as input
+        action_min = self.action_min.to(actions.device)
+        action_max = self.action_max.to(actions.device)
+        
         # Scale to [0, 1] then to [-1, 1]
-        range_val = (self.action_max - self.action_min).clamp_min(self.eps)
-        normalized = (actions - self.action_min) / range_val  # [0, 1]
+        range_val = (action_max - action_min).clamp_min(self.eps)
+        normalized = (actions - action_min) / range_val  # [0, 1]
         normalized = normalized * 2.0 - 1.0  # [-1, 1]
         return normalized
     
@@ -179,10 +183,14 @@ class ActionNormalizer(nn.Module):
             log.warning("ActionNormalizer not fitted, using identity")
             return actions
         
+        # Ensure buffers are on the same device as input
+        action_min = self.action_min.to(actions.device)
+        action_max = self.action_max.to(actions.device)
+        
         # Scale from [-1, 1] to [0, 1] then to original
         normalized_01 = (actions + 1.0) / 2.0  # [0, 1]
-        range_val = self.action_max - self.action_min
-        return normalized_01 * range_val + self.action_min
+        range_val = action_max - action_min
+        return normalized_01 * range_val + action_min
 
 
 # =============================================================================
@@ -361,6 +369,12 @@ class VisionContextEncoder(nn.Module):
                 param.requires_grad = True
         
         log.info("SigLIP: Bottom layers FROZEN, top 3 layers UNFROZEN for geometric adaptation")
+        
+        # D. Enable gradient checkpointing for memory efficiency (optional)
+        self.use_gradient_checkpointing = True
+        if self.use_gradient_checkpointing and hasattr(self.vision_backbone, 'gradient_checkpointing_enable'):
+            self.vision_backbone.gradient_checkpointing_enable()
+            log.info("SigLIP: Gradient checkpointing ENABLED for memory efficiency")
         
         # Get patch info
         vit_config = self.vision_backbone.config

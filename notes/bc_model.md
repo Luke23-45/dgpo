@@ -3,6 +3,7 @@ Epoch 0: 100% 1248/1248 [30:50<00:00,  1.48s/it, v_num=x1g1, train/loss_step=1.5
 `weights_only` was not set, defaulting to `False`.
 [2025-11-29 00:04:12,420][train_semantic_planner][INFO] - Failsafe backup for epoch 0 saved successfully to /content/drive/MyDrive/pda/models/backups/bc/backup_epoch_000.ckpt.
 Epoch 1: 100% 1248/1248 [31:02<00:00,  1.49s/it, v_num=x1g1, train/loss_step=1.620, train/loss_pose_step=0.879, train/loss_grip_step=0.557, train/loss_phase_step=0.360, train/loss_epoch=3.330, train/loss_pose_epoch=1.780, train/loss_grip_epoch=1.100, train/loss_phase_epoch=0.906, train/phase_acc=0.620]  [2025-11-29 00:35:14,938][train_semantic_planner][INFO] - End of epoch 1: Triggering atomic failsafe backup...
+
 `weights_only` was not set, defaulting to `False`.
 [2025-11-29 00:35:34,302][train_semantic_planner][INFO] - Failsafe backup for epoch 1 saved successfully to /content/drive/MyDrive/pda/models/backups/bc/backup_epoch_001.ckpt.
 

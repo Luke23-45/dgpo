@@ -52,6 +52,7 @@ if str(ROOT) not in sys.path:
 
 from models.unified_diffusion_planner import UnifiedDiffusionPlanner, UnifiedDiffusionConfig
 from utils.unified_planner_dataset import UnifiedPlannerDataset, unified_planner_collate_fn
+from utils.samplers import EpisodeAwareSampler
 
 # Logger setup
 logger = logging.getLogger("train_unified_planner")
@@ -89,8 +90,9 @@ class UnifiedPlannerDataModule(pl.LightningDataModule):
         self.train_dataset: Optional[UnifiedPlannerDataset] = None
         self.val_dataset: Optional[UnifiedPlannerDataset] = None
         
-        # Loader optimizations
-        self.num_workers = cfg.dataset.get("num_workers", 4)
+        # Loader optimizations (tuned for Colab: 2 workers + prefetch)
+        self.num_workers = cfg.dataset.get("num_workers", 2)  # Reduced for Colab RAM
+        self.prefetch_factor = cfg.dataset.get("prefetch_factor", 4)  # More prefetching
         self.pin_memory = torch.cuda.is_available()
         self.persistent_workers = self.num_workers > 0
 
@@ -114,11 +116,20 @@ class UnifiedPlannerDataModule(pl.LightningDataModule):
                 logger.info(f"  Val samples: {len(self.val_dataset)}")
 
     def train_dataloader(self) -> DataLoader:
+        # SOTA: Episode-aware sampling for cache locality
+        sampler = EpisodeAwareSampler(
+            self.train_dataset,
+            shuffle=True,
+            seed=self.cfg.seed
+        )
+        
         return DataLoader(
             self.train_dataset,
             batch_size=self.cfg.training.batch_size,
-            shuffle=True,
+            shuffle=False,  # MUST be False when using custom sampler
+            sampler=sampler,
             num_workers=self.num_workers,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
             collate_fn=unified_planner_collate_fn,
@@ -133,6 +144,7 @@ class UnifiedPlannerDataModule(pl.LightningDataModule):
             batch_size=self.cfg.training.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
             collate_fn=unified_planner_collate_fn,
@@ -192,7 +204,7 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
         """Load pretrained weights (from BC transfer)."""
         logger.info(f"Loading pretrained weights from: {checkpoint_path}")
         try:
-            ckpt = torch.load(checkpoint_path, map_location='cpu')
+            ckpt = torch.load(checkpoint_path, map_location='cpu',  weights_only=False)
             state_dict = ckpt.get('state_dict', ckpt)
             
             # Handle model. prefix from Lightning
@@ -247,6 +259,45 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
         self.log("train/lr", self.optimizers().param_groups[0]['lr'], on_step=True)
         
         return loss
+    
+    def on_train_epoch_end(self):
+        """Print detailed epoch summary to console."""
+        metrics = self.trainer.callback_metrics
+        epoch = self.current_epoch
+        
+        # Get logged metrics
+        train_loss = metrics.get("train/loss_epoch", metrics.get("train/loss", 0))
+        lr = metrics.get("train/lr", self.optimizers().param_groups[0]['lr'])
+        
+        # Build console output
+        console_msg = [
+            f"\n{'='*70}",
+            f"📊 EPOCH {epoch} COMPLETE",
+            f"{'='*70}",
+            f"  Train Loss:     {train_loss:.6f}" if isinstance(train_loss, (int, float)) else f"  Train Loss:     {train_loss.item():.6f}",
+            f"  Learning Rate:  {lr:.2e}" if isinstance(lr, (int, float)) else f"  Learning Rate:  {lr.item():.2e}",
+        ]
+        
+        # Add validation metrics if available
+        val_error = metrics.get("val/total_error")
+        if val_error is not None:
+            val_val = val_error.item() if hasattr(val_error, 'item') else val_error
+            console_msg.append(f"  Val Error:      {val_val:.6f}")
+            
+            pos_err = metrics.get("val/pos_error")
+            rot_err = metrics.get("val/rot_error")
+            grip_err = metrics.get("val/grip_error")
+            if pos_err is not None:
+                console_msg.append(f"    - Pos Error:  {pos_err.item() if hasattr(pos_err, 'item') else pos_err:.6f}")
+            if rot_err is not None:
+                console_msg.append(f"    - Rot Error:  {rot_err.item() if hasattr(rot_err, 'item') else rot_err:.6f}")
+            if grip_err is not None:
+                console_msg.append(f"    - Grip Error: {grip_err.item() if hasattr(grip_err, 'item') else grip_err:.6f}")
+        
+        console_msg.append(f"{'='*70}\n")
+        
+        # Print to console
+        print("\n".join(console_msg))
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> Dict[str, torch.Tensor]:
         """Validation step: sample actions and compute reconstruction error."""
@@ -423,10 +474,28 @@ def main(cfg: DictConfig) -> None:
     # 3. Data & Model
     datamodule = UnifiedPlannerDataModule(cfg)
     model = UnifiedPlannerLightningModule(cfg)
+    
+    # Optional: torch.compile for faster training (requires PyTorch 2.0+)
+    if cfg.training.get("use_torch_compile", False) and hasattr(torch, 'compile'):
+        logger.info("Compiling model with torch.compile (mode=reduce-overhead)...")
+        try:
+            model.model = torch.compile(model.model, mode="reduce-overhead")
+            logger.info("  torch.compile enabled successfully")
+        except Exception as e:
+            logger.warning(f"  torch.compile failed: {e}, continuing without compilation")
+    
+    # Check if validation dataset exists
+    has_validation = cfg.dataset.get("val_path") is not None
 
     # 4. Callbacks
     callbacks = [
-        ModelCheckpoint(
+        LearningRateMonitor(logging_interval="step"),
+        TQDMProgressBar(refresh_rate=50),
+    ]
+    
+    # Only add ModelCheckpoint with validation monitoring if val data exists
+    if has_validation:
+        callbacks.append(ModelCheckpoint(
             dirpath=str(output_dir / "checkpoints"),
             filename="udp-{epoch:02d}-{val/total_error:.4f}",
             monitor="val/total_error",
@@ -434,10 +503,18 @@ def main(cfg: DictConfig) -> None:
             save_top_k=3,
             save_last=True,
             verbose=True
-        ),
-        LearningRateMonitor(logging_interval="step"),
-        TQDMProgressBar(refresh_rate=50),
-    ]
+        ))
+    else:
+        # Save checkpoints based on epoch only (no validation)
+        callbacks.append(ModelCheckpoint(
+            dirpath=str(output_dir / "checkpoints"),
+            filename="udp-{epoch:02d}",
+            save_top_k=-1,  # Save all
+            every_n_epochs=5,
+            save_last=True,
+            verbose=True
+        ))
+        logger.warning("No validation dataset - checkpoints will be saved by epoch only")
     
     # Optional early stopping
     if cfg.training.get("early_stopping_patience", 0) > 0:
@@ -448,7 +525,7 @@ def main(cfg: DictConfig) -> None:
         ))
 
     # 5. Trainer
-    trainer = pl.Trainer(
+    trainer_kwargs = dict(
         max_epochs=cfg.training.get("max_epochs", 100),
         max_steps=cfg.training.get("max_steps", -1),
         accelerator="auto",
@@ -457,12 +534,22 @@ def main(cfg: DictConfig) -> None:
         callbacks=callbacks,
         logger=loggers,
         gradient_clip_val=cfg.training.get("gradient_clip_val", 1.0),
-        val_check_interval=cfg.training.get("val_check_interval", 1.0),
         log_every_n_steps=cfg.training.get("log_every_n_steps", 50),
         enable_progress_bar=True,
         enable_model_summary=True,
         deterministic=False,  # Faster training
     )
+    
+    # Only enable validation-related settings if we have validation data
+    if has_validation:
+        trainer_kwargs["val_check_interval"] = cfg.training.get("val_check_interval", 1.0)
+    else:
+        # No validation - skip sanity check entirely
+        trainer_kwargs["num_sanity_val_steps"] = 0
+        trainer_kwargs["limit_val_batches"] = 0
+        logger.info("No validation dataset provided - validation disabled")
+    
+    trainer = pl.Trainer(**trainer_kwargs)
 
     # 6. Resume from checkpoint if specified
     ckpt_path = cfg.training.get("resume_from_checkpoint", None)

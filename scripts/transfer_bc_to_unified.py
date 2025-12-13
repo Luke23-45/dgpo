@@ -69,7 +69,7 @@ WEIGHT_MAPPINGS = [
 def load_bc_checkpoint(path: str) -> dict:
     """Load BC model checkpoint."""
     log.info(f"Loading BC checkpoint from {path}")
-    ckpt = torch.load(path, map_location='cpu')
+    ckpt = torch.load(path, map_location='cpu',  weights_only=False)
     
     # Handle Lightning checkpoint format
     if 'state_dict' in ckpt:

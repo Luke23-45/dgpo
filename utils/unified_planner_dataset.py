@@ -101,6 +101,55 @@ def compute_delta_pose(current_pose: np.ndarray, target_pose: np.ndarray) -> np.
     return np.concatenate([delta_pos, delta_quat]).astype(np.float32)
 
 
+def compute_delta_poses_batch(current_pose: np.ndarray, future_poses: np.ndarray) -> np.ndarray:
+    """
+    Vectorized delta pose computation for multiple future poses.
+    
+    Args:
+        current_pose: [7] - [x, y, z, qx, qy, qz, qw]
+        future_poses: [K, 7] - K future poses
+        
+    Returns:
+        delta_poses: [K, 7] - K delta poses
+    """
+    K = future_poses.shape[0]
+    
+    # Position deltas (vectorized)
+    delta_pos = future_poses[:, :3] - current_pose[:3]  # (K, 3)
+    
+    # Normalize current quaternion once
+    q_current = current_pose[3:7]
+    q_current = q_current / (np.linalg.norm(q_current) + 1e-8)
+    q_current_inv = np.array([-q_current[0], -q_current[1], -q_current[2], q_current[3]])
+    
+    # Normalize future quaternions (vectorized)
+    q_futures = future_poses[:, 3:7]  # (K, 4)
+    q_norms = np.linalg.norm(q_futures, axis=1, keepdims=True) + 1e-8
+    q_futures = q_futures / q_norms
+    
+    # Batch quaternion multiplication: delta = inv(current) * future
+    # q1 = q_current_inv (broadcast), q2 = q_futures[i]
+    x1, y1, z1, w1 = q_current_inv
+    x2, y2, z2, w2 = q_futures[:, 0], q_futures[:, 1], q_futures[:, 2], q_futures[:, 3]
+    
+    delta_quat = np.stack([
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+        w1*w2 - x1*x2 - y1*y2 - z1*z2
+    ], axis=1)  # (K, 4)
+    
+    # Normalize result
+    q_norms = np.linalg.norm(delta_quat, axis=1, keepdims=True) + 1e-8
+    delta_quat = delta_quat / q_norms
+    
+    # Ensure positive w
+    negative_w = delta_quat[:, 3:4] < 0
+    delta_quat = np.where(negative_w, -delta_quat, delta_quat)
+    
+    return np.concatenate([delta_pos, delta_quat], axis=1).astype(np.float32)
+
+
 def apply_delta_pose(current_pose: np.ndarray, delta_pose: np.ndarray) -> np.ndarray:
     """
     Apply delta pose to get target pose.
@@ -249,7 +298,13 @@ class UnifiedPlannerDataset(Dataset):
             
             prev_image_np = images[t - 1]
             curr_image_np = images[t]
-            goal_image_np = self.expert_reader.get_goal_image(ep_idx)
+            
+            # Get goal image - fallback to last frame if goal_image_primary not available
+            try:
+                goal_image_np = self.expert_reader.get_goal_image(ep_idx)
+            except (KeyError, Exception):
+                # Fallback: use last frame of episode as goal
+                goal_image_np = images[-1]
             
             # 2. Get proprioception
             proprio = self._get_modality(ep_idx, "proprio")
@@ -278,32 +333,28 @@ class UnifiedPlannerDataset(Dataset):
             except KeyError:
                 gt_phase_t = None  # Phase not available
             
-            # 6. Compute delta actions for chunk
-            delta_actions_list = []
+            # 6. Compute delta actions for chunk (VECTORIZED)
+            # Gather future poses and grippers
+            future_indices = [min(t + k + 1, len(poses) - 1) for k in range(self.action_chunk_size)]
+            future_poses = poses[future_indices]  # (K, 7)
+            
+            # Vectorized delta pose computation
+            delta_poses = compute_delta_poses_batch(current_pose, future_poses)  # (K, 7)
+            
+            # Gather future grippers
+            future_grippers = []
             for k in range(self.action_chunk_size):
                 future_t = t + k + 1
-                if future_t < len(poses):
-                    future_pose = poses[future_t]
-                    future_gripper = grippers[future_t] if future_t < len(grippers) else grippers[-1]
+                if future_t < len(grippers):
+                    g = grippers[future_t]
                 else:
-                    # Padding: use last pose
-                    future_pose = poses[-1]
-                    future_gripper = grippers[-1]
-                
-                # Compute delta from CURRENT pose (not previous delta!)
-                delta_pose = compute_delta_pose(current_pose, future_pose)
-                
-                # Handle gripper
-                if isinstance(future_gripper, np.ndarray):
-                    gripper_val = float(future_gripper.flatten()[0])
-                else:
-                    gripper_val = float(future_gripper)
-                
-                # Combine: 7D delta pose + 1D gripper
-                delta_action = np.append(delta_pose, gripper_val)
-                delta_actions_list.append(delta_action)
+                    g = grippers[-1]
+                gripper_val = float(g.flatten()[0]) if isinstance(g, np.ndarray) else float(g)
+                future_grippers.append(gripper_val)
+            future_grippers = np.array(future_grippers, dtype=np.float32).reshape(-1, 1)  # (K, 1)
             
-            gt_delta_actions = np.stack(delta_actions_list, axis=0).astype(np.float32)
+            # Combine: (K, 7) + (K, 1) = (K, 8)
+            gt_delta_actions = np.concatenate([delta_poses, future_grippers], axis=1).astype(np.float32)
             
             # 6. Transform images
             prev_pil = Image.fromarray(prev_image_np)
