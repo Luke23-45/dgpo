@@ -143,10 +143,10 @@ class UnifiedPlannerDataModule(pl.LightningDataModule):
             self.val_dataset,
             batch_size=self.cfg.training.batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
-            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            num_workers=0,  # Use main process for validation to save RAM (prevents duplicate workers)
+            prefetch_factor=None,
             pin_memory=self.pin_memory,
-            persistent_workers=self.persistent_workers,
+            persistent_workers=False,
             collate_fn=unified_planner_collate_fn,
         )
 
@@ -252,13 +252,22 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """Training step: compute diffusion loss."""
-        loss = self.model(batch)
+        loss_dict = self.model(batch)
+        total_loss = loss_dict["loss"]
         
         # Log metrics
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        # Enable on_step=True to show in progress bar during training
+        self.log("train/loss", total_loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("diff", loss_dict["diffusion_loss"], on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("pose", loss_dict["pose_loss"], on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("grip", loss_dict["grip_loss"], on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        
+        if loss_dict["phase_loss"] > 0:
+             self.log("phase", loss_dict["phase_loss"], on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+
         self.log("train/lr", self.optimizers().param_groups[0]['lr'], on_step=True)
         
-        return loss
+        return total_loss
     
     def on_train_epoch_end(self):
         """Print detailed epoch summary to console."""
@@ -275,8 +284,25 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
             f"📊 EPOCH {epoch} COMPLETE",
             f"{'='*70}",
             f"  Train Loss:     {train_loss:.6f}" if isinstance(train_loss, (int, float)) else f"  Train Loss:     {train_loss.item():.6f}",
-            f"  Learning Rate:  {lr:.2e}" if isinstance(lr, (int, float)) else f"  Learning Rate:  {lr.item():.2e}",
         ]
+        
+        # Add training loss breakdown (diffusion components)
+        diff_loss = metrics.get("diff_epoch", metrics.get("diff"))
+        pose_loss = metrics.get("pose_epoch", metrics.get("pose"))
+        grip_loss = metrics.get("grip_epoch", metrics.get("grip"))
+        
+        if diff_loss is not None:
+            console_msg.append(f"    - Diffusion:  {diff_loss.item() if hasattr(diff_loss, 'item') else diff_loss:.6f}")
+        if pose_loss is not None:
+            console_msg.append(f"    - Pose:       {pose_loss.item() if hasattr(pose_loss, 'item') else pose_loss:.6f}")
+        if grip_loss is not None:
+            console_msg.append(f"    - Grip:       {grip_loss.item() if hasattr(grip_loss, 'item') else grip_loss:.6f}")
+        
+        phase_loss = metrics.get("phase_epoch", metrics.get("phase"))
+        if phase_loss is not None and phase_loss > 0:
+            console_msg.append(f"    - Phase:      {phase_loss.item() if hasattr(phase_loss, 'item') else phase_loss:.6f}")
+        
+        console_msg.append(f"  Learning Rate:  {lr:.2e}" if isinstance(lr, (int, float)) else f"  Learning Rate:  {lr.item():.2e}")
         
         # Add validation metrics if available
         val_error = metrics.get("val/total_error")
@@ -303,23 +329,44 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
         """Validation step: sample actions and compute reconstruction error."""
         gt_actions = batch['gt_delta_actions']  # (B, K, 8)
         
-        # Sample actions using DDIM
+        # 1. Sample actions using DDIM (reconstruction quality)
         with torch.no_grad():
             pred_actions = self.model.sample(batch)  # (B, K, 8)
         
-        # Compute errors
+        # Compute reconstruction errors
         pos_error = F.l1_loss(pred_actions[:, :, :3], gt_actions[:, :, :3])
         rot_error = F.l1_loss(pred_actions[:, :, 3:7], gt_actions[:, :, 3:7])
         grip_error = F.l1_loss(pred_actions[:, :, 7:], gt_actions[:, :, 7:])
         total_error = F.mse_loss(pred_actions, gt_actions)
         
-        # Log metrics
+        # 2. Compute DIFFUSION LOSS (noise prediction quality on val set)
+        # This is the same training loss but on validation data
+        with torch.no_grad():
+            loss_dict = self.model(batch)
+            val_diff_loss = loss_dict["diffusion_loss"]
+            val_pose_loss = loss_dict["pose_loss"]
+            val_grip_loss = loss_dict["grip_loss"]
+        
+        # Log reconstruction metrics
         self.log("val/total_error", total_error, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("val/pos_error", pos_error, on_epoch=True, sync_dist=True)
         self.log("val/rot_error", rot_error, on_epoch=True, sync_dist=True)
         self.log("val/grip_error", grip_error, on_epoch=True, sync_dist=True)
         
+        # Log diffusion losses
+        self.log("val/diff_loss", val_diff_loss, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("val/pose_loss", val_pose_loss, on_epoch=True, sync_dist=True)
+        self.log("val/grip_loss", val_grip_loss, on_epoch=True, sync_dist=True)
+        
         return {"val_loss": total_error}
+
+
+    def on_validation_epoch_end(self):
+        """Clear RAM after validation to prevent memory buildup."""
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def configure_optimizers(self):
         """
@@ -383,6 +430,65 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
             }
         }
 
+    # def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int):
+    #     """
+    #     [SOTA, ATOMICALLY SAFE, PRODUCTION-GRADE VERSION]
+    #     Hook for Failsafe Backups at end of each epoch.
+    #     """
+    #     if self.trainer.global_rank != 0:
+    #         return
+
+    #     try:
+    #         total_batches = len(self.trainer.train_dataloader)
+    #     except:
+    #         total_batches = self.trainer.num_training_batches
+        
+    #     is_last_batch = (batch_idx + 1) == total_batches
+    #     if not is_last_batch:
+    #         return
+
+    #     epoch = self.trainer.current_epoch
+    #     backup_freq = self.cfg.training.get("backup_every_n_epochs", 5)
+        
+    #     if backup_freq <= 0 or (epoch + 1) % backup_freq != 0:
+    #         return
+        
+    #     logger.info(f"End of epoch {epoch}: Triggering atomic failsafe backup...")
+        
+    #     # === RAM OPTIMIZATION: Clear cache before saving ===
+    #     import gc
+    #     gc.collect()
+    #     if torch.cuda.is_available():
+    #         torch.cuda.empty_cache()
+        
+    #     backup_dir = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
+    #     backup_dir.mkdir(parents=True, exist_ok=True)
+    #     new_backup_path = backup_dir / f"unified_planner_backup_epoch_{epoch:03d}.ckpt"
+
+    #     try:
+    #         self.trainer.save_checkpoint(new_backup_path)
+    #         logger.info(f"Failsafe backup saved to {new_backup_path}")
+            
+    #         # === RAM OPTIMIZATION: Clear cache after saving ===
+    #         gc.collect()
+    #         if torch.cuda.is_available():
+    #             torch.cuda.empty_cache()
+
+    #         # Clean old backups
+    #         all_backups = sorted(list(backup_dir.glob("unified_planner_backup_epoch_*.ckpt")))
+    #         backups_to_keep = self.cfg.training.get("backups_to_keep", 3)
+            
+    #         if len(all_backups) > backups_to_keep:
+    #             for old_backup in all_backups[:-backups_to_keep]:
+    #                 try:
+    #                     old_backup.unlink()
+    #                     logger.info(f"Cleaned up old backup: {old_backup.name}")
+    #                 except OSError as e:
+    #                     logger.warning(f"Could not delete {old_backup}: {e}")
+
+    #     except Exception as e:
+    #         logger.error(f"CRITICAL: Failed to save backup: {e}", exc_info=True)
+
     def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int):
         """
         [SOTA, ATOMICALLY SAFE, PRODUCTION-GRADE VERSION]
@@ -391,6 +497,7 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
         if self.trainer.global_rank != 0:
             return
 
+        # 1. Check if this is the last batch of the epoch
         try:
             total_batches = len(self.trainer.train_dataloader)
         except:
@@ -400,23 +507,28 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
         if not is_last_batch:
             return
 
+        # 2. Check Frequency
         epoch = self.trainer.current_epoch
-        backup_freq = self.cfg.training.get("backup_every_n_epochs", 5)
+        # Default to 5 for Unified Planner (heavy model), vs 1 for Semantic
+        backup_freq = self.cfg.training.get("backup_every_n_epochs", 2)
         
         if backup_freq <= 0 or (epoch + 1) % backup_freq != 0:
             return
         
         logger.info(f"End of epoch {epoch}: Triggering atomic failsafe backup...")
         
+        # 3. Setup Paths
         backup_dir = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
         backup_dir.mkdir(parents=True, exist_ok=True)
         new_backup_path = backup_dir / f"unified_planner_backup_epoch_{epoch:03d}.ckpt"
 
         try:
+            # 4. SAVE (Fast version - No GC)
             self.trainer.save_checkpoint(new_backup_path)
             logger.info(f"Failsafe backup saved to {new_backup_path}")
 
-            # Clean old backups
+            # 5. CLEANUP (Correct glob pattern for Unified Planner)
+            # We look specifically for 'unified_planner_backup_epoch_*.ckpt'
             all_backups = sorted(list(backup_dir.glob("unified_planner_backup_epoch_*.ckpt")))
             backups_to_keep = self.cfg.training.get("backups_to_keep", 3)
             
@@ -430,7 +542,6 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
 
         except Exception as e:
             logger.error(f"CRITICAL: Failed to save backup: {e}", exc_info=True)
-
 
 # ==============================================================================
 # 3. MAIN EXECUTION ENTRY POINT
@@ -494,9 +605,11 @@ def main(cfg: DictConfig) -> None:
     ]
     
     # Only add ModelCheckpoint with validation monitoring if val data exists
+
+    checkpoint_path = cfg.training.get("checkpoint_dir")
     if has_validation:
         callbacks.append(ModelCheckpoint(
-            dirpath=str(output_dir / "checkpoints"),
+            dirpath=str(checkpoint_path  / "checkpoints"),
             filename="udp-{epoch:02d}-{val/total_error:.4f}",
             monitor="val/total_error",
             mode="min",
@@ -507,7 +620,7 @@ def main(cfg: DictConfig) -> None:
     else:
         # Save checkpoints based on epoch only (no validation)
         callbacks.append(ModelCheckpoint(
-            dirpath=str(output_dir / "checkpoints"),
+            dirpath=str(checkpoint_path / "checkpoints"),
             filename="udp-{epoch:02d}",
             save_top_k=-1,  # Save all
             every_n_epochs=5,
@@ -538,11 +651,20 @@ def main(cfg: DictConfig) -> None:
         enable_progress_bar=True,
         enable_model_summary=True,
         deterministic=False,  # Faster training
+        benchmark=True,       # cudnn.benchmark optimization
     )
     
     # Only enable validation-related settings if we have validation data
     if has_validation:
-        trainer_kwargs["val_check_interval"] = cfg.training.get("val_check_interval", 1.0)
+        trainer_kwargs["check_val_every_n_epoch"] = cfg.training.get("check_val_every_n_epoch", 1)
+        
+        # IMPORTANT: val_check_interval MUST be a float in [0, 1] to mean "fraction of epoch"
+        # Values >= 1 are interpreted as "every N batches" which causes frequent validation!
+        val_interval = cfg.training.get("val_check_interval", 1.0)
+        if val_interval > 1.0:
+            logger.warning(f"val_check_interval={val_interval} is >= 1, this means 'every {int(val_interval)} batches'!")
+            logger.warning("For per-epoch validation, use val_check_interval=1.0 (float in [0, 1])")
+        trainer_kwargs["val_check_interval"] = val_interval
     else:
         # No validation - skip sanity check entirely
         trainer_kwargs["num_sanity_val_steps"] = 0

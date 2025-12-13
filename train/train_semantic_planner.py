@@ -102,7 +102,7 @@ class SemanticPlannerDataModule(pl.LightningDataModule):
         self.val_dataset: Optional[SemanticPlannerDataset] = None
         
         # Loader optimizations
-        self.num_workers = cfg.dataset.get("num_workers", 4)
+        self.num_workers = cfg.dataset.get("num_workers", 2)
         self.pin_memory = torch.cuda.is_available()
         # Only use persistent workers if we have actual workers to avoid obscure DataLoader errors
         self.persistent_workers = self.num_workers > 0
@@ -135,6 +135,7 @@ class SemanticPlannerDataModule(pl.LightningDataModule):
             shuffle=True, 
             seed=self.cfg.seed
         )
+        print(f"number of workers - self.persistent_workers{self.persistent_workers}")
 
         return DataLoader(
             self.train_dataset,
@@ -151,6 +152,8 @@ class SemanticPlannerDataModule(pl.LightningDataModule):
     def val_dataloader(self) -> Optional[DataLoader]:
         if not self.val_dataset:
             return None
+        
+        print(f"number of workers - self.persistent_workers{self.persistent_workers}")
         
         return DataLoader(
             self.val_dataset,

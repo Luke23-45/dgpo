@@ -840,10 +840,27 @@ class UnifiedDiffusionPlanner(nn.Module):
         noise_pred = self.action_head(noisy_actions, t, context, global_context)
         
         # 6. Compute diffusion loss (simple MSE)
-        diffusion_loss = F.mse_loss(noise_pred, noise)
+        # diffusion_loss = F.mse_loss(noise_pred, noise)
         
+        # Breakdown loss by component for logging
+        noise_pred_pose = noise_pred[:, :, :7]
+        noise_gt_pose = noise[:, :, :7]
+        pose_loss = F.mse_loss(noise_pred_pose, noise_gt_pose)
+        
+        noise_pred_grip = noise_pred[:, :, 7:]
+        noise_gt_grip = noise[:, :, 7:]
+        grip_loss = F.mse_loss(noise_pred_grip, noise_gt_grip)
+        
+        diffusion_loss = pose_loss + grip_loss # Ideally weighted, but simple sum matches MSE
+        # Note: actually MSE is mean over all elements. 
+        # MSE(all) = (MSE(pose)*7 + MSE(grip)*1) / 8 roughly.
+        # Let's stick to standard MSE for the optimization objective to be exact
+        diffusion_loss = F.mse_loss(noise_pred, noise)
+
         # 7. Compute phase prediction loss (auxiliary - from Semantic Planner)
         total_loss = diffusion_loss
+        phase_loss = torch.tensor(0.0, device=device)
+        
         if self.cfg.use_phase_prediction and self.phase_head is not None:
             # Use global context for phase prediction
             phase_logits = self.phase_head(global_cond)  # (B, num_phases)
@@ -854,7 +871,13 @@ class UnifiedDiffusionPlanner(nn.Module):
                 phase_loss = F.cross_entropy(phase_logits, gt_phase)
                 total_loss = diffusion_loss + self.cfg.phase_loss_weight * phase_loss
         
-        return total_loss
+        return {
+            "loss": total_loss,
+            "diffusion_loss": diffusion_loss,
+            "phase_loss": phase_loss,
+            "pose_loss": pose_loss,
+            "grip_loss": grip_loss
+        }
     
     @torch.no_grad()
     def sample(

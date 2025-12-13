@@ -49,7 +49,7 @@ dataset:
   train_path: "/content/pda_data/train/training_set.lmdb"
   val_path: "/content/pda_data/val/validation_set.lmdb"
   num_workers: 2
-  prefetch_factor: 2   
+  prefetch_factor: 2            # Reduced from 4 to save RAM
   use_augmentation: false
 
 # ==============================================================================
@@ -57,7 +57,7 @@ dataset:
 # ==============================================================================
 training:
   # Optimization
-  batch_size: 96
+  batch_size: 96                # Increased from 64 to utilize available VRAM
   learning_rate: 1.0e-4
   weight_decay: 0.01
   backbone_lr_factor: 0.1       # Vision backbone gets 0.1x LR
@@ -71,10 +71,10 @@ training:
   gradient_clip_val: 1.0
   
   # Performance optimization
-  use_torch_compile: false        # 10-20% speedup on T4 GPU (set false if issues)
+  use_torch_compile: false       # Disabled - adds overhead to checkpoint saves
   
   # Checkpointing & Validation
-  check_val_every_n_epoch: 2    # Validate every 1 epoch
+  check_val_every_n_epoch: 1    # Validate every 1 epoch
   val_check_interval: 1.0       # 1.0 = validate at end of epoch (MUST be float in [0, 1])
   log_every_n_steps: 50
   
@@ -82,17 +82,15 @@ training:
   
   # Failsafe backups
   backup_every_n_epochs: 1
-
   backups_to_keep: 3
   backup_dir: "/content/drive/MyDrive/pda/models/backups/unified/"
   
-  # Pretrained initialization (from BC transfer)/content/drive/MyDrive/pda/resume_models/unified/ints/unified_planner_initialize0d.ckpt"
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/backups/unified/unified_planner_backup_epoch_002.ckpt"  # Resume full training state
+  # Pretrained initialization (from BC transfer)
+  pretrained_checkpoint: null   # e.g., "checkpoints/unified_planner_initialized.ckpt"
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/backups/unified/unified_planner_backup_epoch_000.ckpt"  # Resume full training state "/content/drive/MyDrive/pda/models/backups/unified/unified_planner_backup_epoch_001.ckpt"
   
   # Output
   output_dir: "/content/drive/MyDrive/pda/logs/"
-
-  checkpoint_dir: "/content/dgpo/checkpoint/"
 
 # ==============================================================================
 # LOGGING CONFIGURATION
