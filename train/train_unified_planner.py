@@ -546,7 +546,6 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
 # ==============================================================================
 # 3. MAIN EXECUTION ENTRY POINT
 # ==============================================================================
-
 @hydra.main(version_base=None, config_path="../configs", config_name="train_unified_planner_config")
 def main(cfg: DictConfig) -> None:
     """
@@ -605,8 +604,7 @@ def main(cfg: DictConfig) -> None:
     ]
     
     # Only add ModelCheckpoint with validation monitoring if val data exists
-
-    checkpoint_path = cfg.training.get("checkpoint_dir")
+    checkpoint_path = Path(cfg.training.get("checkpoint_dir"))
     if has_validation:
         callbacks.append(ModelCheckpoint(
             dirpath=str(checkpoint_path  / "checkpoints"),

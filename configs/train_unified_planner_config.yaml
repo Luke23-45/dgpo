@@ -57,7 +57,7 @@ dataset:
 # ==============================================================================
 training:
   # Optimization
-  batch_size: 96
+  batch_size: 128
   learning_rate: 1.0e-4
   weight_decay: 0.01
   backbone_lr_factor: 0.1       # Vision backbone gets 0.1x LR
@@ -87,7 +87,7 @@ training:
   backup_dir: "/content/drive/MyDrive/pda/models/backups/unified/"
   
   # Pretrained initialization (from BC transfer)/content/drive/MyDrive/pda/resume_models/unified/ints/unified_planner_initialize0d.ckpt"
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/backups/unified/unified_planner_backup_epoch_002.ckpt"  # Resume full training state
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/models/unified/unified_planner_backup_epoch_002.ckpt"  # Resume full training state
   
   # Output
   output_dir: "/content/drive/MyDrive/pda/logs/"
