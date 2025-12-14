@@ -4,7 +4,7 @@
 # ==============================================================================
 # CHECKPOINT & PATHS
 # ==============================================================================
-checkpoint: "/content/drive/MyDrive/pda/models/backups/unified/unified_planner_backup_epoch_017.ckpt"  # Path to trained checkpoint
+checkpoint: "/content/drive/MyDrive/pda/models/backups/uop/unified_planner_backup_epoch_017.ckpt"  # Path to trained checkpoint
 output_dir: "outputs/unified_eval"  # Directory to save evaluation results
 
 # ==============================================================================
@@ -38,6 +38,13 @@ sampling:
 # Set to true if you want to use IK to convert delta poses to joint deltas
 # If false, will attempt to use delta poses directly (may not work)
 use_ik: true
+
+# ==============================================================================
+# ACTION SCALING (DIAGNOSTIC)
+# ==============================================================================
+# Scale factor to amplify policy delta outputs. Set to 1.0 for no scaling.
+# If policy outputs are too small, try values like 10.0, 50.0, or 100.0
+action_scale: 50.0  # <-- TUNE THIS: start with 50x to test magnitude hypothesis
 
 # ==============================================================================
 # VIDEO RECORDING

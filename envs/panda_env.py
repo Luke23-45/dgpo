@@ -220,7 +220,7 @@ class PandaEnv(gym.Env):
     CAM_MIN_FOVY = 25.0      # Min zoom
     CAM_MAX_FOVY = 90.0      # Max zoom (wide-angle)
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
-    ACTION_SCALING_FACTOR = 0.5
+    ACTION_SCALING_FACTOR = 0.022
 
 
     # REPLACE THE ENTIRE __init__ METHOD WITH THIS
@@ -1640,7 +1640,14 @@ class PandaEnv(gym.Env):
 
         obs = self.get_expert_obs()
         reward = 0.0
-        terminated = False
+        
+        # Check for catastrophic failure (object falling off table)
+        # Table height is ~0.4m. If object drops below 0.3m, it has fallen.
+        if obs["object_pos_world"][2] < 0.3:
+            terminated = True
+        else:
+            terminated = False
+            
         truncated = (self.timestep >= self.max_episode_steps)
         return obs, reward, terminated, truncated, {}
   

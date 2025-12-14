@@ -109,12 +109,11 @@ def render_goal_image(env: PandaEnv, goal_pos: np.ndarray, ik_solver: IKSolver =
             
             target_pose_7d = np.concatenate([target_pos, target_quat])
             
-            goal_qpos = ik_solver.compute_ik(
-                target_pose_7d, 
-                env.model, 
-                env.data, 
-                env.ee_site_id, 
-                q_init=env.data.qpos[:7]
+            # Use the internal helper to solve IK (robust multi-attempt strategy)
+            goal_qpos = ik_solver._get_target_joint_angles(
+                target_pose_7d,
+                current_joint_angles=env.data.qpos[:7],
+                solution_position_tolerance=0.01
             )
             
             if goal_qpos is not None:
@@ -262,6 +261,16 @@ class UnifiedPlannerEvaluator:
         log.info(f"  Diffusion timesteps: {self.model.cfg.diffusion_timesteps}")
         log.info(f"  Default inference steps: {self.model.cfg.inference_steps}")
         log.info(f"  Default guidance scale: {self.model.cfg.guidance_scale}")
+        
+        # === DIAGNOSTIC: Print ActionNormalizer statistics ===
+        normalizer = self.model.action_normalizer
+        if normalizer.fitted:
+            log.info("=== ActionNormalizer Diagnostics ===")
+            log.info(f"  action_min: {normalizer.action_min.cpu().numpy()}")
+            log.info(f"  action_max: {normalizer.action_max.cpu().numpy()}")
+            log.info(f"  action_range: {(normalizer.action_max - normalizer.action_min).cpu().numpy()}")
+        else:
+            log.warning("ActionNormalizer is NOT fitted! This is a critical error.")
     
     def _prepare_batch(
         self,
@@ -347,6 +356,11 @@ class UnifiedPlannerEvaluator:
             # Shape: (1, K, 8) -> (8,)
             delta_action = sampled_actions[0, 0].cpu().numpy()  # (8,)
             delta_pose = delta_action[:7]  # (dx, dy, dz, dqx, dqy, dqz, dqw)
+            
+            # Apply action scaling to position deltas (diagnostic tuning)
+            action_scale = getattr(self.cfg, 'action_scale', 1.0)
+            delta_pose[:3] = delta_pose[:3] * action_scale  # Scale dx, dy, dz only
+            
             # Safety clip gripper to [-1, 1] range
             gripper_cmd = float(np.clip(delta_action[7], -1.0, 1.0))
             
@@ -364,6 +378,26 @@ class UnifiedPlannerEvaluator:
                 from utils.unified_planner_dataset import apply_delta_pose
                 target_pose = apply_delta_pose(current_ee_pose, delta_pose)
                 
+                # === DIAGNOSTIC: Print step 0 details ===
+                if step == 0:
+                    log.info("=== Step 0 Diagnostic ===")
+                    log.info(f"  action_scale applied: {action_scale}")
+                    log.info(f"  Raw sampled_actions shape: {sampled_actions.shape}")
+                    log.info(f"  delta_pose (SCALED dx,dy,dz + dquat): {delta_pose}")
+                    log.info(f"  current_ee_pose: {current_ee_pose}")
+                    log.info(f"  target_pose: {target_pose}")
+                    log.info(f"  object_pos: {obs['object_pos_world']}")
+                    log.info(f"  goal_pos: {obs['goal_pos_world']}")
+                    # Direction check: does delta point toward object?
+                    obj_pos = obs['object_pos_world']
+                    ee_to_obj = obj_pos - current_ee_pose[:3]
+                    ee_to_obj_norm = ee_to_obj / (np.linalg.norm(ee_to_obj) + 1e-8)
+                    delta_norm = delta_pose[:3] / (np.linalg.norm(delta_pose[:3]) + 1e-8)
+                    dot_product = np.dot(ee_to_obj_norm, delta_norm)
+                    log.info(f"  Vector to object: {ee_to_obj}")
+                    log.info(f"  Delta position: {delta_pose[:3]}")
+                    log.info(f"  Dot product (should be >0 if moving towards object): {dot_product:.4f}")
+                
                 # Compute delta joints via IK
                 try:
                     delta_joints = self.ik_solver.compute_delta_action(
@@ -375,6 +409,10 @@ class UnifiedPlannerEvaluator:
                         effective_dt=self.effective_dt,
                         max_dq=self.env.ACTION_SCALING_FACTOR / self.effective_dt
                     )
+                    # === DIAGNOSTIC: Print IK output at step 0 ===
+                    if step == 0:
+                        log.info(f"  IK delta_joints: {delta_joints}")
+                        log.info(f"  IK delta_joints magnitude: {np.linalg.norm(delta_joints):.4f}")
                 except Exception as e:
                     log.warning(f"IK failed at step {step}: {e}")
                     delta_joints = np.zeros(7)
@@ -386,7 +424,15 @@ class UnifiedPlannerEvaluator:
                     f"Set use_ik: true in config file."
                 )
             
-            action = np.concatenate([delta_joints, [gripper_cmd]])
+            # CRITICAL FIX: Compensate for environment's internal scaling
+            # The env applies: physical_delta = action * ACTION_SCALING_FACTOR
+            # So we must send: action = desired_delta / ACTION_SCALING_FACTOR
+            compensated_delta_joints = delta_joints / self.env.ACTION_SCALING_FACTOR
+            # compensated_delta_joints = delta_joints
+
+
+
+            action = np.concatenate([compensated_delta_joints, [gripper_cmd]])
             
             # 3. Step environment
             obs, reward, terminated, truncated, info = self.env.step(action)
@@ -401,6 +447,14 @@ class UnifiedPlannerEvaluator:
             dist_ee_obj = np.linalg.norm(ee_pos - obj_pos)
             dist_obj_goal = np.linalg.norm(obj_pos - goal_pos)
             is_grasped = obs['is_grasped'][0] > 0.5
+            
+            # === DIAGNOSTIC: Print EE movement at step 1 ===
+            if step == 1:
+                log.info("=== Step 1 Post-Movement Diagnostic ===")
+                log.info(f"  EE position after step 1: {ee_pos}")
+                log.info(f"  dist_ee_obj: {dist_ee_obj:.4f}")
+                log.info(f"  dist_obj_goal: {dist_obj_goal:.4f}")
+                log.info(f"  is_grasped: {is_grasped}")
             
             # Success check: object near goal and stable
             if dist_obj_goal < self.cfg.success_threshold:
