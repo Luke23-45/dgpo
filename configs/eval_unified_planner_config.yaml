@@ -1,0 +1,54 @@
+# FILE: configs/eval_unified_planner_config.yaml
+# Configuration for Unified Planner Evaluation
+
+# ==============================================================================
+# CHECKPOINT & PATHS
+# ==============================================================================
+checkpoint: "/content/drive/MyDrive/pda/models/backups/unified/unified_planner_backup_epoch_017.ckpt"  # Path to trained checkpoint
+output_dir: "outputs/unified_eval"  # Directory to save evaluation results
+
+# ==============================================================================
+# ENVIRONMENT CONFIGURATION
+# ==============================================================================
+env:
+  xml_path: "envs/panda_pick_place.xml"      # MuJoCo XML file
+  urdf_path: "urdf/panda_mujoco_kinematics.urdf"  # URDF for IK (optional)
+
+# ==============================================================================
+# EVALUATION PARAMETERS
+# ==============================================================================
+n_episodes: 2           # Number of episodes to evaluate
+seed: 42                # Random seed for first episode (subsequent = seed + episode_id)
+max_steps: 800          # Maximum steps per episode
+
+# Success criteria
+success_threshold: 0.05        # Distance to goal (meters) to consider success
+success_duration_steps: 10     # Consecutive steps at goal required for success
+
+# ==============================================================================
+# DIFFUSION SAMPLING PARAMETERS
+# ==============================================================================
+sampling:
+  inference_steps: 10         # DDIM sampling steps (fewer = faster, but less quality)
+  guidance_scale: 1.5         # Classifier-Free Guidance scale (1.0 = no guidance)
+  
+# ==============================================================================
+# IK SOLVER (OPTIONAL)
+# ==============================================================================
+# Set to true if you want to use IK to convert delta poses to joint deltas
+# If false, will attempt to use delta poses directly (may not work)
+use_ik: true
+
+# ==============================================================================
+# VIDEO RECORDING
+# ==============================================================================
+video:
+  fps: 30               # Frames per second
+  codec: "mp4v"         # Video codec
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+logging:
+  log_level: "INFO"
+  save_intermediate_frames: false  # Save individual frames (disk intensive)
