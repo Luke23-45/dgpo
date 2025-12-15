@@ -41,6 +41,8 @@ from pytorch_lightning.callbacks import (
     TQDMProgressBar,
     EarlyStopping,
 )
+import threading
+import shutil
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from torch.utils.data import DataLoader
 from transformers import get_cosine_schedule_with_warmup
@@ -434,15 +436,72 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
 
     
 
+    # def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int):
+    #     """
+    #     [SOTA, ATOMICALLY SAFE, PRODUCTION-GRADE VERSION]
+    #     Hook for Failsafe Backups at end of each epoch.
+    #     """
+    #     if self.trainer.global_rank != 0:
+    #         return
+
+    #     # 1. Check if this is the last batch of the epoch
+    #     try:
+    #         total_batches = len(self.trainer.train_dataloader)
+    #     except:
+    #         total_batches = self.trainer.num_training_batches
+        
+    #     is_last_batch = (batch_idx + 1) == total_batches
+    #     if not is_last_batch:
+    #         return
+
+    #     # 2. Check Frequency
+    #     epoch = self.trainer.current_epoch
+    #     # Default to 5 for Unified Planner (heavy model), vs 1 for Semantic
+    #     backup_freq = self.cfg.training.get("backup_every_n_epochs", 2)
+        
+    #     if backup_freq <= 0 or (epoch + 1) % backup_freq != 0:
+    #         return
+        
+    #     logger.info(f"End of epoch {epoch}: Triggering atomic failsafe backup...")
+        
+    #     # 3. Setup Paths
+    #     # backup_dir = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
+
+    #     backup_dir = Path("/content/temp_backups")
+    #     backup_dir.mkdir(parents=True, exist_ok=True)
+    #     new_backup_path = backup_dir / f"unified_planner_backup_epoch_{epoch:03d}.ckpt"
+
+    #     try:
+    #         # 4. SAVE (Fast version - No GC)
+    #         self.trainer.save_checkpoint(new_backup_path)
+    #         logger.info(f"Failsafe backup saved to {new_backup_path}")
+
+    #         # 5. CLEANUP (Correct glob pattern for Unified Planner)
+    #         # We look specifically for 'unified_planner_backup_epoch_*.ckpt'
+    #         all_backups = sorted(list(backup_dir.glob("unified_planner_backup_epoch_*.ckpt")))
+    #         backups_to_keep = self.cfg.training.get("backups_to_keep", 3)
+            
+    #         if len(all_backups) > backups_to_keep:
+    #             for old_backup in all_backups[:-backups_to_keep]:
+    #                 try:
+    #                     old_backup.unlink()
+    #                     logger.info(f"Cleaned up old backup: {old_backup.name}")
+    #                 except OSError as e:
+    #                     logger.warning(f"Could not delete {old_backup}: {e}")
+
+    #     except Exception as e:
+    #         logger.error(f"CRITICAL: Failed to save backup: {e}", exc_info=True)
+
+
     def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int):
         """
-        [SOTA, ATOMICALLY SAFE, PRODUCTION-GRADE VERSION]
-        Hook for Failsafe Backups at end of each epoch.
+        [SOTA PATCH] Self-contained Async Backup.
+        Saves to local disk immediately, then spawns a thread for Drive upload.
         """
         if self.trainer.global_rank != 0:
             return
 
-        # 1. Check if this is the last batch of the epoch
+        # 1. Check if end of epoch
         try:
             total_batches = len(self.trainer.train_dataloader)
         except:
@@ -454,41 +513,62 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
 
         # 2. Check Frequency
         epoch = self.trainer.current_epoch
-        # Default to 5 for Unified Planner (heavy model), vs 1 for Semantic
-        backup_freq = self.cfg.training.get("backup_every_n_epochs", 2)
+        backup_freq = self.cfg.training.get("backup_every_n_epochs", 5)
         
         if backup_freq <= 0 or (epoch + 1) % backup_freq != 0:
             return
         
-        logger.info(f"End of epoch {epoch}: Triggering atomic failsafe backup...")
-        
+        logger.info(f"End of epoch {epoch}: Triggering ASYNC backup...")
+
         # 3. Setup Paths
-        # backup_dir = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
+        filename = f"unified_planner_backup_epoch_{epoch:03d}.ckpt"
+        
+        # Local (Fast NVMe) - Creates directory if missing
+        local_root = Path("/content/fast_ckpt")
+        local_root.mkdir(parents=True, exist_ok=True)
+        local_path = local_root / filename
+        
+        # Remote (Slow Drive)
+        drive_root = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
+        drive_path = drive_root / filename
 
-        backup_dir = Path("/content/temp_backups")
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        new_backup_path = backup_dir / f"unified_planner_backup_epoch_{epoch:03d}.ckpt"
+        # 4. Memory Hygiene (Prevents RAM Crash)
+        import gc
+        gc.collect() 
 
+        # 5. Fast Save (Blocking for ~2-5 seconds)
         try:
-            # 4. SAVE (Fast version - No GC)
-            self.trainer.save_checkpoint(new_backup_path)
-            logger.info(f"Failsafe backup saved to {new_backup_path}")
-
-            # 5. CLEANUP (Correct glob pattern for Unified Planner)
-            # We look specifically for 'unified_planner_backup_epoch_*.ckpt'
-            all_backups = sorted(list(backup_dir.glob("unified_planner_backup_epoch_*.ckpt")))
-            backups_to_keep = self.cfg.training.get("backups_to_keep", 3)
-            
-            if len(all_backups) > backups_to_keep:
-                for old_backup in all_backups[:-backups_to_keep]:
-                    try:
-                        old_backup.unlink()
-                        logger.info(f"Cleaned up old backup: {old_backup.name}")
-                    except OSError as e:
-                        logger.warning(f"Could not delete {old_backup}: {e}")
-
+            self.trainer.save_checkpoint(local_path)
+            logger.info(f"💾 [Async] Saved locally to: {local_path}")
         except Exception as e:
-            logger.error(f"CRITICAL: Failed to save backup: {e}", exc_info=True)
+            logger.error(f"CRITICAL: Local save failed: {e}")
+            return
+
+        # 6. Background Upload (Non-blocking)
+        def _upload_worker(src, dst):
+            try:
+                # This line takes 3 minutes, but runs in background
+                shutil.copy2(src, dst)
+                logger.info(f"✅ [Async] Drive upload complete: {dst.name}")
+                
+                # Optional: Clean up old backups on Drive to save space
+                # (Simple logic: keep last 3 files that match the pattern)
+                all_backups = sorted(list(dst.parent.glob("unified_planner_backup_epoch_*.ckpt")))
+                if len(all_backups) > 3:
+                    for old in all_backups[:-3]:
+                        try:
+                            old.unlink()
+                            logger.info(f"🗑️ [Async] Cleaned old backup: {old.name}")
+                        except: pass
+            except Exception as e:
+                logger.error(f"❌ [Async] Upload failed for {src.name}: {e}")
+
+        # Spawn and start the thread
+        t = threading.Thread(target=_upload_worker, args=(local_path, drive_path), daemon=True)
+        t.start()
+        
+        # Keep a reference so Python doesn't garbage collect the thread immediately (just in case)
+        self._latest_upload_thread = t
 
 # ==============================================================================
 # 3. MAIN EXECUTION ENTRY POINT

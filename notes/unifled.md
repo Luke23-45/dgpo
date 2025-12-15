@@ -803,3 +803,201 @@ Epoch 29: 100% 638/638 [54:07<00:00,  5.09s/it, v_num=q61t, train/loss_step=0.03
 
 Epoch 30: 100% 638/638 [34:30<00:00,  3.24s/it, v_num=q61t, train/loss_step=0.0303, diff_step=0.0303, pose_step=0.0299, grip_step=0.0324, phase_step=0.000805, val/total_error=0.00533, val/diff_loss=0.0235, train/loss_epoch=0.0274, diff_epoch=0.0269, pose_epoch=0.0277, grip_epoch=0.0213, phase_epoch=0.00499][2025-12-15 02:11:20,067][train_unified_planner][INFO] - End of epoch 30: Triggering atomic failsafe backup...
 `weights_only` was not set, defaulting to `False`.
+
+
+ining: |          | 0/? [00:33<?, ?it/s, v_num=oh9g, train/loss_step=0.029, diff_step=0.029, pose_step=0.0277, grip_step=0.0383, phase_step=9.49e-5, train/loss_epoch=0.029, diff_epoch=0.029, pose_epoch=0.0277, grip_epoch=0.0383, phase_epoch=9.49e-5]
+======================================================================
+📊 EPOCH 28 COMPLETE
+======================================================================
+  Train Loss:     0.029006
+    - Diffusion:  0.028997
+    - Pose:       0.027666
+    - Grip:       0.038311
+    - Phase:      0.000095
+  Learning Rate:  0.00e+00
+======================================================================
+
+Epoch 29: 100% 638/638 [29:54<00:00,  2.81s/it, v_num=oh9g, train/loss_step=0.0274, diff_step=0.0274, pose_step=0.0291, grip_step=0.0159, phase_step=9.7e-5, train/loss_epoch=0.029, diff_epoch=0.029, pose_epoch=0.0277, grip_epoch=0.0383, phase_epoch=9.49e-5]  [2025-12-15 13:21:31,254][train_unified_planner][INFO] - End of epoch 29: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-15 13:22:31,354][train_unified_planner][INFO] - Failsafe backup saved to /content/temp_backups/unified_planner_backup_epoch_029.ckpt
+
+Validation: |          | 0/? [00:00<?, ?it/s][2025-12-15 13:22:31,380][lmdb_utils][INFO] -  Opened LMDB at /content/pda_data/val/validation_set.lmdb | mode=RO | file-mode
+
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation DataLoader 0:   0% 0/62 [00:00<?, ?it/s]
+Validation DataLoader 0:  81% 50/62 [04:38<01:06,  5.57s/it]
+Validation DataLoader 0: 100% 62/62 [05:45<00:00,  5.57s/it]
+Epoch 29: 100% 638/638 [36:42<00:00,  3.45s/it, v_num=oh9g, train/loss_step=0.0274, diff_step=0.0274, pose_step=0.0291, grip_step=0.0159, phase_step=9.7e-5, train/loss_epoch=0.0275, diff_epoch=0.027, pose_epoch=0.0277, grip_epoch=0.0221, phase_epoch=0.0054, val/total_error=0.00624, val/diff_loss=0.024]
+======================================================================
+📊 EPOCH 29 COMPLETE
+======================================================================
+  Train Loss:     0.027520
+    - Diffusion:  0.026979
+    - Pose:       0.027676
+    - Grip:       0.022103
+    - Phase:      0.005405
+  Learning Rate:  0.00e+00
+  Val Error:      0.006242
+    - Pos Error:  0.002142
+    - Rot Error:  0.000916
+    - Grip Error: 0.068050
+======================================================================
+
+Epoch 30: 100% 638/638 [30:00<00:00,  2.82s/it, v_num=oh9g, train/loss_step=0.0386, diff_step=0.0383, pose_step=0.0403, grip_step=0.024, phase_step=0.00365, train/loss_epoch=0.0275, diff_epoch=0.027, pose_epoch=0.0277, grip_epoch=0.0221, phase_epoch=0.0054, val/total_error=0.00624, val/diff_loss=0.024] [2025-12-15 13:58:19,894][train_unified_planner][INFO] - End of epoch 30: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-15 14:00:19,892][train_unified_planner][INFO] - Failsafe backup saved to /content/temp_backups/unified_planner_backup_epoch_030.ckpt
+Epoch 30: 100% 638/638 [32:00<00:00,  3.01s/it, v_num=oh9g, train/loss_step=0.0386, diff_step=0.0383, pose_step=0.0403, grip_step=0.024, phase_step=0.00365, train/loss_epoch=0.0277, diff_epoch=0.0267, pose_epoch=0.0275, grip_epoch=0.0211, phase_epoch=0.00956, val/total_error=0.00624, val/diff_loss=0.024]
+======================================================================
+📊 EPOCH 30 COMPLETE
+======================================================================
+  Train Loss:     0.027694
+    - Diffusion:  0.026738
+    - Pose:       0.027547
+    - Grip:       0.021074
+    - Phase:      0.009561
+  Learning Rate:  0.00e+00
+  Val Error:      0.006242
+    - Pos Error:  0.002142
+    - Rot Error:  0.000916
+    - Grip Error: 0.068050
+======================================================================
+
+Epoch 31: 100% 638/638 [30:02<00:00,  2.82s/it, v_num=oh9g, train/loss_step=0.0282, diff_step=0.0282, pose_step=0.0299, grip_step=0.0158, phase_step=0.000209, train/loss_epoch=0.0277, diff_epoch=0.0267, pose_epoch=0.0275, grip_epoch=0.0211, phase_epoch=0.00956, val/total_error=0.00624, val/diff_loss=0.024][2025-12-15 14:30:21,918][train_unified_planner][INFO] - End of epoch 31: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-15 14:33:00,691][train_unified_planner][INFO] - Failsafe backup saved to /content/temp_backups/unified_planner_backup_epoch_031.ckpt
+[2025-12-15 14:33:00,744][train_unified_planner][INFO] - Cleaned up old backup: unified_planner_backup_epoch_028.ckpt
+
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation DataLoader 0:   0% 0/62 [00:00<?, ?it/s]
+Validation DataLoader 0:  81% 50/62 [04:41<01:07,  5.64s/it]
+Validation DataLoader 0: 100% 62/62 [05:47<00:00,  5.61s/it]
+Epoch 31: 100% 638/638 [38:31<00:00,  3.62s/it, v_num=oh9g, train/loss_step=0.0282, diff_step=0.0282, pose_step=0.0299, grip_step=0.0158, phase_step=0.000209, train/loss_epoch=0.0281, diff_epoch=0.027, pose_epoch=0.0278, grip_epoch=0.0215, phase_epoch=0.0108, val/total_error=0.00543, val/diff_loss=0.0224]  
+======================================================================
+📊 EPOCH 31 COMPLETE
+======================================================================
+  Train Loss:     0.028062
+    - Diffusion:  0.026981
+    - Pose:       0.027768
+    - Grip:       0.021473
+    - Phase:      0.010815
+  Learning Rate:  0.00e+00
+  Val Error:      0.005432
+    - Pos Error:  0.002327
+    - Rot Error:  0.001005
+    - Grip Error: 0.066710
+======================================================================
+
+Epoch 32: 100% 638/638 [29:58<00:00,  2.82s/it, v_num=oh9g, train/loss_step=0.0358, diff_step=0.0358, pose_step=0.0376, grip_step=0.0231, phase_step=5.18e-5, train/loss_epoch=0.0281, diff_epoch=0.027, pose_epoch=0.0278, grip_epoch=0.0215, phase_epoch=0.0108, val/total_error=0.00543, val/diff_loss=0.0224][2025-12-15 15:08:49,743][train_unified_planner][INFO] - End of epoch 32: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-15 15:11:22,815][train_unified_planner][INFO] - Failsafe backup saved to /content/temp_backups/unified_planner_backup_epoch_032.ckpt
+[2025-12-15 15:11:22,854][train_unified_planner][INFO] - Cleaned up old backup: unified_planner_backup_epoch_029.ckpt
+Epoch 32: 100% 638/638 [32:31<00:00,  3.06s/it, v_num=oh9g, train/loss_step=0.0358, diff_step=0.0358, pose_step=0.0376, grip_step=0.0231, phase_step=5.18e-5, train/loss_epoch=0.027, diff_epoch=0.0263, pose_epoch=0.0271, grip_epoch=0.0204, phase_epoch=0.00779, val/total_error=0.00543, val/diff_loss=0.0224]
+======================================================================
+📊 EPOCH 32 COMPLETE
+======================================================================
+  Train Loss:     0.027032
+    - Diffusion:  0.026253
+    - Pose:       0.027091
+    - Grip:       0.020391
+    - Phase:      0.007792
+  Learning Rate:  0.00e+00
+  Val Error:      0.005432
+    - Pos Error:  0.002327
+    - Rot Error:  0.001005
+    - Grip Error: 0.066710
+======================================================================
+
+Epoch 33: 100% 638/638 [30:01<00:00,  2.82s/it, v_num=oh9g, train/loss_step=0.0226, diff_step=0.0225, pose_step=0.0216, grip_step=0.0288, phase_step=0.00081, train/loss_epoch=0.027, diff_epoch=0.0263, pose_epoch=0.0271, grip_epoch=0.0204, phase_epoch=0.00779, val/total_error=0.00543, val/diff_loss=0.0224][2025-12-15 15:41:24,808][train_unified_planner][INFO] - End of epoch 33: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-15 15:43:54,062][train_unified_planner][INFO] - Failsafe backup saved to /content/temp_backups/unified_planner_backup_epoch_033.ckpt
+[2025-12-15 15:43:54,119][train_unified_planner][INFO] - Cleaned up old backup: unified_planner_backup_epoch_030.ckpt
+
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation DataLoader 0:   0% 0/62 [00:00<?, ?it/s]
+Validation DataLoader 0:  81% 50/62 [04:39<01:07,  5.59s/it]
+Validation DataLoader 0: 100% 62/62 [05:45<00:00,  5.57s/it]
+Epoch 33: 100% 638/638 [38:18<00:00,  3.60s/it, v_num=oh9g, train/loss_step=0.0226, diff_step=0.0225, pose_step=0.0216, grip_step=0.0288, phase_step=0.00081, train/loss_epoch=0.0263, diff_epoch=0.0257, pose_epoch=0.0265, grip_epoch=0.0203, phase_epoch=0.00586, val/total_error=0.00496, val/diff_loss=0.0238]
+======================================================================
+📊 EPOCH 33 COMPLETE
+======================================================================
+  Train Loss:     0.026307
+    - Diffusion:  0.025721
+    - Pose:       0.026498
+    - Grip:       0.020288
+    - Phase:      0.005856
+  Learning Rate:  0.00e+00
+  Val Error:      0.004960
+    - Pos Error:  0.002263
+    - Rot Error:  0.000878
+    - Grip Error: 0.058051
+======================================================================
+
+Epoch 34: 100% 638/638 [29:59<00:00,  2.82s/it, v_num=oh9g, train/loss_step=0.0256, diff_step=0.0256, pose_step=0.0273, grip_step=0.0134, phase_step=0.000325, train/loss_epoch=0.0263, diff_epoch=0.0257, pose_epoch=0.0265, grip_epoch=0.0203, phase_epoch=0.00586, val/total_error=0.00496, val/diff_loss=0.0238][2025-12-15 16:19:40,862][train_unified_planner][INFO] - End of epoch 34: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-15 16:22:34,993][train_unified_planner][INFO] - Failsafe backup saved to /content/temp_backups/unified_planner_backup_epoch_034.ckpt
+[2025-12-15 16:22:35,026][train_unified_planner][INFO] - Cleaned up old backup: unified_planner_backup_epoch_031.ckpt
+Epoch 34: 100% 638/638 [32:53<00:00,  3.09s/it, v_num=oh9g, train/loss_step=0.0256, diff_step=0.0256, pose_step=0.0273, grip_step=0.0134, phase_step=0.000325, train/loss_epoch=0.0257, diff_epoch=0.0253, pose_epoch=0.0261, grip_epoch=0.0201, phase_epoch=0.00394, val/total_error=0.00496, val/diff_loss=0.0238]
+======================================================================
+📊 EPOCH 34 COMPLETE
+======================================================================
+  Train Loss:     0.025723
+    - Diffusion:  0.025330
+    - Pose:       0.026070
+    - Grip:       0.020149
+    - Phase:      0.003935
+  Learning Rate:  0.00e+00
+  Val Error:      0.004960
+    - Pos Error:  0.002263
+    - Rot Error:  0.000878
+    - Grip Error: 0.058051
+======================================================================
+
+Epoch 35: 100% 638/638 [30:01<00:00,  2.82s/it, v_num=oh9g, train/loss_step=0.0162, diff_step=0.0162, pose_step=0.0165, grip_step=0.0135, phase_step=0.000837, train/loss_epoch=0.0257, diff_epoch=0.0253, pose_epoch=0.0261, grip_epoch=0.0201, phase_epoch=0.00394, val/total_error=0.00496, val/diff_loss=0.0238][2025-12-15 16:52:36,350][train_unified_planner][INFO] - End of epoch 35: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-15 16:55:47,834][train_unified_planner][INFO] - Failsafe backup saved to /content/temp_backups/unified_planner_backup_epoch_035.ckpt
+[2025-12-15 16:55:47,894][train_unified_planner][INFO] - Cleaned up old backup: unified_planner_backup_epoch_032.ckpt
+
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation: |          | 0/? [00:00<?, ?it/s]
+Validation DataLoader 0:   0% 0/62 [00:00<?, ?it/s]
+Validation DataLoader 0:  81% 50/62 [04:42<01:07,  5.65s/it]
+Validation DataLoader 0: 100% 62/62 [05:48<00:00,  5.62s/it]
+Epoch 35: 100% 638/638 [39:03<00:00,  3.67s/it, v_num=oh9g, train/loss_step=0.0162, diff_step=0.0162, pose_step=0.0165, grip_step=0.0135, phase_step=0.000837, train/loss_epoch=0.0266, diff_epoch=0.0257, pose_epoch=0.0265, grip_epoch=0.0201, phase_epoch=0.00931, val/total_error=0.00531, val/diff_loss=0.0233]
+======================================================================
+📊 EPOCH 35 COMPLETE
+======================================================================
+  Train Loss:     0.026598
+    - Diffusion:  0.025667
+    - Pose:       0.026468
+    - Grip:       0.020057
+    - Phase:      0.009308
+  Learning Rate:  0.00e+00
+  Val Error:      0.005307
+    - Pos Error:  0.002570
+    - Rot Error:  0.000888
+    - Grip Error: 0.063122
+======================================================================
+
+Epoch 36: 100% 638/638 [29:58<00:00,  2.82s/it, v_num=oh9g, train/loss_step=0.0302, diff_step=0.0291, pose_step=0.0315, grip_step=0.012, phase_step=0.0113, train/loss_epoch=0.0266, diff_epoch=0.0257, pose_epoch=0.0265, grip_epoch=0.0201, phase_epoch=0.00931, val/total_error=0.00531, val/diff_loss=0.0233] [2025-12-15 17:31:37,467][train_unified_planner][INFO] - End of epoch 36: Triggering atomic failsafe backup...
+`weights_only` was not set, defaulting to `False`.
+[2025-12-15 17:35:17,280][train_unified_planner][INFO] - Failsafe backup saved to /content/temp_backups/unified_planner_backup_epoch_036.ckpt
+[2025-12-15 17:35:17,315][train_unified_planner][INFO] - Cleaned up old backup: unified_planner_backup_epoch_033.ckpt
+Epoch 36: 100% 638/638 [33:38<00:00,  3.16s/it, v_num=oh9g, train/loss_step=0.0302, diff_step=0.0291, pose_step=0.0315, grip_step=0.012, phase_step=0.0113, train/loss_epoch=0.0252, diff_epoch=0.0247, pose_epoch=0.0254, grip_epoch=0.0201, phase_epoch=0.00449, val/total_error=0.00531, val/diff_loss=0.0233]
+======================================================================
+📊 EPOCH 36 COMPLETE
+======================================================================
+  Train Loss:     0.025187
+    - Diffusion:  0.024739
+    - Pose:       0.025406
+    - Grip:       0.020068
+    - Phase:      0.004489
+  Learning Rate:  0.00e+00
+  Val Error:      0.005307
+    - Pos Error:  0.002570
+    - Rot Error:  0.000888
+    - Grip Error: 0.063122
+======================================================================
+
+Epoch 37:   0% 0/638 [00:00<?, ?it/s, v_num=oh9g, train/loss_step=0.0302, diff_step=0.0291, pose_step=0.0315, grip_step=0.012, phase_step=0.0113, train/loss_epoch=0.0252, diff_epoch=0.0247, pose_epoch=0.0254, grip_epoch=0.0201, phase_epoch=0.00449, val/total_error=0.00531, val/diff_loss=0.0233][rank: 0] Received SIGTERM: 15
