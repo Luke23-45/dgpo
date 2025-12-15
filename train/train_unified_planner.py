@@ -363,10 +363,12 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         """Clear RAM after validation to prevent memory buildup."""
-        import gc
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # import gc
+        # gc.collect()
+        # if torch.cuda.is_available():
+        #     torch.cuda.empty_cache()
+
+        pass
 
     def configure_optimizers(self):
         """
@@ -430,64 +432,7 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
             }
         }
 
-    # def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int):
-    #     """
-    #     [SOTA, ATOMICALLY SAFE, PRODUCTION-GRADE VERSION]
-    #     Hook for Failsafe Backups at end of each epoch.
-    #     """
-    #     if self.trainer.global_rank != 0:
-    #         return
-
-    #     try:
-    #         total_batches = len(self.trainer.train_dataloader)
-    #     except:
-    #         total_batches = self.trainer.num_training_batches
-        
-    #     is_last_batch = (batch_idx + 1) == total_batches
-    #     if not is_last_batch:
-    #         return
-
-    #     epoch = self.trainer.current_epoch
-    #     backup_freq = self.cfg.training.get("backup_every_n_epochs", 5)
-        
-    #     if backup_freq <= 0 or (epoch + 1) % backup_freq != 0:
-    #         return
-        
-    #     logger.info(f"End of epoch {epoch}: Triggering atomic failsafe backup...")
-        
-    #     # === RAM OPTIMIZATION: Clear cache before saving ===
-    #     import gc
-    #     gc.collect()
-    #     if torch.cuda.is_available():
-    #         torch.cuda.empty_cache()
-        
-    #     backup_dir = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
-    #     backup_dir.mkdir(parents=True, exist_ok=True)
-    #     new_backup_path = backup_dir / f"unified_planner_backup_epoch_{epoch:03d}.ckpt"
-
-    #     try:
-    #         self.trainer.save_checkpoint(new_backup_path)
-    #         logger.info(f"Failsafe backup saved to {new_backup_path}")
-            
-    #         # === RAM OPTIMIZATION: Clear cache after saving ===
-    #         gc.collect()
-    #         if torch.cuda.is_available():
-    #             torch.cuda.empty_cache()
-
-    #         # Clean old backups
-    #         all_backups = sorted(list(backup_dir.glob("unified_planner_backup_epoch_*.ckpt")))
-    #         backups_to_keep = self.cfg.training.get("backups_to_keep", 3)
-            
-    #         if len(all_backups) > backups_to_keep:
-    #             for old_backup in all_backups[:-backups_to_keep]:
-    #                 try:
-    #                     old_backup.unlink()
-    #                     logger.info(f"Cleaned up old backup: {old_backup.name}")
-    #                 except OSError as e:
-    #                     logger.warning(f"Could not delete {old_backup}: {e}")
-
-    #     except Exception as e:
-    #         logger.error(f"CRITICAL: Failed to save backup: {e}", exc_info=True)
+    
 
     def on_train_batch_end(self, outputs, batch: Dict[str, Any], batch_idx: int):
         """
@@ -518,7 +463,9 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
         logger.info(f"End of epoch {epoch}: Triggering atomic failsafe backup...")
         
         # 3. Setup Paths
-        backup_dir = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
+        # backup_dir = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
+
+        backup_dir = Path("/content/temp_backups")
         backup_dir.mkdir(parents=True, exist_ok=True)
         new_backup_path = backup_dir / f"unified_planner_backup_epoch_{epoch:03d}.ckpt"
 
@@ -597,35 +544,42 @@ def main(cfg: DictConfig) -> None:
     # Check if validation dataset exists
     has_validation = cfg.dataset.get("val_path") is not None
 
-    # 4. Callbacks
+# 4. Callbacks
     callbacks = [
         LearningRateMonitor(logging_interval="step"),
         TQDMProgressBar(refresh_rate=50),
     ]
     
-    # Only add ModelCheckpoint with validation monitoring if val data exists
-    checkpoint_path = Path(cfg.training.get("checkpoint_dir"))
-    if has_validation:
-        callbacks.append(ModelCheckpoint(
-            dirpath=str(checkpoint_path  / "checkpoints"),
-            filename="udp-{epoch:02d}-{val/total_error:.4f}",
-            monitor="val/total_error",
-            mode="min",
-            save_top_k=3,
-            save_last=True,
-            verbose=True
-        ))
+    # [ROBUSTNESS FIX] Check config to determine if we should save standard checkpoints
+    should_save_checkpoints = cfg.training.get("enable_checkpointing", True)
+
+    if should_save_checkpoints:
+        # Determine path (default to output_dir if not specified)
+        ckpt_dir_root = Path(cfg.training.get("checkpoint_dir", output_dir))
+        
+        if has_validation:
+            # Scenario A: Validation data exists -> Save Best Models
+            callbacks.append(ModelCheckpoint(
+                dirpath=str(ckpt_dir_root / "checkpoints"),
+                filename="udp-{epoch:02d}-{val/total_error:.4f}",
+                monitor="val/total_error",
+                mode="min",
+                save_top_k=3,
+                save_last=True,
+                verbose=True
+            ))
+        else:
+            # Scenario B: No Validation -> Save Periodic Models
+            callbacks.append(ModelCheckpoint(
+                dirpath=str(ckpt_dir_root / "checkpoints"),
+                filename="udp-{epoch:02d}",
+                save_top_k=-1,  # Keep all
+                every_n_epochs=5,
+                save_last=True,
+                verbose=True
+            ))
     else:
-        # Save checkpoints based on epoch only (no validation)
-        callbacks.append(ModelCheckpoint(
-            dirpath=str(checkpoint_path / "checkpoints"),
-            filename="udp-{epoch:02d}",
-            save_top_k=-1,  # Save all
-            every_n_epochs=5,
-            save_last=True,
-            verbose=True
-        ))
-        logger.warning("No validation dataset - checkpoints will be saved by epoch only")
+        logger.info("Standard ModelCheckpoint callback DISABLED by config. Relying on atomic backups only.")
     
     # Optional early stopping
     if cfg.training.get("early_stopping_patience", 0) > 0:
@@ -648,23 +602,23 @@ def main(cfg: DictConfig) -> None:
         log_every_n_steps=cfg.training.get("log_every_n_steps", 50),
         enable_progress_bar=True,
         enable_model_summary=True,
-        deterministic=False,  # Faster training
-        benchmark=True,       # cudnn.benchmark optimization
+        deterministic=False,
+        benchmark=True,
+        
+        # [CRITICAL FIX] Pass the config value here. 
+        # If False, this prevents Lightning from creating a default 'last.ckpt'.
+        enable_checkpointing=should_save_checkpoints, 
     )
     
     # Only enable validation-related settings if we have validation data
     if has_validation:
         trainer_kwargs["check_val_every_n_epoch"] = cfg.training.get("check_val_every_n_epoch", 1)
-        
-        # IMPORTANT: val_check_interval MUST be a float in [0, 1] to mean "fraction of epoch"
-        # Values >= 1 are interpreted as "every N batches" which causes frequent validation!
+        # val_check_interval MUST be a float [0.0, 1.0] for fraction of epoch
         val_interval = cfg.training.get("val_check_interval", 1.0)
         if val_interval > 1.0:
             logger.warning(f"val_check_interval={val_interval} is >= 1, this means 'every {int(val_interval)} batches'!")
-            logger.warning("For per-epoch validation, use val_check_interval=1.0 (float in [0, 1])")
         trainer_kwargs["val_check_interval"] = val_interval
     else:
-        # No validation - skip sanity check entirely
         trainer_kwargs["num_sanity_val_steps"] = 0
         trainer_kwargs["limit_val_batches"] = 0
         logger.info("No validation dataset provided - validation disabled")

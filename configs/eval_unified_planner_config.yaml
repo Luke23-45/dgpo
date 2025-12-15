@@ -5,7 +5,7 @@
 # CHECKPOINT & PATHS
 # ==============================================================================
 checkpoint: "/content/drive/MyDrive/pda/models/backups/uop/unified_planner_backup_epoch_017.ckpt"  # Path to trained checkpoint
-output_dir: "outputs/unified_eval"  # Directory to save evaluation results
+output_dir: "outputs/unified_eval_45"  # Directory to save evaluation results
 
 # ==============================================================================
 # ENVIRONMENT CONFIGURATION

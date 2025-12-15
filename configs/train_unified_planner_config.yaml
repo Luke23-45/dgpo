@@ -81,13 +81,14 @@ training:
   early_stopping_patience: 15   # 0 = disabled
   
   # Failsafe backups
+  enable_checkpointing: false # Set to false to disable main PL checkpointing (save_top_k etc)
   backup_every_n_epochs: 1
 
   backups_to_keep: 3
   backup_dir: "/content/drive/MyDrive/pda/models/backups/unified/"
   
   # Pretrained initialization (from BC transfer)/content/drive/MyDrive/pda/resume_models/unified/ints/unified_planner_initialize0d.ckpt"
-  resume_from_checkpoint: "/content/drive/MyDrive/pda/mod/rl/unified/unified_planner_backup_epoch_009.ckpt"  # Resume full training state
+  resume_from_checkpoint: "/content/drive/MyDrive/pda/unified/unified_planner_backup_epoch_023.ckpt"  # Resume full training state
   
   # Output
   output_dir: "/content/drive/MyDrive/pda/logs/"

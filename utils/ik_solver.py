@@ -398,10 +398,16 @@ class IKSolver:
         # integral_clamp = 0.4
         # damping = 1e-2
 
-        Kp = 139.0  
-        Kd = 3.0    
-        Ki = 0.1    
-        
+        # print(f"current: kp {self.kp} - kd-> {self.kd} - ki->{self.ki}")
+
+        Kp = self.kp
+        Kd = self.kd
+        Ki = self.ki
+
+        # Kp = 139.0  
+        # Kd = 3.0    
+        # Ki = 0.1    
+
         integral_clamp = 0.1
         damping = 2e-2
 

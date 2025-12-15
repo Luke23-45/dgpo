@@ -221,6 +221,15 @@ class UnifiedPlannerEvaluator:
         if cfg.get("use_ik", False):
             log.info("Initializing IK Solver...")
             self.ik_solver = IKSolver(urdf_path=cfg.env.urdf_path)
+            
+            # === DYNAMIC TUNING SUPPORT ===
+            # Default to current "tuned" values if not specified
+            ik_kp = getattr(cfg, "ik_kp", 139.0)
+            ik_ki = getattr(cfg, "ik_ki", 0.1)
+            ik_kd = getattr(cfg, "ik_kd", 3.0)
+            
+            log.info(f"Setting IK Solver Gains: Kp={ik_kp}, Ki={ik_ki}, Kd={ik_kd}")
+            self.ik_solver.set_gains(kp=ik_kp, ki=ik_ki, kd=ik_kd)
         else:
             self.ik_solver = None
         
@@ -359,6 +368,7 @@ class UnifiedPlannerEvaluator:
             
             # Apply action scaling to position deltas (diagnostic tuning)
             action_scale = getattr(self.cfg, 'action_scale', 1.0)
+            
             delta_pose[:3] = delta_pose[:3] * action_scale  # Scale dx, dy, dz only
             
             # Safety clip gripper to [-1, 1] range
@@ -378,25 +388,19 @@ class UnifiedPlannerEvaluator:
                 from utils.unified_planner_dataset import apply_delta_pose
                 target_pose = apply_delta_pose(current_ee_pose, delta_pose)
                 
-                # === DIAGNOSTIC: Print step 0 details ===
-                if step == 0:
-                    log.info("=== Step 0 Diagnostic ===")
-                    log.info(f"  action_scale applied: {action_scale}")
-                    log.info(f"  Raw sampled_actions shape: {sampled_actions.shape}")
-                    log.info(f"  delta_pose (SCALED dx,dy,dz + dquat): {delta_pose}")
-                    log.info(f"  current_ee_pose: {current_ee_pose}")
-                    log.info(f"  target_pose: {target_pose}")
-                    log.info(f"  object_pos: {obs['object_pos_world']}")
-                    log.info(f"  goal_pos: {obs['goal_pos_world']}")
-                    # Direction check: does delta point toward object?
-                    obj_pos = obs['object_pos_world']
-                    ee_to_obj = obj_pos - current_ee_pose[:3]
-                    ee_to_obj_norm = ee_to_obj / (np.linalg.norm(ee_to_obj) + 1e-8)
-                    delta_norm = delta_pose[:3] / (np.linalg.norm(delta_pose[:3]) + 1e-8)
-                    dot_product = np.dot(ee_to_obj_norm, delta_norm)
-                    log.info(f"  Vector to object: {ee_to_obj}")
-                    log.info(f"  Delta position: {delta_pose[:3]}")
-                    log.info(f"  Dot product (should be >0 if moving towards object): {dot_product:.4f}")
+                # === DIAGNOSTIC: Log every step ===
+                # if step % 10 == 0: # Optional: Reduce spam if needed
+                log.info(f"--- Step {step} ---")
+                log.info(f"  Raw Delta Pose: {delta_pose}")
+                log.info(f"  Current EE: {current_ee_pose[:3]}")
+                log.info(f"  Target  EE: {target_pose[:3]}")
+                
+                # Direction check
+                obj_pos = obs['object_pos_world']
+                ee_to_obj = obj_pos - current_ee_pose[:3]
+                dist_to_obj = np.linalg.norm(ee_to_obj)
+                dot_product = np.dot(ee_to_obj / (dist_to_obj + 1e-8), delta_pose[:3] / (np.linalg.norm(delta_pose[:3]) + 1e-8))
+                log.info(f"  Dist to Obj: {dist_to_obj:.4f} | Dot Prod: {dot_product:.4f}")
                 
                 # Compute delta joints via IK
                 try:
@@ -409,10 +413,9 @@ class UnifiedPlannerEvaluator:
                         effective_dt=self.effective_dt,
                         max_dq=self.env.ACTION_SCALING_FACTOR / self.effective_dt
                     )
-                    # === DIAGNOSTIC: Print IK output at step 0 ===
-                    if step == 0:
-                        log.info(f"  IK delta_joints: {delta_joints}")
-                        log.info(f"  IK delta_joints magnitude: {np.linalg.norm(delta_joints):.4f}")
+                    # === DIAGNOSTIC: Log IK result ===
+                    log.info(f"  IK Delta Joints: {delta_joints}")
+                    log.info(f"  IK Magnitude: {np.linalg.norm(delta_joints):.4f}")
                 except Exception as e:
                     log.warning(f"IK failed at step {step}: {e}")
                     delta_joints = np.zeros(7)
@@ -427,8 +430,13 @@ class UnifiedPlannerEvaluator:
             # CRITICAL FIX: Compensate for environment's internal scaling
             # The env applies: physical_delta = action * ACTION_SCALING_FACTOR
             # So we must send: action = desired_delta / ACTION_SCALING_FACTOR
-            compensated_delta_joints = delta_joints / self.env.ACTION_SCALING_FACTOR
-            # compensated_delta_joints = delta_joints
+            # CORRECTED LOGIC: IK Solver returns normalized action [-1, 1].
+            # Do NOT divide by scaling factor again, or we get gain=45x (Teleportation).
+
+            compensated_delta_joints = delta_joints
+
+
+        #    compensated_delta_joints = delta_joints / self.env.ACTION_SCALING_FACTOR
 
 
 
@@ -448,13 +456,11 @@ class UnifiedPlannerEvaluator:
             dist_obj_goal = np.linalg.norm(obj_pos - goal_pos)
             is_grasped = obs['is_grasped'][0] > 0.5
             
-            # === DIAGNOSTIC: Print EE movement at step 1 ===
-            if step == 1:
-                log.info("=== Step 1 Post-Movement Diagnostic ===")
-                log.info(f"  EE position after step 1: {ee_pos}")
-                log.info(f"  dist_ee_obj: {dist_ee_obj:.4f}")
-                log.info(f"  dist_obj_goal: {dist_obj_goal:.4f}")
-                log.info(f"  is_grasped: {is_grasped}")
+            # === DIAGNOSTIC: Log Post-Step ===
+            log.info(f"  Compensated Action Sent: {compensated_delta_joints}")
+            log.info(f"  EE after step: {ee_pos}")
+            log.info(f"  Move Dist: {np.linalg.norm(ee_pos - obs['ee_pose_world'][:3]):.4f}") # Approx
+            log.info(f"  Is Grasped: {is_grasped}")
             
             # Success check: object near goal and stable
             if dist_obj_goal < self.cfg.success_threshold:
