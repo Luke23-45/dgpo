@@ -1,0 +1,42 @@
+# FILE: configs/eval_semantic_planner_v2_config.yaml
+# Configuration for Semantic Planner Evaluation (v2.0 - Final)
+
+# ==============================================================================
+# CHECKPOINT & PATHS
+# ==============================================================================
+checkpoint: "/content/drive/MyDrive/pda/data/bc/bc_backup_epoch_088.ckpt"
+output_dir: "outputs/semantic_eval_v2"
+
+# ==============================================================================
+# ENVIRONMENT CONFIGURATION
+# ==============================================================================
+env:
+  xml_path: "envs/panda_pick_place.xml"
+  urdf_path: "urdf/panda_mujoco_kinematics.urdf"
+
+# ==============================================================================
+# EVALUATION PARAMETERS
+# ==============================================================================
+n_episodes: 3
+seed: 42
+max_steps: 400
+
+# Success criteria
+success_threshold: 0.05        # Distance to goal (meters) for success
+success_duration_steps: 10     # Consecutive steps at goal required
+
+# ==============================================================================
+# IK SOLVER PID PARAMETERS (TUNABLE)
+# ==============================================================================
+# These are the key parameters to tune via grid_search_semantic.py
+# Based on Unified Planner findings, high Kp values (400-550) enable movement
+
+ik_kp: 500.0   # Proportional gain (main responsiveness)
+ik_ki: 0.2     # Integral gain (steady-state error correction)
+ik_kd: 20.0    # Derivative gain (damping/stability)
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+logging:
+  log_level: "INFO"

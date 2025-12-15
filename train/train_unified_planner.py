@@ -523,20 +523,28 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
         # 3. Setup Paths
         filename = f"unified_planner_backup_epoch_{epoch:03d}.ckpt"
         
-        # Local (Fast NVMe) - Creates directory if missing
+        # Local (Fast NVMe)
         local_root = Path("/content/fast_ckpt")
         local_root.mkdir(parents=True, exist_ok=True)
         local_path = local_root / filename
         
         # Remote (Slow Drive)
         drive_root = Path(self.cfg.training.get("backup_dir", "checkpoints/backup"))
+        
+        # --- FIX: Create the remote directory if it doesn't exist ---
+        try:
+            drive_root.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"Could not create Drive directory immediately: {e}")
+        # ------------------------------------------------------------
+        
         drive_path = drive_root / filename
 
-        # 4. Memory Hygiene (Prevents RAM Crash)
+        # 4. Memory Hygiene
         import gc
         gc.collect() 
 
-        # 5. Fast Save (Blocking for ~2-5 seconds)
+        # 5. Fast Save
         try:
             self.trainer.save_checkpoint(local_path)
             logger.info(f"💾 [Async] Saved locally to: {local_path}")
@@ -544,15 +552,16 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
             logger.error(f"CRITICAL: Local save failed: {e}")
             return
 
-        # 6. Background Upload (Non-blocking)
+        # 6. Background Upload
         def _upload_worker(src, dst):
             try:
-                # This line takes 3 minutes, but runs in background
+                # Ensure dir exists again inside thread (safety)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                
                 shutil.copy2(src, dst)
                 logger.info(f"✅ [Async] Drive upload complete: {dst.name}")
                 
-                # Optional: Clean up old backups on Drive to save space
-                # (Simple logic: keep last 3 files that match the pattern)
+                # Cleanup old backups
                 all_backups = sorted(list(dst.parent.glob("unified_planner_backup_epoch_*.ckpt")))
                 if len(all_backups) > 3:
                     for old in all_backups[:-3]:
@@ -563,11 +572,10 @@ class UnifiedPlannerLightningModule(pl.LightningModule):
             except Exception as e:
                 logger.error(f"❌ [Async] Upload failed for {src.name}: {e}")
 
-        # Spawn and start the thread
+        # Spawn thread
         t = threading.Thread(target=_upload_worker, args=(local_path, drive_path), daemon=True)
         t.start()
         
-        # Keep a reference so Python doesn't garbage collect the thread immediately (just in case)
         self._latest_upload_thread = t
 
 # ==============================================================================
