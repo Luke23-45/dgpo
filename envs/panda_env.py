@@ -999,7 +999,13 @@ class PandaEnv(gym.Env):
         # site_xmat is a flat 9-element array (row-major 3x3 matrix)
         rot_matrix = self.data.site_xmat[self.ee_site_id].copy().reshape(3, 3)
         
-        quat_xyzw = R.from_matrix(rot_matrix).as_quat()
+        # SAFETY: Handle null/invalid rotation matrices
+        mat_det = np.linalg.det(rot_matrix)
+        if np.abs(mat_det) < 1e-6:
+            # Null or degenerate matrix - use identity quaternion
+            quat_xyzw = np.array([0, 0, 0, 1], dtype=np.float32)
+        else:
+            quat_xyzw = R.from_matrix(rot_matrix).as_quat()
         
         return np.concatenate([pos, quat_xyzw]).astype(np.float32)
 

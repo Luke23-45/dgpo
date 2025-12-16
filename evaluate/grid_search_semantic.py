@@ -117,35 +117,56 @@ def run_pid_grid_search(args) -> List[Dict]:
     print(f"Max steps: {cfg.get('max_steps', 400)}")
     print("=" * 70)
     
-    for i, params in enumerate(param_grid):
-        print(f"\n[Config {i+1}/{len(param_grid)}] Testing: {params}")
+    
+    # Check for requested phases or default to 0
+    target_phases = args.phases if args.phases and len(args.phases) > 0 else [0]
+    
+    for phase_idx, handoff_phase in enumerate(target_phases):
+        print(f"\n" + "-" * 50)
+        print(f"TESTING HANDOFF PHASE {handoff_phase}")
+        print("-" * 50)
         
-        # Update config
-        cfg.ik_kp = params["ik_kp"]
-        cfg.ik_ki = params["ik_ki"]
-        cfg.ik_kd = params["ik_kd"]
-        cfg.output_dir = f"{args.output_dir}_{timestamp}/kp{params['ik_kp']:.0f}_ki{params['ik_ki']:.1f}_kd{params['ik_kd']:.0f}"
-        
-        try:
-            evaluator = SemanticPlannerEvaluator(cfg)
-            success_rate = evaluator.run()
+        for i, params in enumerate(param_grid):
+            print(f"\n[Phase {handoff_phase} | Config {i+1}/{len(param_grid)}] Testing: {params}")
             
-            result_entry = {
-                "params": params.copy(),
-                "success_rate": success_rate,
-                "output_dir": cfg.output_dir
-            }
-            results.append(result_entry)
+            # Update config
+            cfg.ik_kp = params["ik_kp"]
+            cfg.ik_ki = params["ik_ki"]
+            cfg.ik_kd = params["ik_kd"]
             
-            print(f"-> Result: Success Rate = {success_rate:.1f}%")
+            # FLAT OUTPUT STRUCTURE
+            cfg.output_dir = f"{args.output_dir}_{timestamp}"
+            cfg.experiment_name = f"phase{handoff_phase}_config{i+1}_kp{params['ik_kp']:.0f}_ki{params['ik_ki']:.1f}_kd{params['ik_kd']:.0f}"
             
-        except Exception as e:
-            log.error(f"Configuration failed: {e}")
-            results.append({
-                "params": params.copy(),
-                "success_rate": -1.0,
-                "error": str(e)
-            })
+            try:
+                if handoff_phase == 0:
+                    # Standard PID tuning (full model)
+                    evaluator = SemanticPlannerEvaluator(cfg)
+                    success_rate = evaluator.run()
+                else:
+                    # Hybrid PID tuning (expert -> model)
+                    evaluator = HybridSemanticEvaluator(cfg, handoff_phase=handoff_phase)
+                    eval_ret = evaluator.run()
+                    success_rate = eval_ret.get("success_rate", 0.0)
+                
+                result_entry = {
+                    "handoff_phase": handoff_phase,
+                    "params": params.copy(),
+                    "success_rate": success_rate,
+                    "output_dir": cfg.output_dir
+                }
+                results.append(result_entry)
+                
+                print(f"-> Result: Phase {handoff_phase} Success = {success_rate:.1f}%")
+                
+            except Exception as e:
+                log.error(f"Configuration failed: {e}")
+                results.append({
+                    "handoff_phase": handoff_phase,
+                    "params": params.copy(),
+                    "success_rate": -1.0,
+                    "error": str(e)
+                })
     
     return results
 
@@ -184,7 +205,10 @@ def run_handoff_grid_search(args) -> List[Dict]:
         cfg.max_steps = 800
     
     # Handoff phases to test
-    handoff_phases = [0, 1, 2, 3]  # REACH, GRASP, LIFT, PLACE
+    if args.phases:
+        handoff_phases = args.phases
+    else:
+        handoff_phases = [0, 1, 2, 3]  # Default: Test all phases
     
     results = []
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -208,7 +232,9 @@ def run_handoff_grid_search(args) -> List[Dict]:
         print(f"\n[Handoff Phase {handoff_phase}] Testing: "
               f"Expert controls until {PHASE_NAMES[handoff_phase]}, then Model takes over")
         
-        cfg.output_dir = f"{args.output_dir}_{timestamp}/handoff_{handoff_phase}_{PHASE_NAMES[handoff_phase]}"
+        # FLAT OUTPUT STRUCTURE
+        cfg.output_dir = f"{args.output_dir}_{timestamp}"
+        cfg.experiment_name = f"handoff_{handoff_phase}_{PHASE_NAMES[handoff_phase]}"
         
         try:
             evaluator = HybridSemanticEvaluator(cfg, handoff_phase=handoff_phase)
@@ -341,6 +367,8 @@ def main():
     parser.add_argument("--ik_kp", type=float, default=500.0)
     parser.add_argument("--ik_ki", type=float, default=0.5)
     parser.add_argument("--ik_kd", type=float, default=15.0)
+    parser.add_argument("--phases", type=int, nargs="+", default=None,
+                        help="Specific handoff phases to test (e.g. --phases 1 2). Default: all [0, 1, 2, 3]")
     
     args = parser.parse_args()
     

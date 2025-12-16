@@ -191,11 +191,20 @@ class HybridEvaluator:
         log.info("Initializing IK Solver...")
         self.ik_solver = IKSolver(urdf_path=cfg.env.urdf_path)
         
-        ik_kp = getattr(cfg, "ik_kp", 500.0)
-        ik_ki = getattr(cfg, "ik_ki", 0.5)
-        ik_kd = getattr(cfg, "ik_kd", 15.0)
-        log.info(f"Setting IK Solver Gains: Kp={ik_kp}, Ki={ik_ki}, Kd={ik_kd}")
-        self.ik_solver.set_gains(kp=ik_kp, ki=ik_ki, kd=ik_kd)
+        # EXPERT-SPECIFIC PID GAINS (must use these when expert is controlling)
+        self.expert_kp = 139.0
+        self.expert_ki = 0.1
+        self.expert_kd = 3.0
+        
+        # MODEL PID GAINS (use these when model takes over)
+        self.model_kp = getattr(cfg, "ik_kp", 500.0)
+        self.model_ki = getattr(cfg, "ik_ki", 0.5)
+        self.model_kd = getattr(cfg, "ik_kd", 15.0)
+        
+        # Start with expert gains
+        log.info(f"Expert IK Gains: Kp={self.expert_kp}, Ki={self.expert_ki}, Kd={self.expert_kd}")
+        log.info(f"Model IK Gains: Kp={self.model_kp}, Ki={self.model_ki}, Kd={self.model_kd}")
+        self.ik_solver.set_gains(kp=self.expert_kp, ki=self.expert_ki, kd=self.expert_kd)
         
         # 4. Initialize Expert
         log.info("Initializing DGPOExpert...")
@@ -308,7 +317,11 @@ class HybridEvaluator:
             if controller == "EXPERT" and current_phase >= self.handoff_phase:
                 controller = "MODEL"
                 handoff_step = step
+                # SWITCH TO MODEL PID GAINS
+                self.ik_solver.set_gains(kp=self.model_kp, ki=self.model_ki, kd=self.model_kd)
+                self.ik_solver.reset_controller_state()
                 log.info(f"  [HANDOFF] Step {step}: Expert -> Model (Phase {current_phase}: {PHASE_NAMES[current_phase]})")
+                log.info(f"  [HANDOFF] Switched to Model PID: Kp={self.model_kp}, Ki={self.model_ki}, Kd={self.model_kd}")
             
             # Initialize control variables
             delta_pose = np.zeros(7)
@@ -318,7 +331,7 @@ class HybridEvaluator:
             
             if controller == "EXPERT":
                 # === EXPERT CONTROL ===
-                target_pose_7d, gripper_cmd = self.expert.get_target_pose(obs)
+                target_pose_7d, gripper_cmd, expert_info = self.expert.get_target_pose(obs)
                 target_pose = target_pose_7d
                 
                 # Convert target pose to delta action via IK
@@ -530,8 +543,18 @@ class HybridEvaluator:
     def run(self) -> Dict:
         """Run full evaluation across multiple episodes."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        video_path = self.output_dir / f"hybrid_eval_handoff{self.handoff_phase}_{timestamp}.mp4"
-        csv_path = self.output_dir / f"hybrid_eval_handoff{self.handoff_phase}_{timestamp}.csv"
+        
+        # Use experiment_name if provided (for flat grid search output)
+        if hasattr(self.cfg, "experiment_name"):
+            filename_base = f"{self.cfg.experiment_name}"
+            # Ensure unique timestamp is appended if not running grid search to avoid overwrites
+            # But for grid search we often want the name to be exactly as specified
+            # Let's append timestamp to be safe but keep it readable
+            video_path = self.output_dir / f"{filename_base}.mp4"
+            csv_path = self.output_dir / f"{filename_base}.csv"
+        else:
+            video_path = self.output_dir / f"hybrid_eval_handoff{self.handoff_phase}_{timestamp}.mp4"
+            csv_path = self.output_dir / f"hybrid_eval_handoff{self.handoff_phase}_{timestamp}.csv"
         
         # Initialize video writer
         first_obs = self.env.get_expert_obs()

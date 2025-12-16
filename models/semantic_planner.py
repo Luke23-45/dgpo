@@ -368,8 +368,16 @@ class SemanticPlanner(nn.Module):
         # C. Phase Classification
         phase_logits = self.phase_head(z_phase) # (B, Num_Phases)
 
+        # [DGPO v2.0] Return Visual Embedding for VisionCritic
+        # We pool the visual tokens (Prev/Curr/Goal) to get a compact representation of the visual state.
+        # visual_tokens was (B*3, N, D). We want (B, D).
+        # Efficient hack: Take the 'Curr' image tokens mean.
+        # curr_tokens: (B, N, D)
+        visual_embedding = curr_tokens.mean(dim=1) # Global Average Pooling of Current Image patches
+
         return {
             'pose_chunk': final_traj_chunk,      # (B, K, 7)
             'gripper_chunk': final_grip_chunk,   # (B, K, 1)
-            'phase_logits': phase_logits         # (B, N_Phases)
+            'phase_logits': phase_logits,        # (B, N_Phases)
+            'visual_embedding': visual_embedding # (B, D) for Critic
         }

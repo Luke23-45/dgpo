@@ -380,7 +380,15 @@ class IKSolver:
         # --- 1. GET CURRENT STATE ---
         current_ee_pos = data.site_xpos[ee_site_id]
         current_ee_mat = data.site_xmat[ee_site_id].reshape(3, 3)
-        current_ee_quat = R.from_matrix(current_ee_mat).as_quat()
+        
+        # SAFETY: Handle null/invalid rotation matrices
+        mat_det = np.linalg.det(current_ee_mat)
+        if np.abs(mat_det) < 1e-6:
+            # Null or degenerate matrix - use identity quaternion
+            logger.warning("IK: Null rotation matrix detected, using identity orientation")
+            current_ee_quat = np.array([0, 0, 0, 1], dtype=np.float64)  # xyzw identity
+        else:
+            current_ee_quat = R.from_matrix(current_ee_mat).as_quat()
         
         jac_pos = np.zeros((3, model.nv))
         jac_rot = np.zeros((3, model.nv))

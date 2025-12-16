@@ -53,11 +53,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from envs.panda_env import PandaEnv
+from envs.dgpo_env_wrapper import DGPOEnvWrapper
 from models.semantic_planner import SemanticPlanner, SemanticPlannerConfig
 from train.train_semantic_planner import SemanticPlannerLightningModule
-from utils.ik_solver import IKSolver
 from utils.divergence import compute_step_divergence
-from utils.dgpo_expert import DGPOExpert, DGPOExpertConfig, ObjectProfile
+from utils.riemannian_diff import compute_riemannian_divergence
+import gymnasium as gym
+
 
 # Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -65,24 +67,35 @@ log = logging.getLogger("DGPO")
 
 
 # ==============================================================================
-# 1. VALUE NETWORK
+# 1. VISION CRITIC (State-Aware)
 # ==============================================================================
 
-class ValueNetwork(nn.Module):
-    """Critic network for PPO value prediction."""
+class VisionCritic(nn.Module):
+    """
+    SOTA Critic for DGPO v2.0: Sees what the Actor sees.
+    Input: [Visual_Embedding (from Actor), Proprioception]
+    Output: V(s)
+    """
     
-    def __init__(self, proprio_dim: int = 22, hidden_dim: int = 256):
+    def __init__(self, vision_feature_dim: int, proprio_dim: int, hidden_dim: int = 256):
         super().__init__()
+        # Project frozen visual features
+        self.vis_proj = nn.Linear(vision_feature_dim, hidden_dim)
+        self.prop_proj = nn.Linear(proprio_dim, hidden_dim)
+        
         self.net = nn.Sequential(
-            nn.Linear(proprio_dim, hidden_dim),
-            nn.ReLU(),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1) # Value scalar
         )
     
-    def forward(self, proprio: torch.Tensor) -> torch.Tensor:
-        return self.net(proprio).squeeze(-1)
+    def forward(self, visual_emb: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
+        v = self.vis_proj(visual_emb)
+        p = self.prop_proj(proprio)
+        return self.net(torch.cat([v, p], dim=-1)).squeeze(-1)
 
 
 # ==============================================================================
@@ -186,16 +199,19 @@ class MetricsLogger:
 
 @dataclass
 class RolloutBuffer:
-    """Stores rollout data for PPO updates."""
+    """Stores chunk-based rollout data for AC-PPO updates."""
     
-    # Observation components
+    # State data
     prev_images: List[np.ndarray] = field(default_factory=list)
     curr_images: List[np.ndarray] = field(default_factory=list)
     goal_images: List[np.ndarray] = field(default_factory=list)
     proprios: List[np.ndarray] = field(default_factory=list)
+    visual_embeddings: List[torch.Tensor] = field(default_factory=list) # [DGPO v2.0] Stored on CPU/GPU?
     
-    # Actions and probs
-    actions: List[np.ndarray] = field(default_factory=list)
+    # Action Chunks (The "Action")
+    action_chunks: List[np.ndarray] = field(default_factory=list) # (K, 7) or (K, 8)
+    
+    # Log Probs (of the entire chunk)
     log_probs: List[float] = field(default_factory=list)
     
     # Rewards and values
@@ -203,9 +219,9 @@ class RolloutBuffer:
     values: List[float] = field(default_factory=list)
     dones: List[bool] = field(default_factory=list)
     
-    # For divergence calculation
-    achieved_ee_poses: List[np.ndarray] = field(default_factory=list)
-    expert_ee_poses: List[np.ndarray] = field(default_factory=list)
+    # [DGPO v2.0] Expert Targets for Divergence Loss
+    expert_pose_chunks: List[np.ndarray] = field(default_factory=list)
+    expert_phases: List[int] = field(default_factory=list) # For stiffness weighting
     
     def add(
         self,
@@ -213,25 +229,27 @@ class RolloutBuffer:
         curr_img: np.ndarray,
         goal_img: np.ndarray,
         proprio: np.ndarray,
-        action: np.ndarray,
+        visual_emb: torch.Tensor,
+        action_chunk: np.ndarray,
         log_prob: float,
         reward: float,
         value: float,
         done: bool,
-        achieved_ee: np.ndarray,
-        expert_ee: np.ndarray,
+        expert_pose_chunk: np.ndarray,
+        expert_phase: int
     ):
         self.prev_images.append(prev_img)
         self.curr_images.append(curr_img)
         self.goal_images.append(goal_img)
         self.proprios.append(proprio)
-        self.actions.append(action)
+        self.visual_embeddings.append(visual_emb)
+        self.action_chunks.append(action_chunk)
         self.log_probs.append(log_prob)
         self.rewards.append(reward)
         self.values.append(value)
         self.dones.append(done)
-        self.achieved_ee_poses.append(achieved_ee)
-        self.expert_ee_poses.append(expert_ee)
+        self.expert_pose_chunks.append(expert_pose_chunk)
+        self.expert_phases.append(expert_phase)
     
     def clear(self):
         for attr in self.__dataclass_fields__:
@@ -279,40 +297,36 @@ def compute_gae(
 # 4. GOAL IMAGE RENDERING (From Evaluation Script)
 # ==============================================================================
 
-def render_goal_image(env: PandaEnv, goal_pos: np.ndarray) -> np.ndarray:
-    """Renders the goal image by teleporting object to goal position."""
-    saved_qpos = env.data.qpos.copy()
-    saved_qvel = env.data.qvel.copy()
-    
-    try:
-        obj_addr = env.model.jnt_qposadr[env.object_joint_id]
-        env.data.qpos[obj_addr : obj_addr + 3] = goal_pos
-        env.data.qvel[:] = 0.0
-        mujoco.mj_forward(env.model, env.data)
-        goal_img = env.render()
-    finally:
-        env.data.qpos[:] = saved_qpos
-        env.data.qvel[:] = saved_qvel
-        mujoco.mj_forward(env.model, env.data)
-    
-    return goal_img
+# Removed: render_goal_image (Now handled by DGPOEnvWrapper)
+
 
 
 # ==============================================================================
 # 5. DGPO TRAINER
 # ==============================================================================
 
+# ==============================================================================
+# Helper for Multiprocessing (Must be module-level)
+# ==============================================================================
+
+def make_dgpo_env(cfg_dict: Dict[str, Any]) -> gym.Env:
+    """Factory function to create a wrapped DGPO environment."""
+    # Convert dict back to DictConfig if needed, or pass dict to Wrapper
+    # Wrapper expects the full cfg object or similar structure
+    # Here we assume cfg_dict handles the necessary attribute access or we wrap it
+    cfg = OmegaConf.create(cfg_dict)
+    
+    env = PandaEnv(
+        xml_path=cfg.environment.xml_path,
+        control_mode="delta",
+        render_mode="rgb_array"
+    )
+    return DGPOEnvWrapper(env, cfg)
+
+
 class DGPOTrainer:
     """
     DGPO-Foundation Trainer implementing dense divergence-guided PPO.
-    
-    Features:
-    - Dense divergence rewards from expert
-    - PPO for policy optimization
-    - CSV metrics logging
-    - TensorBoard integration
-    - Resume training from checkpoint
-    - Atomic checkpoint saving with backup rotation
     """
     
     def __init__(self, cfg: DictConfig):
@@ -334,44 +348,51 @@ class DGPOTrainer:
                 param.requires_grad = False
             log.info("Froze vision backbone parameters.")
         
-        # 2. Initialize Value Network
-        self.value_net = ValueNetwork(
+        # 2. Initialize Vision Critic
+        self.value_net = VisionCritic(
+            vision_feature_dim=cfg.model.vision_feature_dim,
             proprio_dim=cfg.model.proprio_dim,
             hidden_dim=cfg.value_net.hidden_dim
         ).to(self.device)
         
-        # 3. Initialize Environment
-        self.env = PandaEnv(
-            xml_path=cfg.environment.xml_path,
-            control_mode="delta",
-            render_mode="rgb_array"
-        )
+        # [DGPO v2.0 FIX] Initialize Action Log Std HERE, not in loop
+        # We assume 7D pose (3 pos + 4 quat).
+        self.chk_log_std = nn.Parameter(
+            torch.ones(1, self.cfg.model.chunk_size, 7, device=self.device) * -0.5
+        ) # Start with small std
         
-        # 4. Initialize IK Solver
-        self.ik_solver = IKSolver(urdf_path=cfg.environment.urdf_path)
+        # 3. Initialize Parallel Environments
+        self.num_envs = cfg.get("num_envs", 8)  # Default to 8 envs
+        log.info(f"Initializing {self.num_envs} Parallel Environments...")
         
-        # 5. Initialize DGPO Expert (robust FSM without timeouts)
-        # Create object profile for standard cube (matches dataset generation)
-        object_profile = ObjectProfile(
-            size=np.array([0.04, 0.04, 0.04]),  # Standard cube dimensions
-            grasp_width_normalized=0.6
-        )
-        expert_cfg = DGPOExpertConfig(
-            hover_height=cfg.expert.get('hover_height', 0.15),
-            grasp_offset_z=cfg.expert.get('grasp_offset_z', 0.025),
-        )
-        self.expert = DGPOExpert(
-            object_profile=object_profile,
-            cfg=expert_cfg,
-        )
+        # Convert config to primitive dict for safe pickling
+        cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+        
+        # Create list of factory functions
+        env_fns = [
+            lambda: make_dgpo_env(cfg_dict) 
+            for _ in range(self.num_envs)
+        ]
+        
+        # Use AsyncVectorEnv (multiprocessing)
+        # Context 'spawn' is safer for PyTorch/CUDA interaction
+        # Gymnasium usually handles context, but we can enforce it via kwargs if needed
+        # For now, default behavior is usually sufficient on Windows (defaults to spawn?)
+        self.envs = gym.vector.AsyncVectorEnv(env_fns)
+        
+        # Removed: self.ik_solver (Now inside Wrapper)
+        # Removed: self.expert (Now inside Wrapper)
         
         # 6. Control calibration
-        SIM_SUBSTEPS = 20
-        self.effective_dt = self.env.model.opt.timestep * SIM_SUBSTEPS
-        self.max_dq = self.env.ACTION_SCALING_FACTOR / self.effective_dt
+        # Note: We still need these constants for consistency checks or logging, 
+        # but the physics steps happen inside the wrapper.
+        pass
+
         
         # 7. Optimizers
         policy_params = [p for p in self.policy.parameters() if p.requires_grad]
+        policy_params.append(self.chk_log_std) # [DGPO v2.0 FIX] Add log_std to optimizer
+        
         self.policy_optimizer = torch.optim.Adam(
             policy_params, lr=cfg.optimizer.policy_lr
         )
@@ -551,282 +572,370 @@ class DGPOTrainer:
     
     def collect_rollouts(self, n_steps: int) -> Dict[str, float]:
         """
-        Collects rollout data for n_steps using EXPERT EXECUTION (DAgger-style).
+        Collects rollout data using PARALLEL ENVIRONMENTS and AC-PPO LOGIC.
         
-        KEY CHANGE: Expert actions are EXECUTED, policy predictions are for LEARNING only.
-        This guarantees successful trajectories while training the policy to match expert.
-        
-        Shadow Mode Logging:
-        - position_divergence: How far policy prediction is from expert target
-        - orientation_divergence: Rotation error between policy and expert
-        - gripper_agreement: Whether policy agrees with expert gripper command
+        [DGPO v2.0]:
+        1. Predict Action Chunk.
+        2. Calculate LogProb of Chunk.
+        3. Execute first step of chunk (Shadow Mode: Execute Expert).
+        4. Store Chunk, VisualEmbedding, ExpertChunk for updates.
         """
         self.buffer.clear()
         self.policy.eval()
         
+        # Metrics trackers
         episode_rewards = []
         episode_successes = []
-        current_ep_reward = 0.0
+        current_ep_rewards = np.zeros(self.num_envs)
         
-        # === SHADOW MODE METRICS ===
-        shadow_pos_divergences = []  # Policy vs Expert position error
-        shadow_orn_divergences = []  # Policy vs Expert orientation error
-        gripper_agreements = []      # Policy agrees with expert gripper?
-        expert_phases = []           # Track expert FSM phases
+        # Divergence Metrics
+        rsd_divergences = []
         
-        # Reset environment and expert
-        self.env.reset()
-        obs = self.env.get_expert_obs()
-        self.expert.reset()
+        # 1. Reset
+        obs, info = self.envs.reset()
+        goal_imgs = info['goal_img']
+        prev_imgs = obs['image_primary'].copy()
         
-        # Render goal image once per episode
-        goal_img = render_goal_image(self.env, obs['goal_pos_world'])
-        prev_img = obs['image_primary'].copy()
+        # For RSD reward, we need the Expert's FUTURE chunk.
+        # But in a running env, we only know the Expert's CURRENT target.
+        # We will approximate the Expert Chunk by generating it online or using the current target extended.
+        # Better: The DGPOExpert inside the wrapper can return the 'target_pose'.
+        # For the reward, we compare the policy's predicted chunk[0] vs expert[0] for dense feedback,
+        # OR we try to predict the full expert trajectory. 
+        # DGPO v2.0 Formulation says: Divergence between Policy Chunk and Expert Chunk.
+        # WE NEED THE EXPERT CHUNK. 
+        # The wrapper provides 'expert_pose'. This is step t.
+        # Implementation constraint: We only get 1 step of expert data per environment step.
+        # Solution: We compute RSD for the *first step* of the chunk (immediate divergence)
+        # OR we store the single step data and the policy's single step prediction.
+        # Wait, AC-PPO updates the *entire chunk distribution*.
+        # So we need to store the Policy Chunk.
+        # But we only correspond it to the Expert's single step? 
+        # Or we execute K steps open loop?
+        # The V2.0 proposal says "Divergence between Policy Chunk and Expert Chunk".
+        # If we cannot get the full expert chunk (because expert is stateful/reactive), 
+        # we can only compare the *immediate* step, or we accept that we only optimize the first step of the chunk?
+        # NO. We should optimize the FULL chunk.
+        # Simplification for Online RL:
+        # We compare PolicyChunk[0] vs ExpertTarget.
+        # We verify stability of the rest of the chunk?
+        # Let's stick to the simpler version where we reward based on immediate agreement,
+        # but update the WHOLE chunk distribution based on that reward.
         
-        for step in range(n_steps):
-            curr_img = obs['image_primary']
-            proprio = obs['proprio']
+        # Actually, for 'compute_riemannian_divergence(pred_chunk, expert_chunk)', we need 'expert_chunk'.
+        # Since we can't fast-forward the expert in the vector env easily,
+        # we will create a pseudo-expert-chunk by repeating the current expert target K times.
+        # This is valid because the expert is a stable attractor.
+        
+        current_expert_poses = info['expert_pose']
+        current_expert_grips = info['expert_grip']
+        current_expert_phases = info['expert_phase']
+        
+        # Define Phase Map locally (Minor Bug Fix 1)
+        EXPERT_PHASE_MAP = {
+            "MOVE_TO_PRE_GRASP": 0,
+            "PREPARE_GRIPPER": 0,
+            "DESCEND_TO_GRASP": 0, 
+            "GRASP": 1,
+            "LIFT": 2,
+            "MOVE_TO_GOAL": 2,
+            "PREPARE_PLACE": 3,
+            "DESCEND_TO_PLACE": 3,
+            "AWAIT_STABLE_PLACEMENT": 3,
+            "RELEASE": 3,
+            "RETRACT": 4,
+            "DONE": 4
+        }
+        
+        steps_per_env = n_steps // self.num_envs
+        
+        for step in range(steps_per_env):
+            curr_imgs = obs['image_primary']
+            proprios = obs['proprio']
             
-            # 1. Get Expert's target pose (DGPOExpert FSM)
-            expert_pose, expert_grip, info = self.expert.get_target_pose(obs)
-            expert_phases.append(info.get('phase', 'UNKNOWN'))
+            # 1. Policy Inference
+            batch = self._prepare_batch_vectorized(prev_imgs, curr_imgs, goal_imgs, proprios)
             
-            # 2. Get Policy's predicted pose (SHADOW MODE - for learning only)
-            batch = self._prepare_batch(prev_img, curr_img, goal_img, proprio)
             with torch.no_grad():
-                policy_out = self.policy(batch)
-            
-            # Extract first step of pose chunk
-            policy_pose = policy_out['pose_chunk'][0, 0].cpu().numpy()  # (7,)
-            policy_grip_logit = policy_out['gripper_chunk'][0, 0].cpu().numpy()[0]
-            policy_grip_cmd = -1.0 if policy_grip_logit > 0 else 1.0
-            
-            # === SHADOW MODE LOGGING ===
-            # Position divergence (meters)
-            pos_div = np.linalg.norm(policy_pose[:3] - expert_pose[:3])
-            shadow_pos_divergences.append(pos_div)
-            
-            # Orientation divergence (radians) - using quaternion distance
-            from scipy.spatial.transform import Rotation as R
-            try:
-                R_policy = R.from_quat(policy_pose[3:])
-                R_expert = R.from_quat(expert_pose[3:])
-                orn_div = (R_expert.inv() * R_policy).magnitude()
-            except:
-                orn_div = 0.0
-            shadow_orn_divergences.append(orn_div)
-            
-            # Gripper agreement
-            grip_agree = (policy_grip_cmd == expert_grip)
-            gripper_agreements.append(float(grip_agree))
-            
-            # 3. Compute joint action via IK - USING EXPERT POSE (THE FIX!)
-            try:
-                delta_joints = self.ik_solver.compute_delta_action(
-                    target_ee_pose=expert_pose,  # ← EXPERT pose, not policy!
-                    model=self.env.model,
-                    data=self.env.data,
-                    ee_site_id=self.env.ee_site_id,
-                    joint_qpos_indices=np.arange(7),
-                    effective_dt=self.effective_dt,
-                    max_dq=self.max_dq
-                )
-            except Exception as e:
-                log.warning(f"IK failed at step {step}: {e}")
-                delta_joints = np.zeros(7)
-
-            # Use EXPERT gripper command
-            action = np.concatenate([delta_joints, [expert_grip]])
-            
-            # 4. Step environment (executing EXPERT action)
-            next_obs, base_reward, terminated, truncated, _ = self.env.step(action)
-            next_obs = self.env.get_expert_obs()
-            done = terminated or truncated or self.expert.is_done()
-            
-            # 5. Calculate DENSE divergence reward (policy vs expert)
-            # Note: This now measures policy PREDICTION quality, not execution quality
-            achieved_ee = self.env.get_ee_pose()  # Where robot actually is
-            div_penalty = compute_step_divergence(
-                policy_pose, expert_pose,  # Compare policy prediction to expert
-                position_weight=self.cfg.reward.position_weight,
-                orientation_weight=self.cfg.reward.orientation_weight
-            )
-            
-            # 6. Compute total reward
-            obj_pos = next_obs['object_pos_world']
-            goal_pos = next_obs['goal_pos_world']
-            dist_to_goal = np.linalg.norm(obj_pos - goal_pos)
-            
-            task_reward = -self.cfg.reward.w_dist * dist_to_goal
-            div_reward = -self.cfg.reward.w_div * div_penalty
-            
-            # Success bonus
-            success = dist_to_goal < 0.05
-            success_bonus = self.cfg.reward.success_bonus if success else 0.0
-            
-            total_reward = task_reward + div_reward + success_bonus
-            current_ep_reward += total_reward
-            
-            # 7. Get value estimate
-            proprio_t = torch.from_numpy(proprio).float().unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                value = self.value_net(proprio_t).item()
-            
-            # 8. Store in buffer
-            self.buffer.add(
-                prev_img=prev_img,
-                curr_img=curr_img,
-                goal_img=goal_img,
-                proprio=proprio,
-                action=action,
-                log_prob=0.0,
-                reward=total_reward,
-                value=value,
-                done=done,
-                achieved_ee=achieved_ee,
-                expert_ee=expert_pose
-            )
-            
-            # 9. Update state
-            prev_img = curr_img.copy()
-            obs = next_obs
-            self.total_steps += 1
-            
-            # 10. Handle episode end
-            if done:
-                episode_rewards.append(current_ep_reward)
-                episode_successes.append(float(success))
-                current_ep_reward = 0.0
+                with torch.cuda.amp.autocast(enabled=True):
+                    policy_out = self.policy(batch)
                 
-                # Reset
-                self.env.reset()
-                obs = self.env.get_expert_obs()
-                self.expert.reset()
-                goal_img = render_goal_image(self.env, obs['goal_pos_world'])
-                prev_img = obs['image_primary'].copy()
+                # [DGPO v2.0 FIX] Critical Error A: Calculate LogProb HERE
+                pred_chunks = policy_out['pose_chunk'] # (N, K, 7)
+                dist = torch.distributions.Normal(pred_chunks, self.chk_log_std.exp())
+                # The log_prob of the action we *predicted* (which is the mean)
+                # Note: `pred_chunks` is the mean of the distribution.
+                # We need the log_prob of the action that gets stored.
+                # In DGPO Shadow Mode, we define the "Action" for the update as the Policy's Prediction.
+                # So we calculate log_prob(mean).
+                action_log_probs = dist.log_prob(pred_chunks).sum(dim=[1, 2]) # (N,)
+                action_log_probs_cpu = action_log_probs.cpu().tolist()
+            
+            # Outputs
+            pose_chunks = policy_out['pose_chunk'].cpu().numpy()
+            visual_embeddings = policy_out['visual_embedding'].detach() 
+            visual_embeddings_cpu = visual_embeddings.cpu()
+            
+            # 2. Compute Rewards (RSD)
+            # We need to construct expert chunks.
+            # Assume expert target is constant/stable for the chunk duration (simplification).
+            expert_chunks = np.repeat(current_expert_poses[:, np.newaxis, :], self.cfg.model.chunk_size, axis=1) # (N, K, 7)
+            
+            # Compute RSD (Riemannian Semantic Divergence)
+            # We convert numpy -> tensor for the utility calculation
+            p_chunk_t = torch.from_numpy(pose_chunks).to(self.device)
+            e_chunk_t = torch.from_numpy(expert_chunks).to(self.device)
+            phase_logits_t = policy_out['phase_logits']
+            
+            with torch.no_grad():
+                # D_sigma
+                rsd_scores = compute_riemannian_divergence(p_chunk_t, e_chunk_t, phase_logits_t).cpu().numpy() # (N,)
+            
+            rsd_divergences.extend(rsd_scores.tolist())
+            
+            # 3. Step Envs (Shadow Mode)
+            dummy_actions = np.zeros((self.num_envs, 8))
+            next_obs, rewards, terminateds, truncateds, next_infos = self.envs.step(dummy_actions)
+            
+            # 4. Process Batch
+            for i in range(self.num_envs):
+                # Calculate Dense Reward
+                # r_dense = r_task + lambda * I[success_possible] * exp(-D_sigma / sigma^2)
+                
+                obj_pos = next_obs['object_pos_world'][i]
+                goal_pos = next_obs['goal_pos_world'][i]
+                dist_to_goal = np.linalg.norm(obj_pos - goal_pos)
+                
+                # Check for "Success Possible" (heuristic: not failed)
+                success_possible = 1.0 # In this robust env, we assume always possible unless done
+                
+                # Task Reward (Sparse-ish or Shaped)
+                r_task = -self.cfg.reward.w_dist * dist_to_goal
+                
+                # Geodesic Guidance
+                # exp(-D / sigma^2)
+                # sigma is a temperature parameter. Let's say 0.1
+                sigma_sq = 0.01 
+                guidance = np.exp(-rsd_scores[i] / sigma_sq)
+                
+                rsd_reward = self.cfg.reward.w_div * success_possible * guidance
+                
+                success = dist_to_goal < 0.05
+                success_bonus = self.cfg.reward.success_bonus if success else 0.0
+                
+                total_reward = r_task + rsd_reward + success_bonus
+                current_ep_rewards[i] += total_reward
+                
+                # Value Estimate (Vision Critic)
+                # Input: visual_emb (already computed) + proprio
+                # Needs proprio tensor
+                with torch.no_grad():
+                    val_proprio = torch.from_numpy(proprios[i]).float().unsqueeze(0).to(self.device)
+                    val_emb = visual_embeddings[i].unsqueeze(0) # (1, D)
+                    value = self.value_net(val_emb, val_proprio).item()
+                
+                # Store
+                executed_action = next_infos['executed_action'][i] # Expert action (for reference, mostly)
+                
+                # For AC-PPO, we store the POLICY CHUNK as the "Action".
+                # and the Expert Chunk for reconstruction.
+                
+                # Log Prob??
+                # We calculate log_prob of the chunk during update? 
+                # Or here?
+                # Usually calculate here. But for Gaussian with fixed std, we can recalc.
+                # Storing 0.0 for now, recompute in update (standard for some implementations, but less efficient).
+                # To be precise, we should compute it here.
+                # But 'policy_out' is deterministic pose. We need the distribution info from the model/trainer.
+                # Trainer holds 'log_std'.
+                # Proceed with recomputing in update_policy.
+                
+                expert_phase_int = EXPERT_PHASE_MAP.get(current_expert_phases[i], 0)
+                
+                self.buffer.add(
+                    prev_img=prev_imgs[i],
+                    curr_img=curr_imgs[i],
+                    goal_img=goal_imgs[i],
+                    proprio=proprios[i],
+                    visual_emb=visual_embeddings_cpu[i], # Store CPU tensor
+                    action_chunk=pose_chunks[i], # The Chunk
+                    log_prob=action_log_probs_cpu[i], # [DGPO v2.0 FIX] Store REAL old log_prob
+                    reward=total_reward,
+                    value=value,
+                    done=terminateds[i] or truncateds[i],
+                    expert_pose_chunk=expert_chunks[i],
+                    expert_phase=expert_phase_int
+                )
+                
+                if terminateds[i] or truncateds[i]:
+                    episode_rewards.append(current_ep_rewards[i])
+                    episode_successes.append(float(success))
+                    current_ep_rewards[i] = 0.0
+                    
+                    if 'goal_img' in next_infos: # Handle auto-reset updates
+                         goal_imgs[i] = next_infos['goal_img'][i]
+                    prev_imgs[i] = next_obs['image_primary'][i].copy()
+                else:
+                    prev_imgs[i] = curr_imgs[i].copy()
+            
+            obs = next_obs
+            current_expert_poses = next_infos['expert_pose']
+            current_expert_grips = next_infos['expert_grip']
+            current_expert_phases = next_infos['expert_phase']
+            
+            self.total_steps += self.num_envs
         
         self.policy.train()
-        
-        # === SHADOW MODE SUMMARY ===
-        mean_pos_div = np.mean(shadow_pos_divergences) if shadow_pos_divergences else 0.0
-        mean_orn_div = np.mean(shadow_orn_divergences) if shadow_orn_divergences else 0.0
-        grip_agreement_rate = np.mean(gripper_agreements) if gripper_agreements else 0.0
         
         return {
             "mean_reward": np.mean(episode_rewards) if episode_rewards else 0.0,
             "success_rate": np.mean(episode_successes) if episode_successes else 0.0,
             "n_episodes": len(episode_rewards),
-            "mean_div": np.mean([
-                compute_step_divergence(a, e)
-                for a, e in zip(self.buffer.achieved_ee_poses, self.buffer.expert_ee_poses)
-            ]),
-            # Shadow Mode Metrics
-            "shadow_pos_div": mean_pos_div,
-            "shadow_orn_div": mean_orn_div,
-            "grip_agreement": grip_agreement_rate,
+            "mean_rsd": np.mean(rsd_divergences) if rsd_divergences else 0.0,
+        }
+
+    def _prepare_batch_vectorized(
+        self,
+        prev_imgs: np.ndarray,
+        curr_imgs: np.ndarray,
+        goal_imgs: np.ndarray,
+        proprios: np.ndarray,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Batched version of _prepare_batch.
+        Input arrays are (N, H, W, C).
+        """
+        # Convert entire batch to Processed Tensors
+        # Optimization: We could use specific data loaders or optimized conversions here.
+        # For now, we iterate, but it's still parallelized upstream.
+        # Faster: Use a list comprehension and stack.
+        
+        def process(imgs):
+            # Optim: Use listcomp instead of loop for slightly better speed
+            tensors = [self.transform(Image.fromarray(img)) for img in imgs]
+            return torch.stack(tensors).to(self.device)
+
+        prev_t = process(prev_imgs)
+        curr_t = process(curr_imgs)
+        goal_t = process(goal_imgs)
+        proprio_t = torch.from_numpy(proprios).float().to(self.device)
+        
+        return {
+            "prev_image": prev_t,
+            "curr_image": curr_t,
+            "goal_image": goal_t,
+            "curr_proprio": proprio_t
         }
     
     def update_policy(self) -> Dict[str, float]:
         """
-        Updates policy using PPO with imitation loss from expert poses.
-        
-        For action-chunking policies like SemanticPlanner, we use an imitation-style
-        loss instead of standard PPO log-probability ratio, since the policy outputs
-        continuous pose predictions rather than action distributions.
+        AC-PPO Update (DGPO v2.0).
+        Optimizes Policy Chunk Distribution using Riemannian Semantic Divergence for rewards.
         """
-        # Compute GAE
+        # 1. Compute GAE
         rewards = np.array(self.buffer.rewards)
         values = np.array(self.buffer.values)
         dones = np.array(self.buffer.dones)
+        
+        # Standard GAE
         advantages, returns = compute_gae(
             rewards, values, dones,
             gamma=self.cfg.ppo.gamma,
             lam=self.cfg.ppo.gae_lambda
         )
         
-        # Normalize advantages
+        # Normalize stats
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
-        # Convert to tensors
-        advantages_t = torch.from_numpy(advantages).float().to(self.device)
-        returns_t = torch.from_numpy(returns).float().to(self.device)
+        adv_t = torch.from_numpy(advantages).float().to(self.device)
+        ret_t = torch.from_numpy(returns).float().to(self.device)
         
+        # [DGPO v2.0 FIX] Initialize loss lists (Minor Bug 2)
         policy_losses = []
         value_losses = []
-        
-        # PPO epochs
+
+        # 2. PPO Epochs
         for epoch in range(self.cfg.ppo.epochs):
-            # Mini-batch updates
             indices = np.arange(len(self.buffer))
             np.random.shuffle(indices)
             
             for start in range(0, len(indices), self.cfg.ppo.batch_size):
                 end = start + self.cfg.ppo.batch_size
-                batch_indices = indices[start:end]
+                batch_idx = indices[start:end]
                 
-                # Prepare mini-batch
-                batch_prev = torch.stack([
-                    self.transform(Image.fromarray(self.buffer.prev_images[i]))
-                    for i in batch_indices
-                ]).to(self.device)
-                batch_curr = torch.stack([
-                    self.transform(Image.fromarray(self.buffer.curr_images[i]))
-                    for i in batch_indices
-                ]).to(self.device)
-                batch_goal = torch.stack([
-                    self.transform(Image.fromarray(self.buffer.goal_images[i]))
-                    for i in batch_indices
-                ]).to(self.device)
-                batch_proprio = torch.stack([
-                    torch.from_numpy(self.buffer.proprios[i]).float()
-                    for i in batch_indices
-                ]).to(self.device)
-                batch_expert_poses = torch.stack([
-                    torch.from_numpy(self.buffer.expert_ee_poses[i][:7]).float()
-                    for i in batch_indices
-                ]).to(self.device)
+                # A. Re-Run Policy Output (Visual Features + Chunks)
+                # We need to re-generate the action distribution to compare probability
                 
-                batch_adv = advantages_t[batch_indices]
-                batch_ret = returns_t[batch_indices]
+                # Prepare Inputs
+                b_prev = torch.stack([self.transform(Image.fromarray(self.buffer.prev_images[i])) for i in batch_idx]).to(self.device)
+                b_curr = torch.stack([self.transform(Image.fromarray(self.buffer.curr_images[i])) for i in batch_idx]).to(self.device)
+                b_goal = torch.stack([self.transform(Image.fromarray(self.buffer.goal_images[i])) for i in batch_idx]).to(self.device)
+                b_proprio = torch.stack([torch.from_numpy(self.buffer.proprios[i]).float() for i in batch_idx]).to(self.device)
                 
-                # Forward pass
+                # Re-run Actor
                 policy_out = self.policy({
-                    "prev_image": batch_prev,
-                    "curr_image": batch_curr,
-                    "goal_image": batch_goal,
-                    "curr_proprio": batch_proprio
+                    "prev_image": b_prev,
+                    "curr_image": b_curr,
+                    "goal_image": b_goal,
+                    "curr_proprio": b_proprio
                 })
                 
-                # Policy update: Advantage-weighted imitation loss
-                # L = -A * exp(-MSE(pred, expert))  ≈ weighted regression towards expert
-                pred_poses = policy_out['pose_chunk'][:, 0, :]  # (B, 7)
-                pose_error = F.mse_loss(pred_poses, batch_expert_poses, reduction='none').mean(dim=1)
+                # B. Chunk Distributions
+                # [DGPO v2.0 FIX] Removed dynamic parameter init. self.chk_log_std is now in __init__.
                 
-                # Weighted by advantage (clamp to prevent extreme weights)
-                weights = torch.exp(batch_adv.clamp(-10, 10) / self.cfg.ppo.temperature)
-                policy_loss = (weights * pose_error).mean()
+                pred_chunks = policy_out['pose_chunk'] # (B, K, 7)
+                batch_size = pred_chunks.shape[0]
                 
-                # Value update
-                values_pred = self.value_net(batch_proprio)
-                value_loss = F.mse_loss(values_pred, batch_ret)
+                dist_new = torch.distributions.Normal(pred_chunks, self.chk_log_std.exp())
                 
-                # Optimize
+                # Retrieve stored Actions (Policy Chunks from Rollout)
+                b_act_chunks = torch.stack([torch.from_numpy(self.buffer.action_chunks[i]) for i in batch_idx]).to(self.device)
+                
+                # [DGPO v2.0 FIX] Retrieve stored OLD Log Probs
+                b_log_prob_old = torch.tensor([self.buffer.log_probs[i] for i in batch_idx], device=self.device)
+                
+                # Calculate NEW Log Prob
+                log_prob_new = dist_new.log_prob(b_act_chunks).sum(dim=[1, 2]) # Sum over K, 7
+                
+                # Calculate Ratio
+                ratio = torch.exp(log_prob_new - b_log_prob_old)
+                
+                b_adv = adv_t[batch_idx]
+                
+                surr1 = ratio * b_adv
+                surr2 = torch.clamp(ratio, 1.0 - 0.2, 1.0 + 0.2) * b_adv
+                policy_loss = -torch.min(surr1, surr2).mean()
+                
+                # C. Value Loss
+                # We need Visual Embeddings for Critic!
+                # We stored them in buffer (CPU).
+                b_emb = torch.stack([self.buffer.visual_embeddings[i].to(self.device) for i in batch_idx])
+                
+                # Re-run Critic
+                # (Note: b_emb is from rollout (stale?). SOTA usually requires re-computing features if backbone updates.
+                # But backbone is frozen/slow. Using stored embeddings is vastly faster.
+                # However, Actor *updated* the embeddings in `policy_out` if backbone is trainable.
+                # `policy_out['visual_embedding']` is the FRESH embedding.
+                # We should use THAT for the Critic update to keep it consistent with the new actor state?
+                # Or use the stored one?
+                # Critic minimizes (V(s) - Target).
+                # Using FRESH embedding is better.
+                
+                curr_emb = policy_out['visual_embedding']
+                value_pred = self.value_net(curr_emb, b_proprio)
+                value_loss = F.mse_loss(value_pred, ret_t[batch_idx])
+                
+                # D. Phase Loss (Auxiliary)
+                # b_expert_phases stored in buffer
+                b_phases = torch.tensor([self.buffer.expert_phases[i] for i in batch_idx], device=self.device)
+                phase_loss = F.cross_entropy(policy_out['phase_logits'], b_phases)
+                
+                # Total Loss
+                loss = policy_loss + 0.5 * value_loss + 0.1 * phase_loss
+                
                 self.policy_optimizer.zero_grad()
                 self.value_optimizer.zero_grad()
-                
-                total_loss = policy_loss + self.cfg.ppo.value_coef * value_loss
-                total_loss.backward()
-                
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in self.policy.parameters() if p.requires_grad],
-                    self.cfg.ppo.max_grad_norm
-                )
-                torch.nn.utils.clip_grad_norm_(
-                    self.value_net.parameters(),
-                    self.cfg.ppo.max_grad_norm
-                )
-                
+                loss.backward()
                 self.policy_optimizer.step()
                 self.value_optimizer.step()
                 
@@ -837,6 +946,7 @@ class DGPOTrainer:
             "policy_loss": np.mean(policy_losses),
             "value_loss": np.mean(value_losses)
         }
+
     
     def train(self):
         """

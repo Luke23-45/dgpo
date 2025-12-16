@@ -12,6 +12,10 @@ freeze_vision: true  # Freeze vision backbone to save compute
 model:
   proprio_dim: 22
   chunk_size: 10
+  vision_feature_dim: 768  # Added: Required for VisionCritic
+
+# --- Environment ---
+num_envs: 2 # Optimize for Colab (2 vCPU usually)
 
 # --- Value Network ---
 value_net:
@@ -45,7 +49,7 @@ ppo:
   gamma: 0.99  # Discount factor
   gae_lambda: 0.95  # GAE lambda
   epochs: 4  # Number of PPO epochs per iteration
-  batch_size: 64  # Mini-batch size
+  batch_size: 32  # Safer for Colab T4 VRAM
   value_coef: 0.5  # Value loss coefficient
   max_grad_norm: 0.5  # Gradient clipping
   temperature: 1.0  # AWR temperature for advantage weighting

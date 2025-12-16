@@ -185,6 +185,22 @@ class DGPOExpert:
           3. Guarantees the shortest possible rotation path.
         """
         try:
+            # SAFETY: Validate quaternions before use
+            obj_norm = np.linalg.norm(object_quat_xyzw)
+            grip_norm = np.linalg.norm(gripper_quat_xyzw)
+            
+            if obj_norm < 1e-6:
+                print("WARN: Null object quaternion, using identity")
+                object_quat_xyzw = np.array([0, 0, 0, 1], dtype=np.float64)
+            else:
+                object_quat_xyzw = object_quat_xyzw / obj_norm
+                
+            if grip_norm < 1e-6:
+                print("WARN: Null gripper quaternion, using identity")
+                gripper_quat_xyzw = np.array([0, 0, 0, 1], dtype=np.float64)
+            else:
+                gripper_quat_xyzw = gripper_quat_xyzw / grip_norm
+            
             R_obj = R.from_quat(object_quat_xyzw)
             R_grip = R.from_quat(gripper_quat_xyzw)
 

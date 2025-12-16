@@ -78,36 +78,39 @@ def run_pid_grid_search(args) -> List[Dict]:
     cfg.n_episodes = args.n_episodes
     cfg.max_steps = args.max_steps
     cfg.seed = args.seed
+    BASE_SCALE = args.action_scale 
     
     # Define parameter grid
     param_grid = [
         # =====================================================
         # STAGE 1: Baseline High Stiffness (validated values)
         # =====================================================
-        {"ik_kp": 400.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 50.0},
-        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 50.0},
-        {"ik_kp": 550.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 50.0},
+        {"ik_kp": 400.0, "ik_ki": 0.5, "ik_kd": 10.0, "action_scale": BASE_SCALE},
+        {"ik_kp": 450.0, "ik_ki": 0.5, "ik_kd": 10.0, "action_scale": BASE_SCALE},
+        {"ik_kp": 470.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": BASE_SCALE},
+        {"ik_kp": 420.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": BASE_SCALE},
+        {"ik_kp": 160.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": BASE_SCALE},
         
         # =====================================================
         # STAGE 2: Action Scale Variants
         # =====================================================
-        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 25.0},
-        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 75.0},
-        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 100.0},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": BASE_SCALE},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": BASE_SCALE},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": BASE_SCALE},
         
         # =====================================================
         # STAGE 3: Damping Variants
         # =====================================================
-        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 10.0, "action_scale": 50.0},
-        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 20.0, "action_scale": 50.0},
-        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 25.0, "action_scale": 50.0},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 10.0, "action_scale": BASE_SCALE},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 20.0, "action_scale": BASE_SCALE},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 25.0, "action_scale": BASE_SCALE},
         
         # =====================================================
         # STAGE 4: Integral Gain Variants
         # =====================================================
-        {"ik_kp": 500.0, "ik_ki": 0.1, "ik_kd": 15.0, "action_scale": 50.0},
-        {"ik_kp": 500.0, "ik_ki": 1.0, "ik_kd": 15.0, "action_scale": 50.0},
-        {"ik_kp": 500.0, "ik_ki": 2.0, "ik_kd": 15.0, "action_scale": 50.0},
+        {"ik_kp": 500.0, "ik_ki": 0.1, "ik_kd": 15.0, "action_scale": BASE_SCALE},
+        {"ik_kp": 500.0, "ik_ki": 1.0, "ik_kd": 15.0, "action_scale": BASE_SCALE},
+        {"ik_kp": 500.0, "ik_ki": 2.0, "ik_kd": 15.0, "action_scale": BASE_SCALE},
     ]
     
     results = []
@@ -121,36 +124,51 @@ def run_pid_grid_search(args) -> List[Dict]:
     print(f"Max steps: {args.max_steps}")
     print("=" * 70)
     
-    for i, params in enumerate(param_grid):
-        print(f"\n[Config {i+1}/{len(param_grid)}] Testing: {params}")
+    
+    # Check for requested phases or default to 0
+    target_phases = args.phases if args.phases and len(args.phases) > 0 else [0]
+    
+    for phase_idx, handoff_phase in enumerate(target_phases):
+        phase_name = PHASE_NAMES[handoff_phase] if handoff_phase < len(PHASE_NAMES) else f"Phase{handoff_phase}"
+        print(f"\n" + "-" * 50)
+        print(f"TESTING HANDOFF PHASE {handoff_phase} ({phase_name})")
+        print("-" * 50)
         
-        # Update config
-        cfg.ik_kp = params["ik_kp"]
-        cfg.ik_ki = params["ik_ki"]
-        cfg.ik_kd = params["ik_kd"]
-        cfg.action_scale = params["action_scale"]
-        cfg.output_dir = f"{args.output_dir}_{timestamp}/kp{params['ik_kp']:.0f}_as{params['action_scale']:.0f}"
-        
-        try:
-            evaluator = HybridEvaluator(cfg, handoff_phase=0)  # Model controls entire task
-            eval_results = evaluator.run()
+        for i, params in enumerate(param_grid):
+            print(f"\n[Phase {handoff_phase} | Config {i+1}/{len(param_grid)}] Testing: {params}")
             
-            result_entry = {
-                "params": params.copy(),
-                "success_rate": eval_results["success_rate"],
-                "output_dir": cfg.output_dir
-            }
-            results.append(result_entry)
+            # Update config
+            cfg.ik_kp = params["ik_kp"]
+            cfg.ik_ki = params["ik_ki"]
+            cfg.ik_kd = params["ik_kd"]
+            cfg.action_scale = params["action_scale"]
             
-            print(f"-> Result: Success Rate = {eval_results['success_rate']:.1f}%")
+            # FLAT OUTPUT STRUCTURE with Phase info in filename
+            cfg.output_dir = f"{args.output_dir}_{timestamp}"
+            cfg.experiment_name = f"phase{handoff_phase}_config{i+1}_kp{params['ik_kp']:.0f}_as{params['action_scale']:.0f}"
             
-        except Exception as e:
-            log.error(f"Configuration failed: {e}")
-            results.append({
-                "params": params.copy(),
-                "success_rate": -1.0,
-                "error": str(e)
-            })
+            try:
+                evaluator = HybridEvaluator(cfg, handoff_phase=handoff_phase)
+                eval_results = evaluator.run()
+                
+                result_entry = {
+                    "handoff_phase": handoff_phase,
+                    "params": params.copy(),
+                    "success_rate": eval_results["success_rate"],
+                    "output_dir": cfg.output_dir
+                }
+                results.append(result_entry)
+                
+                print(f"-> Result: Phase {handoff_phase} Success = {eval_results['success_rate']:.1f}%")
+                
+            except Exception as e:
+                log.error(f"Configuration failed: {e}")
+                results.append({
+                    "handoff_phase": handoff_phase,
+                    "params": params.copy(),
+                    "success_rate": -1.0,
+                    "error": str(e)
+                })
     
     return results
 
@@ -189,7 +207,10 @@ def run_handoff_grid_search(args) -> List[Dict]:
     cfg.action_scale = args.action_scale
     
     # Handoff phases to test
-    handoff_phases = [0, 1, 2, 3]  # REACH, GRASP, LIFT, PLACE
+    if args.phases:
+        handoff_phases = args.phases
+    else:
+        handoff_phases = [0, 1, 2, 3]  # Default: Test all phases
     
     results = []
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -214,7 +235,9 @@ def run_handoff_grid_search(args) -> List[Dict]:
         print(f"\n[Handoff Phase {handoff_phase}] Testing: "
               f"Expert controls until {PHASE_NAMES[handoff_phase]}, then Model takes over")
         
-        cfg.output_dir = f"{args.output_dir}_{timestamp}/handoff_{handoff_phase}_{PHASE_NAMES[handoff_phase]}"
+        # FLAT OUTPUT STRUCTURE
+        cfg.output_dir = f"{args.output_dir}_{timestamp}"
+        cfg.experiment_name = f"handoff_{handoff_phase}_{PHASE_NAMES[handoff_phase]}"
         
         try:
             evaluator = HybridEvaluator(cfg, handoff_phase=handoff_phase)
@@ -346,6 +369,8 @@ def main():
     parser.add_argument("--ik_ki", type=float, default=0.5)
     parser.add_argument("--ik_kd", type=float, default=15.0)
     parser.add_argument("--action_scale", type=float, default=50.0)
+    parser.add_argument("--phases", type=int, nargs="+", default=None,
+                        help="Specific handoff phases to test (e.g. --phases 1 2). Default: all [0, 1, 2, 3]")
     
     args = parser.parse_args()
     
