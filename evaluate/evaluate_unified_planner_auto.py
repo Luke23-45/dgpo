@@ -1,12 +1,12 @@
-# FILE: evaluate/evaluate_semantic_planner_auto.py
-# Expert-to-Model Handoff Evaluation for Semantic Planner
+# FILE: evaluate/evaluate_unified_planner_auto.py
+# Expert-to-Model Handoff Evaluation for Unified Diffusion Planner
 
 """
-Phase-Based Hybrid Evaluation Script for SemanticPlanner.
+Phase-Based Hybrid Evaluation Script for UnifiedDiffusionPlanner.
 
 This script implements a diagnostic evaluation approach where:
 1. The **Expert (DGPOExpert)** controls the robot up to a specified handoff phase
-2. The **Model (SemanticPlanner)** takes control from the handoff phase onwards
+2. The **Model (UnifiedDiffusionPlanner)** takes control from the handoff phase onwards
 
 This allows systematic diagnosis of which phase the model fails at:
 - If model fails at APPROACH: Fundamental vision/reaching issue
@@ -23,13 +23,14 @@ Phases (from EXPERT_PHASE_MAP):
 
 Usage:
     # Expert controls until GRASP (phase 1), model takes over from LIFT:
-    python evaluate/evaluate_semantic_planner_auto.py \\
-        --checkpoint /path/to/semantic_planner.ckpt \\
+    python evaluate/evaluate_unified_planner_auto.py \\
+        --checkpoint /path/to/unified_planner.ckpt \\
         --handoff_phase 1 \\
         --n_episodes 5
 
     # Expert controls until LIFT (phase 2), model takes over from PLACE:
-    python evaluate/evaluate_semantic_planner_auto.py --handoff_phase 2
+    python evaluate/evaluate_unified_planner_auto.py \\
+        --handoff_phase 2
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import cv2
+import hydra
 import mujoco
 import numpy as np
 import torch
@@ -57,17 +59,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from envs.panda_env import PandaEnv
-from train.train_semantic_planner import SemanticPlannerLightningModule
-from models.semantic_planner import SemanticPlanner
+from train.train_unified_planner import UnifiedPlannerLightningModule
+from models.unified_diffusion_planner import UnifiedDiffusionPlanner
 from utils.ik_solver import IKSolver
 from utils.dgpo_expert import DGPOExpert, DGPOExpertConfig, ObjectProfile, EXPERT_PHASE_MAP
+from utils.unified_planner_dataset import apply_delta_pose
 
 # Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
-log = logging.getLogger("SemanticPlanner_Auto")
+log = logging.getLogger("UnifiedPlanner_Auto")
 
 
 # ==============================================================================
@@ -126,15 +129,14 @@ class EvaluationLogger:
     HEADERS = [
         "episode_id", "step", "time_sec",
         "controller",  # "EXPERT" or "MODEL"
-        "expert_state", "phase", "pred_phase",
+        "expert_state", "phase",
         "ee_x", "ee_y", "ee_z",
         "obj_x", "obj_y", "obj_z",
         "goal_x", "goal_y", "goal_z",
         "dist_ee_obj", "dist_obj_goal",
         "is_grasped", "gripper_cmd",
-        "target_x", "target_y", "target_z",
+        "policy_dx", "policy_dy", "policy_dz",
         "control_error_x", "control_error_y", "control_error_z",
-        "model_error_x", "model_error_y", "model_error_z",
         "handoff_phase", "handoff_step",
         "success_flag"
     ]
@@ -158,12 +160,12 @@ class EvaluationLogger:
 # ==============================================================================
 # 3. HYBRID EVALUATOR (EXPERT -> MODEL HANDOFF)
 # ==============================================================================
-class HybridSemanticEvaluator:
+class HybridEvaluator:
     """
     Evaluator implementing Expert-to-Model handoff at specified phase.
     
     The Expert controls the robot until it reaches the handoff_phase.
-    Then the SemanticPlanner Model takes over and attempts to complete the task.
+    Then the Model takes over and attempts to complete the task.
     """
     
     def __init__(self, cfg: DictConfig, handoff_phase: int = 1):
@@ -208,35 +210,35 @@ class HybridSemanticEvaluator:
         SIM_SUBSTEPS = 20
         self.effective_dt = self.env.model.opt.timestep * SIM_SUBSTEPS
         
-        # 6. Image transform - MUST MATCH TRAINING
+        # 6. Image transform
         self.transform = transforms.Compose([
             transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # [-1, 1] range
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
         
         # 7. Output directory
         self.output_dir = Path(cfg.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        log.info("HybridSemanticEvaluator initialized.")
+        log.info("HybridEvaluator initialized.")
     
     def _load_policy(self, checkpoint_path: str):
-        """Load SemanticPlanner from Lightning checkpoint."""
+        """Load UnifiedDiffusionPlanner from Lightning checkpoint."""
         log.info(f"Loading Lightning checkpoint: {checkpoint_path}")
         
-        pl_module = SemanticPlannerLightningModule.load_from_checkpoint(
+        pl_module = UnifiedPlannerLightningModule.load_from_checkpoint(
             checkpoint_path,
             map_location=self.device,
             strict=False
         )
         
-        self.model: SemanticPlanner = pl_module.model.to(self.device)
+        self.model: UnifiedDiffusionPlanner = pl_module.model.to(self.device)
         self.model.eval()
         
         log.info(f"Model loaded successfully")
-        log.info(f"  Chunk size: {self.model.cfg.chunk_size}")
-        log.info(f"  Num phases: {self.model.cfg.num_task_phases}")
+        log.info(f"  Diffusion timesteps: {self.model.cfg.diffusion_timesteps}")
+        log.info(f"  Inference steps: {self.model.cfg.inference_steps}")
     
     def _prepare_batch(
         self,
@@ -279,7 +281,6 @@ class HybridSemanticEvaluator:
         # Reset environment and expert
         self.env.reset(seed=seed)
         self.expert.reset()
-        self.ik_solver.reset_controller_state()
         obs = self.env.get_expert_obs()
         
         # Render goal image
@@ -310,14 +311,10 @@ class HybridSemanticEvaluator:
                 log.info(f"  [HANDOFF] Step {step}: Expert -> Model (Phase {current_phase}: {PHASE_NAMES[current_phase]})")
             
             # Initialize control variables
-            target_pose = np.zeros(7)
+            delta_pose = np.zeros(7)
             gripper_cmd = 1.0
+            target_pose = None
             control_error = np.zeros(3)
-            model_error = np.zeros(3)
-            pred_phase = 0
-            
-            current_ee_pose = obs['ee_pose_world']
-            obj_pos = obs['object_pos_world']
             
             if controller == "EXPERT":
                 # === EXPERT CONTROL ===
@@ -340,36 +337,35 @@ class HybridSemanticEvaluator:
                     delta_joints = np.zeros(7)
                 
                 # Compute control error
+                current_ee_pose = obs['ee_pose_world']
                 control_error = target_pose_7d[:3] - current_ee_pose[:3]
-                model_error = np.zeros(3)  # Expert has no model error
-                pred_phase = current_phase  # Use expert phase
+                delta_pose[:3] = target_pose_7d[:3] - current_ee_pose[:3]
                 
             else:
                 # === MODEL CONTROL ===
                 batch = self._prepare_batch(prev_img, curr_img, goal_img, proprio)
                 
                 with torch.no_grad():
-                    outputs = self.model(batch)
+                    sampled_actions = self.model.sample(
+                        batch,
+                        num_steps=self.cfg.sampling.inference_steps,
+                        guidance_scale=self.cfg.sampling.guidance_scale
+                    )
                 
-                # SemanticPlanner outputs:
-                # - pose_chunk: (B, K, 7) - absolute target poses
-                # - gripper_chunk: (B, K, 1) - gripper logits
-                # - phase_logits: (B, N_phases) - phase classification
+                delta_action = sampled_actions[0, 0].cpu().numpy()
+                delta_pose = delta_action[:7]
                 
-                pose_chunk = outputs['pose_chunk']      # (1, K, 7)
-                gripper_chunk = outputs['gripper_chunk'] # (1, K, 1)
-                phase_logits = outputs['phase_logits']   # (1, N_phases)
+                # Apply action scaling
+                action_scale = getattr(self.cfg, 'action_scale', 1.0)
+                delta_pose[:3] = delta_pose[:3] * action_scale
                 
-                # Take the FIRST step from the chunk as immediate target
-                target_pose = pose_chunk[0, 0, :].cpu().numpy()  # (7,) - ABSOLUTE pose
-                gripper_logit = gripper_chunk[0, 0, 0].item()
-                pred_phase = torch.argmax(phase_logits, dim=1).item()
+                gripper_cmd = float(np.clip(delta_action[7], -1.0, 1.0))
                 
-                # Convert gripper logit to command
-                gripper_prob = torch.sigmoid(torch.tensor(gripper_logit)).item()
-                gripper_cmd = -1.0 if gripper_prob > 0.5 else 1.0  # -1=close, 1=open
+                # Convert delta pose to absolute target
+                current_ee_pose = obs['ee_pose_world']
+                target_pose = apply_delta_pose(current_ee_pose, delta_pose)
                 
-                # Convert absolute target pose to joint deltas via IK
+                # Convert to joint deltas via IK
                 try:
                     delta_joints = self.ik_solver.compute_delta_action(
                         target_ee_pose=target_pose,
@@ -384,9 +380,8 @@ class HybridSemanticEvaluator:
                     log.warning(f"Model IK failed at step {step}: {e}")
                     delta_joints = np.zeros(7)
                 
-                # Compute diagnostics
+                # Compute control error
                 control_error = target_pose[:3] - current_ee_pose[:3]
-                model_error = target_pose[:3] - obj_pos  # Model target vs object
             
             # Step environment
             action = np.concatenate([delta_joints, [gripper_cmd]])
@@ -419,7 +414,6 @@ class HybridSemanticEvaluator:
                 "controller": controller,
                 "expert_state": expert_state,
                 "phase": current_phase,
-                "pred_phase": pred_phase,
                 "ee_x": ee_pos[0], "ee_y": ee_pos[1], "ee_z": ee_pos[2],
                 "obj_x": obj_pos[0], "obj_y": obj_pos[1], "obj_z": obj_pos[2],
                 "goal_x": goal_pos[0], "goal_y": goal_pos[1], "goal_z": goal_pos[2],
@@ -427,13 +421,12 @@ class HybridSemanticEvaluator:
                 "dist_obj_goal": dist_obj_goal,
                 "is_grasped": float(is_grasped),
                 "gripper_cmd": gripper_cmd,
-                "target_x": target_pose[0], "target_y": target_pose[1], "target_z": target_pose[2],
+                "policy_dx": delta_pose[0],
+                "policy_dy": delta_pose[1],
+                "policy_dz": delta_pose[2],
                 "control_error_x": control_error[0],
                 "control_error_y": control_error[1],
                 "control_error_z": control_error[2],
-                "model_error_x": model_error[0],
-                "model_error_y": model_error[1],
-                "model_error_z": model_error[2],
                 "handoff_phase": self.handoff_phase,
                 "handoff_step": handoff_step,
                 "success_flag": float(episode_success)
@@ -446,7 +439,7 @@ class HybridSemanticEvaluator:
             self._draw_hud(
                 frame, episode_id, step,
                 dist_obj_goal, is_grasped, gripper_cmd, episode_success,
-                controller, current_phase, pred_phase, expert_state, control_error, model_error
+                controller, current_phase, expert_state, control_error
             )
             
             video_writer.write(frame)
@@ -479,80 +472,66 @@ class HybridSemanticEvaluator:
         success: bool,
         controller: str,
         phase: int,
-        pred_phase: int,
         expert_state: str,
-        control_error: np.ndarray = np.zeros(3),
-        model_error: np.ndarray = np.zeros(3)
+        control_error: np.ndarray = np.zeros(3)
     ):
         """Draw HUD overlay on video frame."""
         h, w = frame.shape[:2]
         
         # Background bar
-        cv2.rectangle(frame, (0, 0), (w, 110), (40, 40, 40), -1)
+        cv2.rectangle(frame, (0, 0), (w, 100), (40, 40, 40), -1)
         
         # Row 1: Episode info
         cv2.putText(frame, f"Ep {ep_id} | Step {step}",
-                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # Row 1 Right: Controller indicator
         ctrl_color = (0, 255, 255) if controller == "EXPERT" else (255, 165, 0)
         cv2.putText(frame, f"CTRL: {controller}",
-                    (w - 140, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, ctrl_color, 1)
+                    (w - 140, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, ctrl_color, 1)
         
-        # Row 2: Phase info
+        # Row 2: Phase and Expert State
         phase_txt = PHASE_NAMES[min(phase, 4)]
-        pred_txt = PHASE_NAMES[min(pred_phase, 4)]
-        cv2.putText(frame, f"ExpertPhase: {phase_txt} | ModelPhase: {pred_txt}",
-                    (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+        cv2.putText(frame, f"Phase: {phase_txt} | {expert_state}",
+                    (10, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         
         # Row 2 Right: Handoff info
         cv2.putText(frame, f"Handoff@{PHASE_NAMES[self.handoff_phase]}",
-                    (w - 150, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 200), 1)
+                    (w - 160, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 150, 200), 1)
         
-        # Row 3: Distance and Gripper
+        # Row 3: Distance to goal
         dist_color = (0, 255, 0) if dist_goal < 0.05 else (0, 165, 255) if dist_goal < 0.1 else (0, 0, 255)
         cv2.putText(frame, f"Goal: {dist_goal*100:.1f}cm",
-                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, dist_color, 1)
+                    (10, 66), cv2.FONT_HERSHEY_SIMPLEX, 0.5, dist_color, 1)
         
+        # Row 3 Middle: Gripper state
         grip_txt = "CLOSED" if gripper_cmd < 0 else "OPEN"
         grip_color = (0, 255, 0) if gripper_cmd < 0 else (255, 255, 0)
         cv2.putText(frame, f"Grip: {grip_txt}",
-                    (150, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, grip_color, 1)
+                    (150, 66), cv2.FONT_HERSHEY_SIMPLEX, 0.5, grip_color, 1)
         
-        # Row 3 Right: Grasp status
-        grasp_txt = "GRASPED" if is_grasped else "NOT GRASPED"
-        grasp_color = (0, 255, 0) if is_grasped else (128, 128, 128)
-        cv2.putText(frame, grasp_txt,
-                    (w - 140, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.45, grasp_color, 1)
-        
-        # Row 4: Control Error Z
+        # Row 3 Right: Control Error Z
         err_z = control_error[2]
         err_color = (0, 0, 255) if abs(err_z) > 0.05 else (0, 255, 0)
         cv2.putText(frame, f"CtrlErrZ: {err_z*100:.1f}cm",
-                    (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.45, err_color, 1)
+                    (w - 160, 66), cv2.FONT_HERSHEY_SIMPLEX, 0.45, err_color, 1)
         
-        # Row 4 Middle: Model Error Z (only when model is controlling)
-        if controller == "MODEL":
-            mdl_z = model_error[2]
-            mdl_color = (255, 0, 255) if abs(mdl_z) > 0.1 else (0, 255, 0)
-            cv2.putText(frame, f"MdlBiasZ: {mdl_z*100:.1f}cm",
-                        (160, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.45, mdl_color, 1)
-        
-        # Row 5: Expert State (truncated)
-        state_short = expert_state[:20] if len(expert_state) > 20 else expert_state
-        cv2.putText(frame, f"State: {state_short}",
-                    (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
+        # Row 4: Grasp indicator
+        grasp_txt = "GRASPED" if is_grasped else "NOT GRASPED"
+        grasp_color = (0, 255, 0) if is_grasped else (128, 128, 128)
+        cv2.putText(frame, grasp_txt,
+                    (10, 88), cv2.FONT_HERSHEY_SIMPLEX, 0.5, grasp_color, 1)
         
         # Success indicator
         if success:
             cv2.putText(frame, "SUCCESS!",
-                        (w - 120, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        (w - 120, 88), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
     
     def run(self) -> Dict:
         """Run full evaluation across multiple episodes."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        video_path = self.output_dir / f"semantic_hybrid_handoff{self.handoff_phase}_{timestamp}.mp4"
-        csv_path = self.output_dir / f"semantic_hybrid_handoff{self.handoff_phase}_{timestamp}.csv"
+        video_path = self.output_dir / f"hybrid_eval_handoff{self.handoff_phase}_{timestamp}.mp4"
+        csv_path = self.output_dir / f"hybrid_eval_handoff{self.handoff_phase}_{timestamp}.csv"
         
         # Initialize video writer
         first_obs = self.env.get_expert_obs()
@@ -610,20 +589,21 @@ class HybridSemanticEvaluator:
 # 4. MAIN
 # ==============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="Expert-to-Model Handoff Evaluation for Semantic Planner")
+    parser = argparse.ArgumentParser(description="Expert-to-Model Handoff Evaluation")
     parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to semantic planner checkpoint")
-    parser.add_argument("--config", type=str, default="configs/eval_semantic_planner_v2_config.yaml",
+                        help="Path to unified planner checkpoint")
+    parser.add_argument("--config", type=str, default="configs/eval_unified_planner_config.yaml",
                         help="Path to config file")
     parser.add_argument("--handoff_phase", type=int, default=1, choices=[0, 1, 2, 3],
                         help="Phase at which to handoff from expert to model (0=REACH, 1=GRASP, 2=LIFT, 3=PLACE)")
     parser.add_argument("--n_episodes", type=int, default=5)
     parser.add_argument("--max_steps", type=int, default=800)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output_dir", type=str, default="outputs/semantic_hybrid_eval")
+    parser.add_argument("--output_dir", type=str, default="outputs/hybrid_eval")
     parser.add_argument("--ik_kp", type=float, default=500.0)
     parser.add_argument("--ik_ki", type=float, default=0.5)
     parser.add_argument("--ik_kd", type=float, default=15.0)
+    parser.add_argument("--action_scale", type=float, default=50.0)
     args = parser.parse_args()
     
     # Load or create config
@@ -636,6 +616,10 @@ def main():
             "env": {
                 "xml_path": "envs/panda_pick_place.xml",
                 "urdf_path": "urdf/panda_mujoco_kinematics.urdf"
+            },
+            "sampling": {
+                "inference_steps": 10,
+                "guidance_scale": 1.5
             },
             "success_threshold": 0.05,
             "success_duration_steps": 10
@@ -650,9 +634,10 @@ def main():
     cfg.ik_kp = args.ik_kp
     cfg.ik_ki = args.ik_ki
     cfg.ik_kd = args.ik_kd
+    cfg.action_scale = args.action_scale
     
     # Run evaluation
-    evaluator = HybridSemanticEvaluator(cfg, handoff_phase=args.handoff_phase)
+    evaluator = HybridEvaluator(cfg, handoff_phase=args.handoff_phase)
     results = evaluator.run()
     
     return results

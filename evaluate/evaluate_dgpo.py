@@ -98,6 +98,7 @@ class EvaluationLogger:
         "dist_ee_obj", "dist_obj_goal",
         "is_grasped", "gripper_cmd",
         "policy_pose_x", "policy_pose_y", "policy_pose_z",
+        "target_obj_dx", "target_obj_dy", "target_obj_dz",  # Model bias diagnostics
         "success_flag"
     ]
     
@@ -145,9 +146,14 @@ class DGPOEvaluator:
             render_mode="rgb_array"
         )
         
-        # 3. Initialize IK Solver
-        log.info("Initializing IK Solver...")
-        self.ik_solver = IKSolver(urdf_path=args.urdf_path)
+        # 3. Initialize IK Solver with tunable PID gains
+        log.info(f"Initializing IK Solver with PID: Kp={args.ik_kp}, Ki={args.ik_ki}, Kd={args.ik_kd}")
+        self.ik_solver = IKSolver(
+            urdf_path=args.urdf_path,
+            kp=args.ik_kp,
+            ki=args.ik_ki,
+            kd=args.ik_kd
+        )
         
         # 4. Control calibration
         SIM_SUBSTEPS = 20
@@ -295,6 +301,11 @@ class DGPOEvaluator:
             else:
                 success_steps = 0
             
+            # Compute model-vs-object diagnostic (key for detecting bias)
+            target_obj_dx = policy_pose[0] - obj_pos[0]
+            target_obj_dy = policy_pose[1] - obj_pos[1]
+            target_obj_dz = policy_pose[2] - obj_pos[2]
+            
             # 5. Log metrics
             logger.log_step({
                 "episode_id": episode_id,
@@ -310,6 +321,9 @@ class DGPOEvaluator:
                 "policy_pose_x": policy_pose[0],
                 "policy_pose_y": policy_pose[1],
                 "policy_pose_z": policy_pose[2],
+                "target_obj_dx": target_obj_dx,
+                "target_obj_dy": target_obj_dy,
+                "target_obj_dz": target_obj_dz,
                 "success_flag": float(episode_success)
             })
             
@@ -476,6 +490,20 @@ def main():
     parser.add_argument(
         "--max_steps", type=int, default=800,
         help="Maximum steps per episode"
+    )
+    
+    # IK PID Tuning Arguments (use optimal values from grid search)
+    parser.add_argument(
+        "--ik_kp", type=float, default=500.0,
+        help="IK solver proportional gain (default: 500 from grid search)"
+    )
+    parser.add_argument(
+        "--ik_ki", type=float, default=0.5,
+        help="IK solver integral gain (default: 0.5 from grid search)"
+    )
+    parser.add_argument(
+        "--ik_kd", type=float, default=15.0,
+        help="IK solver derivative gain (default: 15 from grid search)"
     )
     
     args = parser.parse_args()

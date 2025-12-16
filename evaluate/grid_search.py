@@ -60,32 +60,35 @@ def main():
     #     {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 150.0, "ik_kd": 5.0, "ik_ki": 2.0},
     # ]
 
-    # param_grid = [
-    #     # 1. Baseline Stiffness (High Damping? Low Damping?)
-
-    #     {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 435.0, "ik_kd": 10.0, "ik_ki": 0.1},
-        
-    #     # 3. Very High Stiffness (Industrial Robot style)
-    #     {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 445.0, "ik_kd": 20.0, "ik_ki": 0.1},
-    #     {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 450.0, "ik_kd": 20.0, "ik_ki": 0.2},
-    #     {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 400.0, "ik_kd": 20.0, "ik_ki": 0.2},
-    #     # 4. Integral Heavy (To fix undershoot/drift)
-    #     {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 460.0, "ik_kd": 20.0, "ik_ki": 1.0},
-    #     {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 470.0, "ik_kd": 20.0, "ik_ki": 2.0},
-    # ]
-
-    # {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 470.0, "ik_kd": 20.0, "ik_ki": 2.0}, and   {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 500.0, "ik_kd": 20.0, "ik_ki": 0.2},
-
     param_grid = [
         # 1. Baseline Stiffness (High Damping? Low Damping?)
 
-        {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 520.0, "ik_kd": 10.0, "ik_ki": 0.1},
+        # {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 435.0, "ik_kd": 10.0, "ik_ki": 0.1},
         
-        # 3. Very High Stiffness (Industrial Robot style)
-        {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 550.0, "ik_kd": 20.0, "ik_ki": 0.1},
-        {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 500.0, "ik_kd": 20.0, "ik_ki": 0.2},
+        # # 3. Very High Stiffness (Industrial Robot style)
+        # {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 445.0, "ik_kd": 20.0, "ik_ki": 0.1},
+        # {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 450.0, "ik_kd": 20.0, "ik_ki": 0.2},
+        # {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 400.0, "ik_kd": 20.0, "ik_ki": 0.2},
+        # 4. Integral Heavy (To fix undershoot/drift)
 
+        {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 800.0, "ik_kd": 20.0, "ik_ki": 2.0},
+        {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 900.0, "ik_kd": 20.0, "ik_ki": 0.2},
+        {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 700.0, "ik_kd": 20.0, "ik_ki": 1.0},
+        {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 600.0, "ik_kd": 20.0, "ik_ki": 1.0},
     ]
+
+    # {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 470.0, "ik_kd": 20.0, "ik_ki": 2.0}, and   {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 500.0, "ik_kd": 20.0, "ik_ki": 0.2},
+
+    # param_grid = [
+    #     # 1. Baseline Stiffness (High Damping? Low Damping?)
+
+    #     {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 520.0, "ik_kd": 10.0, "ik_ki": 0.1},
+        
+    #     # 3. Very High Stiffness (Industrial Robot style)
+    #     {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 550.0, "ik_kd": 20.0, "ik_ki": 0.1},
+    #     {"action_scale": BASE_SCALE, "guidance_scale": 1.0, "ik_kp": 500.0, "ik_kd": 20.0, "ik_ki": 0.2},
+
+    # ]
     results = []
 
     print("="*60)

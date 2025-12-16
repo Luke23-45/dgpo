@@ -211,10 +211,13 @@ class SemanticPlannerEvaluator:
         log.info(f"Control dt: {self.effective_dt:.4f}s")
         
         # 5. Image transform - MUST EXACTLY MATCH TRAINING!
-        # SemanticPlannerDataset uses: Resize(224) + ToTensor()
+        # SemanticPlannerDataset uses: 
+        #   Resize(224, BICUBIC) + ToTensor() + Normalize([0.5,0.5,0.5], [0.5,0.5,0.5])
+        # This converts images from [0,255] -> [0,1] -> [-1,1]
         self.transform = transforms.Compose([
-            transforms.Resize((224, 224), antialias=True),
-            transforms.ToTensor()
+            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # [-1, 1] range
         ])
         
         # 6. Output directory
@@ -431,7 +434,9 @@ class SemanticPlannerEvaluator:
         is_grasped: bool,
         gripper_cmd: float,
         phase: int,
-        success: bool
+        success: bool,
+        model_error: np.ndarray = np.zeros(3),
+        control_error: np.ndarray = np.zeros(3)
     ):
         """Draw HUD overlay on video frame."""
         h, w = frame.shape[:2]

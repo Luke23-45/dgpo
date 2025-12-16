@@ -1,12 +1,13 @@
-# FILE: evaluate/grid_search_semantic.py
-# Grid Search for Semantic Planner Parameters (Including Handoff Phase Testing)
+# FILE: evaluate/grid_search_unified.py
+# Grid Search for Unified Planner Parameters (Including Handoff Phase Testing)
 
 """
-Grid Search Script for Semantic Planner Parameter Tuning.
+Grid Search Script for Unified Planner Parameter Tuning.
 
 This script systematically searches over:
 1. IK PID parameters (Kp, Ki, Kd) - for control performance
-2. Handoff phases - to identify which phase the model struggles with
+2. Action scale - for model output magnitude
+3. Handoff phases - to identify which phase the model struggles with
 
 The handoff phase testing is particularly powerful:
 - Running with handoff_phase=0 tests the model on the entire task
@@ -17,13 +18,13 @@ Comparing success rates across handoff phases reveals which phase is the bottlen
 
 Usage:
     # Standard PID tuning (model controls entire task):
-    python evaluate/grid_search_semantic.py --checkpoint /path/to/model.ckpt --n_episodes 3
+    python evaluate/grid_search_unified.py --checkpoint /path/to/model.ckpt --n_episodes 3
     
     # Handoff phase comparison (diagnose which phase model fails at):
-    python evaluate/grid_search_semantic.py --checkpoint /path/to/model.ckpt --mode handoff --n_episodes 3
+    python evaluate/grid_search_unified.py --checkpoint /path/to/model.ckpt --mode handoff --n_episodes 3
     
     # Fast iteration mode:
-    python evaluate/grid_search_semantic.py --checkpoint /path/to/model.ckpt --n_episodes 2 --max_steps 300
+    python evaluate/grid_search_unified.py --checkpoint /path/to/model.ckpt --n_episodes 2 --max_steps 300
 """
 
 import argparse
@@ -41,21 +42,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from evaluate.evaluate_unified_planner_auto import HybridEvaluator, PHASE_NAMES
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("GridSearch_Semantic")
-
-# Phase names for display
-PHASE_NAMES = ["REACH", "GRASP", "LIFT", "PLACE", "RETRACT"]
+log = logging.getLogger("GridSearch_Unified")
 
 
 def run_pid_grid_search(args) -> List[Dict]:
     """
-    Grid search over IK PID parameters.
-    Uses full model control via evaluate_semantic_planner_v2.
+    Grid search over IK PID parameters and action scale.
+    Uses full model control (handoff_phase=0).
     """
-    from evaluate.evaluate_semantic_planner_v2 import SemanticPlannerEvaluator
-    
     # Load base config
     config_path = ROOT / args.config
     if config_path.exists():
@@ -67,6 +65,10 @@ def run_pid_grid_search(args) -> List[Dict]:
                 "xml_path": "envs/panda_pick_place.xml",
                 "urdf_path": "urdf/panda_mujoco_kinematics.urdf"
             },
+            "sampling": {
+                "inference_steps": 10,
+                "guidance_scale": 1.5
+            },
             "success_threshold": 0.05,
             "success_duration_steps": 10
         })
@@ -74,47 +76,49 @@ def run_pid_grid_search(args) -> List[Dict]:
     # Override with command line args
     cfg.checkpoint = args.checkpoint
     cfg.n_episodes = args.n_episodes
+    cfg.max_steps = args.max_steps
     cfg.seed = args.seed
-    if args.max_steps is not None:
-        cfg.max_steps = args.max_steps
     
     # Define parameter grid
     param_grid = [
         # =====================================================
         # STAGE 1: Baseline High Stiffness (validated values)
         # =====================================================
-        {"ik_kp": 400.0, "ik_ki": 0.1, "ik_kd": 20.0},
-        {"ik_kp": 450.0, "ik_ki": 0.1, "ik_kd": 20.0},
-        {"ik_kp": 500.0, "ik_ki": 0.2, "ik_kd": 20.0},
+        {"ik_kp": 400.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 50.0},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 50.0},
+        {"ik_kp": 550.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 50.0},
         
         # =====================================================
-        # STAGE 2: Very High Stiffness
+        # STAGE 2: Action Scale Variants
         # =====================================================
-        {"ik_kp": 520.0, "ik_ki": 0.1, "ik_kd": 15.0},
-        {"ik_kp": 550.0, "ik_ki": 0.1, "ik_kd": 20.0},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 25.0},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 75.0},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 15.0, "action_scale": 100.0},
         
         # =====================================================
-        # STAGE 3: Integral Variants (for steady-state error)
+        # STAGE 3: Damping Variants
         # =====================================================
-        {"ik_kp": 470.0, "ik_ki": 1.0, "ik_kd": 20.0},
-        {"ik_kp": 470.0, "ik_ki": 2.0, "ik_kd": 20.0},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 10.0, "action_scale": 50.0},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 20.0, "action_scale": 50.0},
+        {"ik_kp": 500.0, "ik_ki": 0.5, "ik_kd": 25.0, "action_scale": 50.0},
         
         # =====================================================
-        # STAGE 4: Lower Damping (faster response)
+        # STAGE 4: Integral Gain Variants
         # =====================================================
-        {"ik_kp": 500.0, "ik_ki": 0.2, "ik_kd": 10.0},
-        {"ik_kp": 500.0, "ik_ki": 0.2, "ik_kd": 5.0},
+        {"ik_kp": 500.0, "ik_ki": 0.1, "ik_kd": 15.0, "action_scale": 50.0},
+        {"ik_kp": 500.0, "ik_ki": 1.0, "ik_kd": 15.0, "action_scale": 50.0},
+        {"ik_kp": 500.0, "ik_ki": 2.0, "ik_kd": 15.0, "action_scale": 50.0},
     ]
     
     results = []
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     print("=" * 70)
-    print("SEMANTIC PLANNER GRID SEARCH - PID TUNING")
+    print("UNIFIED PLANNER GRID SEARCH - PID TUNING")
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Configurations: {len(param_grid)}")
     print(f"Episodes per config: {args.n_episodes}")
-    print(f"Max steps: {cfg.get('max_steps', 400)}")
+    print(f"Max steps: {args.max_steps}")
     print("=" * 70)
     
     for i, params in enumerate(param_grid):
@@ -124,20 +128,21 @@ def run_pid_grid_search(args) -> List[Dict]:
         cfg.ik_kp = params["ik_kp"]
         cfg.ik_ki = params["ik_ki"]
         cfg.ik_kd = params["ik_kd"]
-        cfg.output_dir = f"{args.output_dir}_{timestamp}/kp{params['ik_kp']:.0f}_ki{params['ik_ki']:.1f}_kd{params['ik_kd']:.0f}"
+        cfg.action_scale = params["action_scale"]
+        cfg.output_dir = f"{args.output_dir}_{timestamp}/kp{params['ik_kp']:.0f}_as{params['action_scale']:.0f}"
         
         try:
-            evaluator = SemanticPlannerEvaluator(cfg)
-            success_rate = evaluator.run()
+            evaluator = HybridEvaluator(cfg, handoff_phase=0)  # Model controls entire task
+            eval_results = evaluator.run()
             
             result_entry = {
                 "params": params.copy(),
-                "success_rate": success_rate,
+                "success_rate": eval_results["success_rate"],
                 "output_dir": cfg.output_dir
             }
             results.append(result_entry)
             
-            print(f"-> Result: Success Rate = {success_rate:.1f}%")
+            print(f"-> Result: Success Rate = {eval_results['success_rate']:.1f}%")
             
         except Exception as e:
             log.error(f"Configuration failed: {e}")
@@ -153,10 +158,8 @@ def run_pid_grid_search(args) -> List[Dict]:
 def run_handoff_grid_search(args) -> List[Dict]:
     """
     Grid search over handoff phases to diagnose at which phase the model fails.
-    Uses fixed optimal PID parameters with the hybrid evaluator.
+    Uses fixed optimal PID parameters.
     """
-    from evaluate.evaluate_semantic_planner_auto import HybridSemanticEvaluator, PHASE_NAMES
-    
     # Load base config
     config_path = ROOT / args.config
     if config_path.exists():
@@ -167,6 +170,10 @@ def run_handoff_grid_search(args) -> List[Dict]:
                 "xml_path": "envs/panda_pick_place.xml",
                 "urdf_path": "urdf/panda_mujoco_kinematics.urdf"
             },
+            "sampling": {
+                "inference_steps": 10,
+                "guidance_scale": 1.5
+            },
             "success_threshold": 0.05,
             "success_duration_steps": 10
         })
@@ -174,14 +181,12 @@ def run_handoff_grid_search(args) -> List[Dict]:
     # Override with command line args and use optimal PID
     cfg.checkpoint = args.checkpoint
     cfg.n_episodes = args.n_episodes
+    cfg.max_steps = args.max_steps
     cfg.seed = args.seed
     cfg.ik_kp = args.ik_kp
     cfg.ik_ki = args.ik_ki
     cfg.ik_kd = args.ik_kd
-    if args.max_steps is not None:
-        cfg.max_steps = args.max_steps
-    else:
-        cfg.max_steps = 800
+    cfg.action_scale = args.action_scale
     
     # Handoff phases to test
     handoff_phases = [0, 1, 2, 3]  # REACH, GRASP, LIFT, PLACE
@@ -190,11 +195,12 @@ def run_handoff_grid_search(args) -> List[Dict]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     print("=" * 70)
-    print("SEMANTIC PLANNER GRID SEARCH - HANDOFF PHASE DIAGNOSIS")
+    print("UNIFIED PLANNER GRID SEARCH - HANDOFF PHASE DIAGNOSIS")
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Handoff Phases: {handoff_phases}")
     print(f"Episodes per phase: {args.n_episodes}")
     print(f"PID: Kp={cfg.ik_kp}, Ki={cfg.ik_ki}, Kd={cfg.ik_kd}")
+    print(f"Action Scale: {cfg.action_scale}")
     print("=" * 70)
     print("\nInterpretation Guide:")
     print("  - Phase 0 (REACH): Model controls entire task from start")
@@ -211,7 +217,7 @@ def run_handoff_grid_search(args) -> List[Dict]:
         cfg.output_dir = f"{args.output_dir}_{timestamp}/handoff_{handoff_phase}_{PHASE_NAMES[handoff_phase]}"
         
         try:
-            evaluator = HybridSemanticEvaluator(cfg, handoff_phase=handoff_phase)
+            evaluator = HybridEvaluator(cfg, handoff_phase=handoff_phase)
             eval_results = evaluator.run()
             
             result_entry = {
@@ -264,18 +270,15 @@ def print_summary(results: List[Dict], mode: str, args):
             if sr_p0 is not None and sr_p1 is not None:
                 if sr_p1 > sr_p0 + 20:
                     print("  ⚠️  Model struggles with APPROACH/GRASP phase")
-                    print("     -> Issue: Vision/reaching behavior")
-                    print("     -> Fix: More training data for reaching, check camera normalization")
+                    print("     Consider retraining with focus on reaching behavior")
                 elif sr_p2 is not None and sr_p2 > sr_p1 + 20:
                     print("  ⚠️  Model struggles with LIFT phase")
-                    print("     -> Issue: Post-grasp control, lifting behavior")
-                    print("     -> Fix: Increase IK gains, check action output magnitude")
+                    print("     Increase IK gains or check action_scale")
                 elif sr_p0 > 50:
                     print("  ✓  Model performs well on the complete task!")
                 else:
                     print("  ⚠️  Model struggles across all phases")
-                    print("     -> Issue: Fundamental model capability")
-                    print("     -> Fix: More training data, architecture review")
+                    print("     Consider more training data or architecture changes")
     else:
         # PID tuning mode - sort by success rate
         results.sort(key=lambda x: x.get("success_rate", -1), reverse=True)
@@ -284,7 +287,7 @@ def print_summary(results: List[Dict], mode: str, args):
             status = f"{res['success_rate']:>5.1f}%" if res['success_rate'] >= 0 else "ERROR"
             p = res['params']
             print(f"{rank+1}. Success: {status} | "
-                  f"Kp={p['ik_kp']:.0f}, Ki={p['ik_ki']:.1f}, Kd={p['ik_kd']:.0f}")
+                  f"Kp={p['ik_kp']:.0f}, Ki={p['ik_ki']:.1f}, Kd={p['ik_kd']:.0f}, AS={p['action_scale']:.0f}")
         
         # Best parameters
         if results and results[0]['success_rate'] >= 0:
@@ -294,20 +297,21 @@ def print_summary(results: List[Dict], mode: str, args):
             print(f"  ik_kp: {best['params']['ik_kp']}")
             print(f"  ik_ki: {best['params']['ik_ki']}")
             print(f"  ik_kd: {best['params']['ik_kd']}")
+            print(f"  action_scale: {best['params']['action_scale']}")
             print(f"  Success Rate: {best['success_rate']:.1f}%")
     
     print("=" * 70)
     
     # Save results to file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = Path(f"{args.output_dir}_{timestamp}")
-    results_dir.mkdir(parents=True, exist_ok=True)
-    results_file = results_dir / "grid_search_results.txt"
+    results_file = Path(f"{args.output_dir}_{timestamp}") / "grid_search_results.txt"
+    results_file.parent.mkdir(parents=True, exist_ok=True)
     
     with open(results_file, 'w') as f:
-        f.write(f"SEMANTIC PLANNER GRID SEARCH RESULTS ({mode.upper()} MODE)\n")
+        f.write(f"UNIFIED PLANNER GRID SEARCH RESULTS ({mode.upper()} MODE)\n")
         f.write(f"Checkpoint: {args.checkpoint}\n")
         f.write(f"Episodes per config: {args.n_episodes}\n")
+        f.write(f"Max steps: {args.max_steps}\n")
         f.write("=" * 50 + "\n\n")
         
         for rank, res in enumerate(results):
@@ -322,25 +326,26 @@ def print_summary(results: List[Dict], mode: str, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Grid Search for Semantic Planner Parameters")
+    parser = argparse.ArgumentParser(description="Grid Search for Unified Planner Parameters")
     parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to semantic planner checkpoint")
-    parser.add_argument("--config", type=str, default="configs/eval_semantic_planner_v2_config.yaml",
+                        help="Path to unified planner checkpoint")
+    parser.add_argument("--config", type=str, default="configs/eval_unified_planner_config.yaml",
                         help="Path to base config file")
     parser.add_argument("--mode", type=str, default="pid", choices=["pid", "handoff"],
                         help="Grid search mode: 'pid' for parameter tuning, 'handoff' for phase diagnosis")
     parser.add_argument("--n_episodes", type=int, default=3,
                         help="Episodes per configuration")
-    parser.add_argument("--max_steps", type=int, default=None,
-                        help="Maximum steps per episode (override config)")
+    parser.add_argument("--max_steps", type=int, default=800,
+                        help="Maximum steps per episode")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output_dir", type=str, default="outputs/grid_search_semantic",
+    parser.add_argument("--output_dir", type=str, default="outputs/grid_search_unified",
                         help="Directory to save results")
     
     # Default optimal PID values (for handoff mode)
     parser.add_argument("--ik_kp", type=float, default=500.0)
     parser.add_argument("--ik_ki", type=float, default=0.5)
     parser.add_argument("--ik_kd", type=float, default=15.0)
+    parser.add_argument("--action_scale", type=float, default=50.0)
     
     args = parser.parse_args()
     
