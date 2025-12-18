@@ -1,0 +1,4 @@
+- training.total_iterations=1
+- training.steps_per_iter=4
+- ppo.batch_size=2
+- num_envs=2

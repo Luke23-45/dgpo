@@ -6,12 +6,35 @@ from typing import Dict, Any, Tuple
 import logging
 
 # Logic Imports (Must be available in PYTHONPATH)
+# Logic Imports (Must be available in PYTHONPATH)
 from utils.dgpo_expert import DGPOExpert, DGPOExpertConfig, ObjectProfile
 from utils.ik_solver import IKSolver
 from utils.divergence import compute_step_divergence
+from envs.panda_env import PandaEnv
+from omegaconf import OmegaConf, DictConfig
 
 # Setup localized logger (will likely print to stderr in subprocesses)
 log = logging.getLogger(__name__)
+
+# ==============================================================================
+# Helper for Multiprocessing (Moved here to ensure picklability/importability)
+# ==============================================================================
+def make_dgpo_env(cfg_dict: Dict[str, Any]) -> gym.Env:
+    """Factory function to create a wrapped DGPO environment."""
+    # [CRITICAL FIX] Ensure Subprocess knows to use EGL
+    import os
+    os.environ['MUJOCO_GL'] = 'egl'
+    
+    # Convert dict back to DictConfig if needed, or pass dict to Wrapper
+    cfg = OmegaConf.create(cfg_dict)
+    
+    env = PandaEnv(
+        xml_path=cfg.environment.xml_path,
+        control_mode="delta",
+        render_mode="rgb_array"
+    )
+    return DGPOEnvWrapper(env, cfg)
+
 
 class DGPOEnvWrapper(gym.Wrapper):
     """
@@ -83,6 +106,7 @@ class DGPOEnvWrapper(gym.Wrapper):
         info['expert_pose'] = target_pose
         info['expert_grip'] = grip
         info['expert_phase'] = self.expert.get_state()
+        info['executed_action'] = np.zeros(8, dtype=np.float32) # [FIX] Prevent KeyError on reset/done common in VectorEnv
         
         # Helper: Render goal image (since main process cannot access MuJoCo state)
         # Use simple try/except in case the internal method name changes or fails
@@ -109,7 +133,7 @@ class DGPOEnvWrapper(gym.Wrapper):
         #    (computed at the end of the previous step or reset)
         try:
             delta_joints = self.ik_solver.compute_delta_action(
-                target_ee_pose=self.latest_expert_pose,
+                target_ee_pose_chunk=np.array([self.latest_expert_pose]), # [FIX] Wrap as chunk for Adaptive IK
                 model=self.env.model,
                 data=self.env.data,
                 ee_site_id=self.env.ee_site_id,

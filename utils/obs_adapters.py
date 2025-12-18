@@ -4,7 +4,19 @@ from typing import Dict, Any, List
 from gymnasium import spaces 
 import gymnasium as gym
 from typing import Tuple
-from stable_baselines3.common.vec_env import VecEnv, VecEnvWrapper ,VecNormalize
+try:
+    from stable_baselines3.common.vec_env import VecEnv, VecEnvWrapper, VecNormalize
+except ImportError:
+    # Fallback for environments where stable_baselines3 is not installed
+    # This allows other parts of the codebase to import this module safely
+    # if they don't explicitly use the SB3 adapters.
+    import gymnasium as gym
+    class VecEnv: pass
+    class VecEnvWrapper(gym.Wrapper): 
+        def __init__(self, venv, **kwargs):
+            self.venv = venv
+            self.num_envs = getattr(venv, "num_envs", 1)
+    class VecNormalize: pass
 import logging
 logger = logging.getLogger(__name__)
 

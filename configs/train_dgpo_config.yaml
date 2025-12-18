@@ -52,11 +52,12 @@ ppo:
   batch_size: 32  # Safer for Colab T4 VRAM
   value_coef: 0.5  # Value loss coefficient
   max_grad_norm: 0.5  # Gradient clipping
+  clip_param: 0.1 # [FIX] Tighter clipping for stability
   temperature: 1.0  # AWR temperature for advantage weighting
 
 # --- Optimizer ---
 optimizer:
-  policy_lr: 1.0e-5  # Lower LR for fine-tuning
+  policy_lr: 5.0e-6  # [FIX] Lower LR for fine-tuning stability
   value_lr: 1.0e-4
 
 # --- Training Loop ---

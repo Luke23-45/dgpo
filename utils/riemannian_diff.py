@@ -150,7 +150,9 @@ def compute_riemannian_divergence(
     # or per step? The architecture usually predicts 1 phase for the current state)
     
     probs = torch.softmax(phase_scores, dim=1) # (B, N_Phases)
-    current_weights = (probs @ phase_weights) # (B, 6)
+    
+    # [FIX] AMP Compatibility: Ensure weights match input dtype (e.g., float16)
+    current_weights = (probs @ phase_weights.to(dtype=probs.dtype)) # (B, 6)
     
     # Expand to match B*K
     current_weights = current_weights.unsqueeze(1).repeat(1, K, 1).reshape(B*K, 6)

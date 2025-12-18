@@ -1,0 +1,19 @@
+[2025-12-18 06:15:17,782][DGPO][INFO] - ============================================================
+[2025-12-18 06:15:17,782][DGPO][INFO] - DGPO-Foundation Training (SOTA Production Fix)
+[2025-12-18 06:15:17,783][DGPO][INFO] - ============================================================
+[2025-12-18 06:15:17,783][DGPO][INFO] - Device: cpu
+[2025-12-18 06:15:17,784][DGPO][INFO] - Loading BC checkpoint: checkpoints/bc_backup_epoch_088.ckpt
+[2025-12-18 06:15:20,331][models.semantic_planner][INFO] - [SemanticPlanner] Initializing v9.0 (Strategist) with config: SemanticPlannerConfig(proprio_dim=22, vision_backbone_model='google/siglip-base-patch16-224', vision_feature_dim=768, fusion_transformer_layers=4, fusion_transformer_heads=8, dim_feedforward_ratio=4, dropout=0.1, chunk_size=10, num_task_phases=5)
+[2025-12-18 06:15:20,333][models.semantic_planner][INFO] - Loading Vision Backbone: google/siglip-base-patch16-224
+[2025-12-18 06:15:21,228][models.semantic_planner][INFO] - Backbone Status: Bottom layers FROZEN. Top layer UNFROZEN for geometric adaptation.
+[2025-12-18 06:15:21,398][models.semantic_planner][INFO] - Initializing custom modules (Skipping Vision Backbone)...
+[2025-12-18 06:15:21,757][models.semantic_planner][INFO] - [SemanticPlanner v9.0] Initialization Complete.
+[2025-12-18 06:15:23,713][DGPO][INFO] - Froze vision backbone parameters.
+[2025-12-18 06:15:24,000][DGPO][INFO] - Initializing 2 Parallel Environments...
+[2025-12-18 06:15:26,785][utils.ik_solver][INFO] - Kinematic chain loaded and configured.
+[2025-12-18 06:15:41,341][DGPO][INFO] - DGPO Trainer initialized.
+[2025-12-18 06:15:41,343][DGPO][INFO] - Starting DGPO training for 1 iterations
+[2025-12-18 06:15:41,344][DGPO][INFO] - CSV logger initialized: \content\drive\MyDrive\pda\logs\training_metrics.csv
+[2025-12-18 06:16:38,022][DGPO][INFO] - Iter    0 | R: 0.00 | Succ: 0.0% | BC: 0.0002 | PL: -0.1460
+[2025-12-18 06:16:38,023][DGPO][INFO] -          Shadow Mode | PosDiv: 15.20cm | OrnDiv: 0.032rad
+[2025-12-18 06:16:40,313][DGPO][INFO] - Training complete!
