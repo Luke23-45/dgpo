@@ -426,14 +426,19 @@ class DGPOTrainer:
         cfg_dict = OmegaConf.to_container(cfg, resolve=True)
         env_fns = [lambda: make_dgpo_env(cfg_dict) for _ in range(self.num_envs)]
         
-        # Use AsyncVectorEnv with spawn
+        # Use AsyncVectorEnv with spawn and SHARED MEMORY (Zero-Copy)
         import multiprocessing
         try:
              multiprocessing.set_start_method('spawn', force=True)
         except RuntimeError:
              pass
 
-        self.envs = gym.vector.AsyncVectorEnv(env_fns)
+        self.envs = gym.vector.AsyncVectorEnv(
+            env_fns, 
+            shared_memory=True, 
+            context='spawn', 
+            daemon=True
+        )
         
         # 7. Optimizers
         policy_params = [p for p in self.policy.parameters() if p.requires_grad]
