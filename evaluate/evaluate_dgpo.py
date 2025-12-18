@@ -47,6 +47,7 @@ from envs.panda_env import PandaEnv
 from models.semantic_planner import SemanticPlanner, SemanticPlannerConfig
 from train.train_semantic_planner import SemanticPlannerLightningModule
 from utils.ik_solver import IKSolver
+from utils.scripted_expert import ScriptedExpert, ObjectProfile
 
 # Logging
 logging.basicConfig(
@@ -60,27 +61,97 @@ log = logging.getLogger("DGPO_Eval")
 # 1. UTILITY: GOAL IMAGE RENDERING
 # ==============================================================================
 
-def render_goal_image(env: PandaEnv, goal_pos: np.ndarray) -> np.ndarray:
-    """Renders the goal image by teleporting object to goal position."""
+def render_goal_image(env: PandaEnv, ik_solver: IKSolver, obs: Dict) -> np.ndarray:
+    """
+    Renders the goal image by determining the Robot's Hover Pose using Inverse Kinematics,
+    matching the Expert Policy's Retract State.
+    
+    Includes CRITICAL fixes for:
+    - Object sinking (lifting by half-height 0.02)
+    - Robot height relative to object center (lifting by 0.02)
+    - Dynamic Gripper Orientation Alignment (matching Expert [1,0,0,0] reference)
+    
+    Args:
+        env: PandaEnv instance
+        ik_solver: IKSolver instance used to calculate the robot's pose
+        obs: Observation dictionary containing goal_pos_world and goal_orn_world
+        
+    Returns:
+        goal_image: (H, W, 3) RGB image
+    """
     # Save current state
     original_qpos = env.data.qpos.copy()
     original_qvel = env.data.qvel.copy()
+    original_ctrl = env.data.ctrl.copy()
     
-    # Move object to goal
-    obj_joint_adr = env.model.jnt_qposadr[env.object_joint_id]
-    env.data.qpos[obj_joint_adr:obj_joint_adr + 3] = goal_pos
-    env.data.qvel[:] = 0
+    # Constants matching Expert
+    HOVER_HEIGHT = 0.10
     
-    # Forward and render
-    mujoco.mj_forward(env.model, env.data)
-    goal_image = env.render()
+    # Instantiate temporary expert to use its alignment logic
+    dummy_expert = ScriptedExpert(ObjectProfile(size=np.zeros(3), grasp_width_normalized=0.0))
+
+    try:
+        goal_pos_world = obs['goal_pos_world']
+        goal_orn_world = obs['goal_orn_world']
+
+        # 1. Move object to goal POSE (Position + Orientation)
+        obj_addr = env.model.jnt_qposadr[env.object_joint_id]
+        
+        # FIX 1: Lift object by half-height (0.02) to prevent sinking into table (Z=0.401).
+        target_obj_pos = goal_pos_world + np.array([0.0, 0.0, 0.02])
+        env.data.qpos[obj_addr:obj_addr+3] = target_obj_pos
+        
+        # Set Orientation
+        goal_orn_wxyz = env._scipy_xyzw_to_mujoco_wxyz(goal_orn_world)
+        env.data.qpos[obj_addr+3:obj_addr+7] = goal_orn_wxyz
+        
+        # 2. Calculate Robot Target Pose (Goal Pos + Hover Z)
+        # FIX 2: Also lift robot by half-height (0.02) so it hovers relative to 
+        # the object's center, not the table surface.
+        target_pos = goal_pos_world + np.array([0.0, 0.0, HOVER_HEIGHT + 0.02])
+        
+        # 3. Calculate DYNAMIC Target Orientation
+        # The expert aligns with the goal object. We calculate this alignment relative
+        # to the goal orientation we just retrieved.
+        # FIX 3: Expert uses [1, 0, 0, 0] (Rot X 180) as base. [0, 1, 0, 0] causes twisted arm.
+        seed_downward_quat = np.array([1.0, 0.0, 0.0, 0.0])
+        target_quat = dummy_expert._calculate_aligned_orientation(goal_orn_world, seed_downward_quat)
+        
+        target_pose_7d = np.concatenate([target_pos, target_quat])
+        
+        # 4. Solve IK for Hover Pose
+        # Use hardcoded home_qpos, same as env.reset()
+        home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
+        
+        goal_qpos = ik_solver.solve_ik_static(
+            target_pose=target_pose_7d, 
+            model=env.model, 
+            data=env.data, 
+            ee_site_id=env.ee_site_id,
+            q0=home_qpos 
+        )
+        
+        if goal_qpos is not None:
+            env.data.qpos[:7] = goal_qpos
+        else:
+            # Fallback (should ideally not happen with correct seed/pose)
+            env.data.qpos[:7] = home_qpos
+            
+        # Open Gripper (Retract state has open gripper)
+        env.data.qpos[7:9] = 0.04 
+        
+        # Forward and render
+        mujoco.mj_forward(env.model, env.data)
+        goal_image = env.render()
+        
+        return goal_image
     
-    # Restore state
-    env.data.qpos[:] = original_qpos
-    env.data.qvel[:] = original_qvel
-    mujoco.mj_forward(env.model, env.data)
-    
-    return goal_image
+    finally:
+        # Restore State
+        env.data.qpos[:] = original_qpos
+        env.data.qvel[:] = original_qvel
+        env.data.ctrl[:] = original_ctrl # Original code didn't save ctrl, but ground truth does. Safe to add.
+        mujoco.mj_forward(env.model, env.data)
 
 
 # ==============================================================================
@@ -239,7 +310,7 @@ class DGPOEvaluator:
         self.ik_solver.reset_controller_state()
         
         # Render goal image
-        goal_img = render_goal_image(self.env, obs['goal_pos_world'])
+        goal_img = render_goal_image(self.env, self.ik_solver, obs)
         prev_img = obs['image_primary'].copy()
         
         episode_success = False

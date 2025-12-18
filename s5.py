@@ -230,6 +230,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compare delta and absolute controllers.")
     parser.add_argument("--urdf_path", type=str, default="urdf/panda_mujoco_kinematics.urdf")
     parser.add_argument("--xml_path", type=str, default="envs/panda_pick_place.xml")
-    parser.add_argument("--seed", type=int, default=8888)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     main(args)

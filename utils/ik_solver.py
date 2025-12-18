@@ -106,7 +106,7 @@ class IKSolver:
             logger.critical("Could not parse URDF or build chain.", exc_info=True)
             raise
 
-    # ... (Static methods omitted, assumed unchanged, but replacing the whole block below __init__) ...
+   
     
     @staticmethod
     def _quat_xyzw_to_wxyz(q_xyzw: np.ndarray) -> np.ndarray:
@@ -268,10 +268,15 @@ class IKSolver:
     # Removed unused stubs compute_delta_action_ and compute_delta_action__1 for clarity
     
     def reset_controller_state(self):
-        """Resets the internal state of the PID controller."""
+        """Resets the internal state of the PID controller and fuzzy scheduler."""
         self._integral_error = np.zeros(6)
         self._prev_error = np.zeros(6)
         self._d_filter_state = np.zeros(6)
+        # Fuzzy scheduler state
+        self._fuzzy_prev_error = np.zeros(6)
+        self._fuzzy_error_rate = np.zeros(6)
+        self._fuzzy_error_rate_filtered = np.zeros(6)
+        self._precision_mode_counter = 0  # Tracks consecutive small errors
 
 
     def set_gains(self, kp: float, ki: float, kd: float, lookahead_steps: Optional[int] = None,
@@ -292,6 +297,163 @@ class IKSolver:
             self.ref_dist_rot = ref_dist_rot
         if max_boost is not None:
             self.max_boost = max_boost
+
+    # ========================================================================================
+    # [SOTA ENHANCEMENT] FUZZY GAIN SCHEDULING SYSTEM
+    # Based on 2024 research: Mamdani-style inference with Gaussian membership functions
+    # Provides phase-aware control: stability for large errors, precision for small errors
+    # ========================================================================================
+
+    def _gaussian_membership(self, x: float, center: float, sigma: float) -> float:
+        """Gaussian membership function for fuzzy sets."""
+        return np.exp(-0.5 * ((x - center) / sigma) ** 2)
+
+    def _sigmoid_membership(self, x: float, center: float, steepness: float = 10.0) -> float:
+        """Sigmoid membership function for smooth transitions."""
+        return 1.0 / (1.0 + np.exp(-steepness * (x - center)))
+
+    def fuzzy_gain_schedule(
+        self, 
+        pos_error: np.ndarray, 
+        rot_error_vec: np.ndarray, 
+        effective_dt: float,
+        phase_hint: Optional[str] = None  # Optional: "approach", "grasp", "place"
+    ) -> Tuple[float, float]:
+        """
+        [PRODUCTION-GRADE] Fuzzy logic gain scheduling for Franka Panda manipulator.
+        
+        Implements Mamdani-style fuzzy inference with 4 rules optimized for BC/DGPO training:
+        
+        Rules:
+        1. IF error is LARGE and velocity is HIGH -> Kp is LOW (Stability)
+           - Prevents overshoot during fast approach
+        2. IF error is LARGE and velocity is LOW  -> Kp is MEDIUM (Responsiveness)
+           - Accelerates from stopped position toward target
+        3. IF error is SMALL and velocity is HIGH -> Kp is LOW (Braking)
+           - Prevents oscillation near target
+        4. IF error is SMALL and velocity is LOW  -> Kp is VERY HIGH (Precision)
+           - Maximum precision for fine placement
+        
+        Returns:
+            Tuple[pos_boost, rot_boost]: Separate gain multipliers for position and rotation
+        """
+        # --- 1. COMPUTE NORMALIZED ERRORS ---
+        pos_dist = np.linalg.norm(pos_error)
+        rot_dist = np.linalg.norm(rot_error_vec)
+        
+        # Normalize to [0, ~3] range where 1.0 = reference distance
+        e_pos_norm = pos_dist / self.ref_dist_pos  # ref_dist_pos = 0.01m
+        e_rot_norm = rot_dist / self.ref_dist_rot  # ref_dist_rot = 0.1rad
+        
+        # --- 2. COMPUTE VELOCITY (ERROR RATE) WITH FILTERING ---
+        curr_error = np.concatenate([pos_error, rot_error_vec])
+        raw_error_rate = (curr_error - self._fuzzy_prev_error) / max(effective_dt, 1e-6)
+        
+        # Low-pass filter on error rate to reduce noise (alpha = 0.3)
+        alpha_rate = 0.3
+        self._fuzzy_error_rate_filtered = (
+            alpha_rate * raw_error_rate + 
+            (1 - alpha_rate) * self._fuzzy_error_rate_filtered
+        )
+        
+        # Separate velocity norms
+        v_pos = np.linalg.norm(self._fuzzy_error_rate_filtered[:3])
+        v_rot = np.linalg.norm(self._fuzzy_error_rate_filtered[3:])
+        
+        # Normalize velocities (expected velocity = ref_dist / typical_dt)
+        expected_vel_pos = self.ref_dist_pos / 0.01  # 1 m/s baseline
+        expected_vel_rot = self.ref_dist_rot / 0.01  # 10 rad/s baseline
+        v_pos_norm = v_pos / expected_vel_pos
+        v_rot_norm = v_rot / expected_vel_rot
+        
+        # Update previous error for next iteration
+        self._fuzzy_prev_error = curr_error.copy()
+        
+        # --- 3. MEMBERSHIP FUNCTIONS (GAUSSIAN) ---
+        # Position Error Membership
+        mu_pos_small = self._gaussian_membership(e_pos_norm, center=0.0, sigma=0.5)
+        mu_pos_large = 1.0 - mu_pos_small
+        
+        # Rotation Error Membership  
+        mu_rot_small = self._gaussian_membership(e_rot_norm, center=0.0, sigma=0.5)
+        mu_rot_large = 1.0 - mu_rot_small
+        
+        # Velocity Membership
+        mu_vel_pos_low = self._gaussian_membership(v_pos_norm, center=0.0, sigma=0.5)
+        mu_vel_pos_high = 1.0 - mu_vel_pos_low
+        mu_vel_rot_low = self._gaussian_membership(v_rot_norm, center=0.0, sigma=0.5)
+        mu_vel_rot_high = 1.0 - mu_vel_rot_low
+        
+        # --- 4. FUZZY RULE INFERENCE (MAMDANI) ---
+        # Define boost values for each rule
+        BOOST_STABILITY = 1.5      # Rule 1: Large error + High velocity
+        BOOST_RESPONSIVE = 4.0     # Rule 2: Large error + Low velocity
+        BOOST_BRAKING = 1.0        # Rule 3: Small error + High velocity
+        BOOST_PRECISION = self.max_boost  # Rule 4: Small error + Low velocity (max 10x)
+        
+        # Position gain calculation
+        w1_pos = mu_pos_large * mu_vel_pos_high  # Stability
+        w2_pos = mu_pos_large * mu_vel_pos_low   # Responsive
+        w3_pos = mu_pos_small * mu_vel_pos_high  # Braking
+        w4_pos = mu_pos_small * mu_vel_pos_low   # Precision
+        
+        total_w_pos = w1_pos + w2_pos + w3_pos + w4_pos + 1e-8
+        pos_boost = (
+            w1_pos * BOOST_STABILITY +
+            w2_pos * BOOST_RESPONSIVE +
+            w3_pos * BOOST_BRAKING +
+            w4_pos * BOOST_PRECISION
+        ) / total_w_pos
+        
+        # Rotation gain calculation (separate for finer control)
+        w1_rot = mu_rot_large * mu_vel_rot_high
+        w2_rot = mu_rot_large * mu_vel_rot_low
+        w3_rot = mu_rot_small * mu_vel_rot_high
+        w4_rot = mu_rot_small * mu_vel_rot_low
+        
+        total_w_rot = w1_rot + w2_rot + w3_rot + w4_rot + 1e-8
+        rot_boost = (
+            w1_rot * BOOST_STABILITY +
+            w2_rot * BOOST_RESPONSIVE +
+            w3_rot * BOOST_BRAKING +
+            w4_rot * BOOST_PRECISION
+        ) / total_w_rot
+        
+        # --- 5. PRECISION MODE HYSTERESIS ---
+        # If we've been in precision mode for multiple consecutive steps,
+        # lock the high gains to prevent oscillation from mode switching
+        if pos_dist < self.ref_dist_pos * 0.5 and rot_dist < self.ref_dist_rot * 0.5:
+            self._precision_mode_counter = min(self._precision_mode_counter + 1, 10)
+        else:
+            self._precision_mode_counter = max(self._precision_mode_counter - 2, 0)
+        
+        # Boost precision gains if we've been stable near target
+        if self._precision_mode_counter >= 5:
+            pos_boost = max(pos_boost, BOOST_PRECISION * 0.8)
+            rot_boost = max(rot_boost, BOOST_PRECISION * 0.8)
+        
+        # --- 6. PHASE-AWARE ADJUSTMENTS (Optional) ---
+        if phase_hint == "grasp":
+            # During grasp, prioritize position precision over rotation
+            pos_boost = min(pos_boost * 1.2, self.max_boost)
+        elif phase_hint == "place":
+            # During place, both position and rotation need high precision
+            pos_boost = min(pos_boost * 1.1, self.max_boost)
+            rot_boost = min(rot_boost * 1.1, self.max_boost)
+        
+        # --- 7. FINAL CLIP AND RETURN ---
+        pos_boost = float(np.clip(pos_boost, 1.0, self.max_boost))
+        rot_boost = float(np.clip(rot_boost, 1.0, self.max_boost))
+        
+        # Debug logging for tuning
+        if pos_dist < 0.005:
+            logger.debug(
+                f"Fuzzy Gains: pos_boost={pos_boost:.2f}x (err={pos_dist*1000:.1f}mm) | "
+                f"rot_boost={rot_boost:.2f}x (err={np.degrees(rot_dist):.1f}°) | "
+                f"precision_mode={self._precision_mode_counter}"
+            )
+        
+        return pos_boost, rot_boost
 
     def compute_delta_action(
         self,
@@ -347,16 +509,14 @@ class IKSolver:
         else:
             ff_vel = np.zeros(6)
 
-        # --- 4. ADAPTIVE GAIN SCHEDULING ---
-        pos_dist = np.linalg.norm(pos_error)
-        rot_dist = np.linalg.norm(orn_error_vec)
-        epsilon = 1e-4
-        pos_boost = np.clip(self.ref_dist_pos / (pos_dist + epsilon), 1.0, self.max_boost)
-        rot_boost = np.clip(self.ref_dist_rot / (rot_dist + epsilon), 1.0, self.max_boost)
-        
-        # Log for tuning (remove after)
-        if pos_dist < 0.005:  # Only log small errors
-            logger.debug(f"Adaptive Boost - Pos: {pos_dist:.4f}m (boost {pos_boost:.1f}x), Rot: {rot_dist:.4f}rad (boost {rot_boost:.1f}x)")
+        # --- 4. FUZZY ADAPTIVE GAIN SCHEDULING ---
+        # [SOTA UPGRADE] Use Mamdani fuzzy inference instead of linear boost
+        pos_boost, rot_boost = self.fuzzy_gain_schedule(
+            pos_error=pos_error,
+            rot_error_vec=orn_error_vec,
+            effective_dt=effective_dt,
+            phase_hint=None  # Can be set by caller for phase-aware control
+        )
         
         # Dynamic Kp: Base * boost (separate for pos/rot)
         adaptive_kp = np.array([self.kp * pos_boost] * 3 + [self.kp * rot_boost] * 3)
@@ -515,6 +675,37 @@ class IKSolver:
         action = np.clip(action_if_applied, -1.0, 1.0)
         return action
 
+    def solve_ik_static(
+        self,
+        target_pose: np.ndarray,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+        ee_site_id: int,
+        q0: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """
+        Public API for Static Inverse Kinematics.
+        Returns raw joint angles (qpos) for a given 7D target pose.
+        Useful for setting the robot state directly (e.g., for goal image generation).
+        
+        Args:
+            target_pose: (7,) [x, y, z, qx, qy, qz, qw]
+            model: MuJoCo model
+            data: MuJoCo data
+            ee_site_id: End-effector site ID
+            q0: Initial guess for joint angles (seed)
+            
+        Returns:
+            (7,) np.ndarray of joint angles, or None if IK fails.
+        """
+        # _get_target_joint_angles expects current_joint_angles as the seed
+        # It handles the multi-attempt logic and returns raw qpos (float32)
+        return self._get_target_joint_angles(
+            target_pose_7d=target_pose,
+            current_joint_angles=q0,
+            solution_position_tolerance=0.01
+        )
+
 
   
     @staticmethod
@@ -545,9 +736,7 @@ class IKSolver:
             ],
             dtype=float,
         )  
-# FILE: utils/ik_solver.py
-#
-# REPLACE the entire _get_target_joint_angles method with this new version.
+
 
     def _get_target_joint_angles(
         self,

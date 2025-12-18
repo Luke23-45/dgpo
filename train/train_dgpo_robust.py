@@ -476,7 +476,7 @@ class DGPOTrainer:
         
         # [PERF OPT] Mixed Precision Training
         self.use_amp = cfg.training.get("use_amp", True)
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
         log.info(f"Mixed precision training: {self.use_amp}")
         
         # [PERF OPT] torch.compile for faster inference/training (PyTorch 2.0+)
@@ -569,6 +569,7 @@ class DGPOTrainer:
         self.tb_writer.add_scalar("reward/mean", rollout_stats['mean_reward'], iteration)
         self.tb_writer.add_scalar("reward/success_rate", rollout_stats['success_rate'], iteration)
         self.tb_writer.add_scalar("shadow/pos_div_cm", rollout_stats['shadow_pos_div'] * 100, iteration)
+        self.tb_writer.add_scalar("shadow/bc_pos_div_cm", rollout_stats.get('bc_pos_div', 0.0) * 100, iteration)
         self.tb_writer.add_scalar("shadow/orn_div_rad", rollout_stats['shadow_orn_div'], iteration)
         self.tb_writer.add_scalar("loss/policy", update_stats['policy_loss'], iteration)
         self.tb_writer.add_scalar("loss/value", update_stats['value_loss'], iteration)
@@ -611,6 +612,9 @@ class DGPOTrainer:
         current_ep_rewards = np.zeros(self.num_envs)
         rsd_divergences = []
         
+        # [PRODUCTION FIX] Track BC quality (mean prediction) separately from exploration divergence
+        bc_pos_divergences = []  # True BC quality metric (no exploration noise)
+        
         # 1. Reset
         obs, info = self.envs.reset()
         goal_imgs = info['goal_img']
@@ -640,6 +644,13 @@ class DGPOTrainer:
                     policy_out = self.policy(batch)
                 
                 pred_chunks = policy_out['pose_chunk'] # (N, K, 7)
+                
+                # [DEBUG v2.1] Log first step of first rollout to diagnose divergence (One-time check)
+                if step == 0 and self.total_steps == 0:
+                    sample_pred = pred_chunks[0, 0, :].cpu().numpy()
+                    sample_expert = current_expert_poses[0]
+                    pos_diff = np.linalg.norm(sample_pred[:3] - sample_expert[:3])
+                    log.info(f"[Sanity Check] Policy-Expert Alignment: Diff={pos_diff*100:.2f}cm")
                 
                 # [DGPO v2.1 FIX] ENABLE EXPLORATION via SAMPLING
                 dist = torch.distributions.Normal(pred_chunks, self.chk_log_std.exp())
@@ -679,6 +690,13 @@ class DGPOTrainer:
                 ).cpu().numpy()
             
             rsd_divergences.extend(rsd_scores.tolist())
+            
+            # [PRODUCTION] Track BC quality (MEAN prediction, no exploration noise)
+            # This metric shows true BC model quality, unaffected by sampling noise
+            mean_pred_step0 = pred_chunks[:, 0, :3].cpu().numpy()  # (N, 3) - Position only
+            expert_pos = current_expert_poses[:, :3]  # (N, 3)
+            bc_pos_divs = np.linalg.norm(mean_pred_step0 - expert_pos, axis=1)
+            bc_pos_divergences.extend(bc_pos_divs.tolist())
             
             # 3. Step Envs (Shadow Mode - Expert executes)
             dummy_actions = np.zeros((self.num_envs, 8))
@@ -759,7 +777,8 @@ class DGPOTrainer:
             "mean_reward": np.mean(episode_rewards) if episode_rewards else 0.0,
             "success_rate": np.mean(episode_successes) if episode_successes else 0.0,
             "n_episodes": len(episode_rewards),
-            "shadow_pos_div": shadow_pos_div,
+            "shadow_pos_div": shadow_pos_div,  # Sampled (includes exploration noise)
+            "bc_pos_div": np.mean(bc_pos_divergences) if bc_pos_divergences else 0.0,  # True BC quality
             "shadow_orn_div": np.mean(rsd_divergences) if rsd_divergences else 0.0,
             "grip_agreement": 1.0
         }
@@ -962,6 +981,7 @@ class DGPOTrainer:
                 log.info(
                     f"         Shadow Mode | "
                     f"PosDiv: {rollout_stats['shadow_pos_div']*100:.2f}cm | "
+                    f"BC: {rollout_stats['bc_pos_div']*100:.2f}cm | "
                     f"OrnDiv: {rollout_stats['shadow_orn_div']:.3f}rad"
                 )
                 

@@ -50,6 +50,8 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from torchvision import transforms
+from scipy.spatial.transform import Rotation as R
+from utils.scripted_expert import ScriptedExpert
 
 # Project Imports
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,42 +81,104 @@ PHASE_NAMES = ["REACH", "GRASP", "LIFT", "PLACE", "RETRACT"]
 # ==============================================================================
 # 1. GOAL IMAGE RENDERING
 # ==============================================================================
-def render_goal_image(env: PandaEnv, goal_pos: np.ndarray, ik_solver: IKSolver = None) -> np.ndarray:
-    """Renders the goal image by teleporting object to goal position."""
+def render_goal_image(env: PandaEnv, ik_solver: Optional[IKSolver], obs: Dict) -> np.ndarray:
+    """
+    Renders the goal image by determining the Robot's Hover Pose using Inverse Kinematics,
+    matching the Expert Policy's Retract State.
+    
+    Includes CRITICAL fixes for:
+    - Object sinking (lifting by half-height 0.02)
+    - Robot height relative to object center (lifting by 0.02)
+    - Dynamic Gripper Orientation Alignment (matching Expert [1,0,0,0] reference)
+    
+    Args:
+        env: PandaEnv instance
+        ik_solver: IKSolver instance (optional). If None, a temporary one is created.
+        obs: Observation dictionary containing goal_pos_world and goal_orn_world
+        
+    Returns:
+        goal_image: (H, W, 3) RGB image
+    """
+    # Save current state
     original_qpos = env.data.qpos.copy()
     original_qvel = env.data.qvel.copy()
     original_ctrl = env.data.ctrl.copy()
     
-    obj_joint_adr = env.model.jnt_qposadr[env.object_joint_id]
-    env.data.qpos[obj_joint_adr:obj_joint_adr + 3] = goal_pos
-    env.data.qvel[:] = 0
-    
-    if ik_solver is not None:
+    # 1. Ensure IK Solver exists (Critical for accurate robot pose)
+    if ik_solver is None:
         try:
-            target_pos = goal_pos.copy()
-            target_pos[2] += 0.05
-            target_quat = np.array([0, 1, 0, 0])
+            # Fallback for when UnifiedPlanner is run without IK for control
+            ik_solver = IKSolver(urdf_path="urdf/panda_mujoco_kinematics.urdf")
+        except Exception as e:
+            log.warning(f"Could not instantiate IK Solver for rendering: {e}")
+            # Without IK, we can't position the robot correctly.
+            # Fallback: Just place object and leave robot at home (sub-optimal but safe)
+            pass
+
+    # Constants matching Expert
+    HOVER_HEIGHT = 0.10
+    
+    # Instantiate temporary expert to use its alignment logic
+    dummy_expert = ScriptedExpert(ObjectProfile(size=np.zeros(3), grasp_width_normalized=0.0))
+
+    try:
+        goal_pos_world = obs['goal_pos_world']
+        goal_orn_world = obs['goal_orn_world']
+
+        # 1. Move object to goal POSE (Position + Orientation)
+        obj_addr = env.model.jnt_qposadr[env.object_joint_id]
+        
+        # FIX 1: Lift object by half-height (0.02) to prevent sinking into table (Z=0.401).
+        target_obj_pos = goal_pos_world + np.array([0.0, 0.0, 0.02])
+        env.data.qpos[obj_addr:obj_addr+3] = target_obj_pos
+        
+        # Set Orientation
+        goal_orn_wxyz = env._scipy_xyzw_to_mujoco_wxyz(goal_orn_world)
+        env.data.qpos[obj_addr+3:obj_addr+7] = goal_orn_wxyz
+        
+        # 2. Position Robot (only if IK is available)
+        if ik_solver is not None:
+             # FIX 2: Also lift robot by half-height (0.02) so it hovers relative to 
+            # the object's center, not the table surface.
+            target_pos = goal_pos_world + np.array([0.0, 0.0, HOVER_HEIGHT + 0.02])
+            
+            # FIX 3: Expert uses [1, 0, 0, 0] (Rot X 180) as base. [0, 1, 0, 0] causes twisted arm.
+            seed_downward_quat = np.array([1.0, 0.0, 0.0, 0.0])
+            target_quat = dummy_expert._calculate_aligned_orientation(goal_orn_world, seed_downward_quat)
+            
             target_pose_7d = np.concatenate([target_pos, target_quat])
             
-            goal_qpos = ik_solver._get_target_joint_angles(
-                target_pose_7d,
-                current_joint_angles=env.data.qpos[:7],
-                solution_position_tolerance=0.01
+            # Use hardcoded home_qpos, same as env.reset()
+            home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
+            
+            goal_qpos = ik_solver.solve_ik_static(
+                target_pose=target_pose_7d, 
+                model=env.model, 
+                data=env.data, 
+                ee_site_id=env.ee_site_id,
+                q0=home_qpos 
             )
+            
             if goal_qpos is not None:
                 env.data.qpos[:7] = goal_qpos
-        except Exception as e:
-            log.warning(f"Could not compute IK for goal render: {e}")
-
-    mujoco.mj_forward(env.model, env.data)
-    goal_image = env.render()
+            else:
+                env.data.qpos[:7] = home_qpos
+                
+        # Open Gripper (Retract state has open gripper)
+        env.data.qpos[7:9] = 0.04 
     
-    env.data.qpos[:] = original_qpos
-    env.data.qvel[:] = original_qvel
-    env.data.ctrl[:] = original_ctrl
-    mujoco.mj_forward(env.model, env.data)
+        # Forward and render
+        mujoco.mj_forward(env.model, env.data)
+        goal_image = env.render()
+        
+        return goal_image
     
-    return goal_image
+    finally:
+        # Restore State
+        env.data.qpos[:] = original_qpos
+        env.data.qvel[:] = original_qvel
+        env.data.ctrl[:] = original_ctrl
+        mujoco.mj_forward(env.model, env.data)
 
 
 # ==============================================================================
@@ -292,7 +356,7 @@ class HybridSemanticEvaluator:
         obs = self.env.get_expert_obs()
         
         # Render goal image
-        goal_img = render_goal_image(self.env, obs['goal_pos_world'], self.ik_solver)
+        goal_img = render_goal_image(self.env, self.ik_solver, obs)
         prev_img = obs['image_primary'].copy()
         
         episode_success = False
