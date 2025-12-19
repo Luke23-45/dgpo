@@ -4,7 +4,7 @@
 seed: 42
 
 # --- BC Checkpoint (Pre-trained SemanticPlanner) ---
-bc_checkpoint: "/content/drive/MyDrive/pda/bc/bc_backup_epoch_088.ckpt"
+bc_checkpoint: "checkpoints/bc_backup_epoch_088.ckpt"
 
 freeze_vision: true  # Freeze vision backbone to save compute
 
@@ -76,7 +76,7 @@ logging:
 checkpoint:
   save_dir: "outputs/dgpo_runs/checkpoints"   # Directory for regular checkpoints
   save_freq: 10                               # Save checkpoint every N iterations
-  backup_dir: "outputs/dgpo_runs/backups"     # Directory for failsafe backups
+  backup_dir: "/content/drive/MyDrive/pda/dgpo/ui/"     # Directory for failsafe backups
   backup_freq: 3                              # Save backup every N iterations
   backups_to_keep: 3                          # Number of old backups to retain
   resume_from: null                           # Path to checkpoint to resume from (set to .pt path)

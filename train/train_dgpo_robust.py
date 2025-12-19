@@ -121,23 +121,28 @@ class RunningNormalizer:
         self.gamma = gamma
         self.count = 0
     
-    def normalize(self, rewards: np.ndarray, clip_range: float = 5.0) -> np.ndarray:
-        batch_mean = np.mean(rewards)
-        batch_var = np.var(rewards)
+    def normalize(self, rewards: np.ndarray, clip_range: float = 5.0, update_stats: bool = True) -> np.ndarray:
+        batch_mean = np.mean(rewards, axis=0) # [FIX] per-channel norm for proprio
+        batch_var = np.var(rewards, axis=0)
         
-        if self.count == 0:
-            self.mean = batch_mean
-            self.var = batch_var
-        else:
-            self.mean = self.gamma * self.mean + (1 - self.gamma) * batch_mean
-            self.var = self.gamma * self.var + (1 - self.gamma) * batch_var
-        
-        self.count += 1
+        if update_stats:
+            if self.count == 0:
+                self.mean = batch_mean
+                self.var = batch_var
+            else:
+                self.mean = self.gamma * self.mean + (1 - self.gamma) * batch_mean
+                self.var = self.gamma * self.var + (1 - self.gamma) * batch_var
+            self.count += 1
+            
         normalized = (rewards - self.mean) / (np.sqrt(self.var) + self.epsilon)
         return np.clip(normalized, -clip_range, clip_range)
     
     def state_dict(self) -> dict:
         return {'mean': self.mean, 'var': self.var, 'count': self.count}
+    
+    def inverse_normalize(self, normalized: np.ndarray) -> np.ndarray:
+        """Denormalize data using current mean and variance."""
+        return normalized * (np.sqrt(self.var) + self.epsilon) + self.mean
     
     def load_state_dict(self, state: dict):
         self.mean = state['mean']
@@ -163,7 +168,7 @@ class AdaptiveKLPenalty:
             return self.beta
         ratio = measured_kl / self.target_kl
         self.beta *= np.clip(ratio ** 0.5, 0.5, 2.0)
-        self.beta = np.clip(self.beta, 0.001, 1.0)
+        self.beta = np.clip(self.beta, 0.001, 20.0)
         return self.beta
     
     def state_dict(self) -> dict:

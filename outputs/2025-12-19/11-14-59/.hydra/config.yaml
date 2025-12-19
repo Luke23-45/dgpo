@@ -1,0 +1,52 @@
+seed: 42
+bc_checkpoint: /content/drive/MyDrive/pda/bc/bc_backup_epoch_088.ckpt
+freeze_vision: true
+model:
+  proprio_dim: 22
+  chunk_size: 10
+  vision_feature_dim: 768
+num_envs: 2
+value_net:
+  hidden_dim: 256
+environment:
+  xml_path: envs/panda_pick_place.xml
+  urdf_path: urdf/panda_mujoco_kinematics.urdf
+expert:
+  object_size:
+  - 0.04
+  - 0.04
+  - 0.04
+  grasp_width: 0.6
+reward:
+  w_dist: 1.0
+  w_div: 1.0
+  position_weight: 1.0
+  orientation_weight: 0.1
+  success_bonus: 100.0
+ppo:
+  gamma: 0.99
+  gae_lambda: 0.95
+  epochs: 4
+  batch_size: 32
+  value_coef: 0.5
+  max_grad_norm: 0.5
+  clip_param: 0.1
+  temperature: 1.0
+optimizer:
+  policy_lr: 5.0e-06
+  value_lr: 0.0001
+training:
+  total_iterations: 200
+  steps_per_iter: 2048
+logging:
+  log_dir: /content/drive/MyDrive/pda/logs/
+  csv_log_name: training_metrics.csv
+  use_tensorboard: true
+  log_every_n_iters: 1
+checkpoint:
+  save_dir: outputs/dgpo_runs/checkpoints
+  save_freq: 10
+  backup_dir: /content/drive/MyDrive/pda/dgpo/ui/
+  backup_freq: 3
+  backups_to_keep: 3
+  resume_from: /content/drive/MyDrive/pda/dgpo/ui/dgpo_backup_iter_0027.pt

@@ -1,0 +1,6 @@
+[2025-12-19 11:17:43,950][utils.ik_solver][INFO] - Kinematic chain loaded and configured.
+[2025-12-19 11:17:47,721][models.semantic_planner][INFO] - [SemanticPlanner] Initializing v9.0 (Strategist) with config: SemanticPlannerConfig(proprio_dim=22, vision_backbone_model='google/siglip-base-patch16-224', vision_feature_dim=768, fusion_transformer_layers=4, fusion_transformer_heads=8, dim_feedforward_ratio=4, dropout=0.1, chunk_size=10, num_task_phases=5)
+[2025-12-19 11:17:47,731][models.semantic_planner][INFO] - Loading Vision Backbone: google/siglip-base-patch16-224
+[2025-12-19 11:17:49,001][models.semantic_planner][INFO] - Backbone Status: Bottom layers FROZEN. Top layer UNFROZEN for geometric adaptation.
+[2025-12-19 11:17:49,476][models.semantic_planner][INFO] - Initializing custom modules (Skipping Vision Backbone)...
+[2025-12-19 11:17:50,639][models.semantic_planner][INFO] - [SemanticPlanner v9.0] Initialization Complete.
