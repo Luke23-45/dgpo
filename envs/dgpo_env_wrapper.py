@@ -44,8 +44,10 @@ class DGPOEnvWrapper(gym.Wrapper):
     
     Functionality:
     1. Manages internal 'DGPOExpert' and 'IKSolver' instances.
-    2. Overrides 'step()' to IGNORE the input action and instead execute the EXPERT's action.
+    2. Supports BLENDED execution: (1-α)*Expert + α*Policy
     3. Returns 'expert_pose' and 'expert_grip' in the info dict for the Trainer to calculate loss.
+    
+    Enhanced DGPO v3.0: Progressive Policy Blending Mode
     """
     
     def __init__(self, env, cfg):
@@ -86,6 +88,10 @@ class DGPOEnvWrapper(gym.Wrapper):
         self.latest_expert_pose = None
         self.latest_expert_grip = None
         
+        # [ENHANCED DGPO v3.0] Blending mode configuration
+        self.blend_alpha = 0.0  # 0 = Pure Expert (Shadow Mode), 1 = Pure Policy
+        self.use_blending = cfg.training.get("use_policy_blending", False) if hasattr(cfg, 'training') else False
+        
     def reset(self, **kwargs):
         """
         Resets environment and expert. 
@@ -120,10 +126,17 @@ class DGPOEnvWrapper(gym.Wrapper):
         
     def step(self, action):
         """
-        Executes a step in SHADOW MODE.
+        Executes a step with PROGRESSIVE POLICY BLENDING.
+        
+        [ENHANCED DGPO v3.0]
+        - When blend_alpha = 0: Pure Shadow Mode (Expert executes)
+        - When blend_alpha = 1: Pure Policy Mode (Policy executes)
+        - In between: Blended execution = (1-α)*Expert + α*Policy
         
         Args:
-            action: The POLICY'S predicted action (or dummy). IGNORED for physics control.
+            action: The POLICY'S predicted action (8D: 7 joints + 1 gripper).
+                   If blending disabled, this is IGNORED.
+                   If blending enabled, this is BLENDED with expert action.
             
         Returns:
             Standard Gym 5-tuple. 'info' contains the 'expert_pose' for the NEXT step.
@@ -147,15 +160,35 @@ class DGPOEnvWrapper(gym.Wrapper):
         
         expert_action = np.concatenate([delta_joints, [self.latest_expert_grip]])
         
-        # 2. Step the Environment with EXPERT action
-        next_obs, reward, terminated, truncated, info = self.env.step(expert_action)
+        # 2. [ENHANCED DGPO v3.0] Compute BLENDED action
+        if self.use_blending and action is not None:
+            # Ensure action is the right shape (8D)
+            policy_action = np.asarray(action).flatten()[:8]
+            if len(policy_action) < 8:
+                policy_action = np.concatenate([policy_action, np.zeros(8 - len(policy_action))])
+            
+            # Blend: (1-α)*Expert + α*Policy
+            alpha = self.blend_alpha
+            blended_action = (1 - alpha) * expert_action + alpha * policy_action
+            
+            # Safety clipping
+            blended_action[:7] = np.clip(blended_action[:7], -1.0, 1.0)
+            blended_action[7] = np.clip(blended_action[7], -1.0, 1.0)
+            
+            executed_action = blended_action
+        else:
+            # Pure Shadow Mode
+            executed_action = expert_action
         
-        # 3. Handle Expert Finish / Done
+        # 3. Step the Environment with the EXECUTED action (blended or expert)
+        next_obs, reward, terminated, truncated, info = self.env.step(executed_action)
+        
+        # 4. Handle Expert Finish / Done
         if self.expert.is_done():
             # If expert says done, we treat it as terminated (success or failure)
             terminated = True
             
-        # 4. Compute NEXT Expert Target (for the NEW observation)
+        # 5. Compute NEXT Expert Target (for the NEW observation)
         #    This prepares 'latest_expert_pose' for the NEXT step() call.
         expert_obs = self.env.get_expert_obs()
         target_pose, grip, exp_info = self.expert.get_target_pose(expert_obs)
@@ -163,25 +196,27 @@ class DGPOEnvWrapper(gym.Wrapper):
         self.latest_expert_pose = target_pose
         self.latest_expert_grip = grip
         
-        # 5. Populate Info for Trainer
-        #    The Trainer needs 'expert_pose' to compare against the Policy's prediction for 'next_obs'
-        #    Wait, standard RL loop:
-        #      obs_t -> Policy -> Pred_t.
-        #      obs_t -> Expert -> Target_t.
-        #      Loss(Pred_t, Target_t).
-        #      Env.step(Target_t).
-        #      -> obs_{t+1}.
-        
-        #    Here, we return obs_{t+1}.
-        #    The info needs to contain Target_{t+1} (calculated from obs_{t+1}) 
-        #    so the implementation in collect_rollouts can batch it easily.
-        
+        # 6. Populate Info for Trainer
         info['expert_pose'] = target_pose
         info['expert_grip'] = grip
         info['expert_phase'] = exp_info.get('phase', 'UNKNOWN')
-        info['executed_action'] = expert_action # Useful for debugging/buffer
+        info['executed_action'] = executed_action
+        info['expert_action'] = expert_action  # [NEW] For reward calculation
+        info['blend_alpha'] = self.blend_alpha  # [NEW] For logging
         
         return next_obs, reward, terminated, truncated, info
+
+    def set_blend_alpha(self, alpha: float):
+        """
+        [ENHANCED DGPO v3.0] Set the blending coefficient.
+        
+        Args:
+            alpha: Float in [0, 1].
+                   0 = Pure Expert (Shadow Mode)
+                   1 = Pure Policy (Full Autonomy)
+        """
+        self.blend_alpha = np.clip(alpha, 0.0, 1.0)
+        self.use_blending = (alpha > 0.0)
 
     def get_expert_obs(self):
         return self.env.get_expert_obs()

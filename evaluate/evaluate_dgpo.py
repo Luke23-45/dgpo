@@ -480,11 +480,40 @@ class DGPOEvaluator:
         log.info(f"Video will be saved to: {video_path}")
         log.info(f"CSV will be saved to: {csv_path}")
         
-        # Setup video writer
+        # Setup video writer with compatible codec
         frame = self.env.render()
         h, w, _ = frame.shape
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(str(video_path), fourcc, 30, (w, h))
+        
+        # Try H.264 codec first (best compatibility), fallback to XVID if not available
+        # H.264 works better with most players (VLC, web browsers, etc.)
+        codecs_to_try = [
+            ('avc1', '.mp4'),      # H.264 (best for web/Colab)
+            ('H264', '.mp4'),      # H.264 alternative
+            ('XVID', '.avi'),      # XVID (widely supported)
+            ('mp4v', '.mp4'),      # MPEG-4 (fallback)
+        ]
+        
+        video_writer = None
+        for codec, ext in codecs_to_try:
+            try:
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                test_path = str(video_path).replace('.mp4', ext)
+                test_writer = cv2.VideoWriter(test_path, fourcc, 30, (w, h))
+                if test_writer.isOpened():
+                    video_writer = test_writer
+                    video_path = Path(test_path)
+                    log.info(f"Using video codec: {codec} (format: {ext})")
+                    break
+                test_writer.release()
+            except:
+                continue
+        
+        if video_writer is None:
+            # Last resort: use raw format
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            video_path = Path(str(video_path).replace('.mp4', '.avi'))
+            video_writer = cv2.VideoWriter(str(video_path), fourcc, 30, (w, h))
+            log.warning(f"Using fallback MJPG codec. Video saved as: {video_path}")
         
         # Setup logger
         logger = EvaluationLogger(csv_path)

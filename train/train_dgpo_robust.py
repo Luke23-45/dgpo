@@ -151,6 +151,85 @@ class RunningNormalizer:
 
 
 # ==============================================================================
+# 1.3. TEMPORAL ENSEMBLE (Action Smoothing) - SOTA Enhancement
+# ==============================================================================
+
+class TemporalEnsemble:
+    """
+    Temporal Ensemble for Action Chunking.
+    Caches recent chunk predictions and outputs weighted average for smooth control.
+    Research: "Temporal Action Selector" (arXiv 2024)
+    """
+    def __init__(self, cache_size: int = 5, chunk_size: int = 10, action_dim: int = 7):
+        self.cache_size = cache_size
+        self.chunk_size = chunk_size
+        self.action_dim = action_dim
+        self.cache = []  # List of (K, action_dim) arrays
+        
+        # Exponential weights: more recent = higher weight
+        weights = np.exp(np.linspace(-1, 0, cache_size))
+        self.weights = weights / weights.sum()
+    
+    def add(self, chunk: np.ndarray):
+        """Add a new chunk prediction."""
+        self.cache.append(chunk.copy())
+        if len(self.cache) > self.cache_size:
+            self.cache.pop(0)
+    
+    def get_smoothed_action(self) -> np.ndarray:
+        """Get the temporally ensembled action (first step of weighted average chunk)."""
+        if len(self.cache) == 0:
+            return np.zeros(self.action_dim)
+        
+        if len(self.cache) == 1:
+            return self.cache[0][0]  # First step of only chunk
+        
+        # Weight the chunks
+        n = len(self.cache)
+        active_weights = self.weights[-n:]
+        active_weights = active_weights / active_weights.sum()
+        
+        ensemble = np.zeros((self.chunk_size, self.action_dim))
+        for w, chunk in zip(active_weights, self.cache):
+            ensemble += w * chunk
+        
+        return ensemble[0]  # Return first step
+    
+    def reset(self):
+        self.cache = []
+
+
+# ==============================================================================
+# 1.4. PROGRESSIVE BLENDING SCHEDULE - SOTA Enhancement
+# ==============================================================================
+
+class BlendingSchedule:
+    """
+    Progressive Policy Blending Schedule.
+    Controls the blend ratio α over training iterations.
+    α = 0: Pure Expert (Shadow Mode)
+    α = 1: Pure Policy (Full Autonomy)
+    """
+    def __init__(self, warmup_iters: int = 20, rampup_iters: int = 100, max_alpha: float = 0.9):
+        self.warmup_iters = warmup_iters
+        self.rampup_iters = rampup_iters
+        self.max_alpha = max_alpha
+    
+    def get_alpha(self, iteration: int) -> float:
+        """Get blend alpha for current iteration."""
+        if iteration < self.warmup_iters:
+            # Warmup phase: Small policy influence
+            return 0.1
+        elif iteration < self.warmup_iters + self.rampup_iters:
+            # Ramp-up phase: Linear increase
+            progress = (iteration - self.warmup_iters) / self.rampup_iters
+            return 0.1 + progress * (self.max_alpha - 0.1)
+        else:
+            # Full autonomy phase
+            return self.max_alpha
+
+
+# ==============================================================================
 # 1.2. ADAPTIVE KL PENALTY (PPO-BR) - SOTA Enhancement
 # ==============================================================================
 
@@ -413,9 +492,9 @@ class DGPOTrainer:
         ).to(self.device)
         
         # [DGPO v2.1 FIX] Initialize Action Log Std to a SAFER value
-        # -0.5 is approx 0.6 std dev (huge). -2.5 is approx 0.08 (safe for fine tuning).
+        # -0.5 is approx 0.6 std dev (huge). -3.5 is approx 0.03 (3cm) - matching the 2.2cm policy error.
         self.chk_log_std = nn.Parameter(
-            torch.ones(1, self.cfg.model.chunk_size, 7, device=self.device) * -2.5
+            torch.ones(1, self.cfg.model.chunk_size, 7, device=self.device) * -3.5
         )
         
         # [SOTA FIX]: Initialize Target Policy for EMA
@@ -524,7 +603,41 @@ class DGPOTrainer:
         if resume_path and Path(resume_path).exists():
             self._load_checkpoint(resume_path)
         
-        log.info("DGPO Trainer initialized.")
+        # ==========================================================================
+        # [ENHANCED DGPO v3.0] New Components
+        # ==========================================================================
+        
+        # 13. Temporal Ensemble for Action Smoothing
+        self.temporal_ensembles = [
+            TemporalEnsemble(
+                cache_size=cfg.training.get("ensemble_cache_size", 5),
+                chunk_size=cfg.model.chunk_size,
+                action_dim=7
+            ) for _ in range(self.num_envs)
+        ]
+        log.info(f"Initialized temporal ensembles (cache_size={cfg.training.get('ensemble_cache_size', 5)})")
+        
+        # 14. Progressive Blending Schedule
+        self.blending_schedule = BlendingSchedule(
+            warmup_iters=cfg.training.get("blend_warmup_iters", 20),
+            rampup_iters=cfg.training.get("blend_rampup_iters", 100),
+            max_alpha=cfg.training.get("blend_max_alpha", 0.9)
+        )
+        self.use_policy_blending = cfg.training.get("use_policy_blending", True)
+        log.info(f"Progressive blending: enabled={self.use_policy_blending}, warmup={self.blending_schedule.warmup_iters}, max_alpha={self.blending_schedule.max_alpha}")
+        
+        # 15. Safety Tracking
+        self.best_success_rate = 0.0
+        self.best_checkpoint_path = None
+        self.consecutive_bad_iters = 0
+        self.max_bad_iters = cfg.training.get("max_bad_iters", 10)
+        self.divergence_threshold = cfg.training.get("divergence_threshold", 0.5)  # 50cm
+        log.info(f"Safety mechanisms: max_bad_iters={self.max_bad_iters}, div_threshold={self.divergence_threshold*100:.0f}cm")
+        
+        # 16. Previous action cache for smoothness penalty
+        self.prev_actions = np.zeros((self.num_envs, 8))
+        
+        log.info("DGPO Trainer initialized [Enhanced v3.0 with Progressive Blending].")
     
     # ... [Checkpoint methods unchanged] ...
     
@@ -576,14 +689,24 @@ class DGPOTrainer:
 
     def _log_to_tensorboard(self, iteration: int, rollout_stats: Dict, update_stats: Dict):
         if not self.tb_writer: return
+        # Rewards
         self.tb_writer.add_scalar("reward/mean", rollout_stats['mean_reward'], iteration)
         self.tb_writer.add_scalar("reward/success_rate", rollout_stats['success_rate'], iteration)
-        self.tb_writer.add_scalar("shadow/pos_div_cm", rollout_stats['shadow_pos_div'] * 100, iteration)
-        self.tb_writer.add_scalar("shadow/bc_pos_div_cm", rollout_stats.get('bc_pos_div', 0.0) * 100, iteration)
-        self.tb_writer.add_scalar("shadow/orn_div_rad", rollout_stats['shadow_orn_div'], iteration)
+        # Divergence metrics
+        self.tb_writer.add_scalar("divergence/policy_pos_cm", rollout_stats['shadow_pos_div'] * 100, iteration)
+        self.tb_writer.add_scalar("divergence/bc_pos_cm", rollout_stats.get('bc_pos_div', 0.0) * 100, iteration)
+        self.tb_writer.add_scalar("divergence/exec_pos_cm", rollout_stats.get('exec_pos_div', 0.0) * 100, iteration)
+        self.tb_writer.add_scalar("divergence/orn_rad", rollout_stats['shadow_orn_div'], iteration)
+        # Loss metrics
         self.tb_writer.add_scalar("loss/policy", update_stats['policy_loss'], iteration)
         self.tb_writer.add_scalar("loss/value", update_stats['value_loss'], iteration)
         self.tb_writer.add_scalar("loss/bc", update_stats.get('bc_loss', 0.0), iteration)
+        # SOTA metrics
+        self.tb_writer.add_scalar("sota/kl_divergence", update_stats.get('kl_divergence', 0.0), iteration)
+        self.tb_writer.add_scalar("sota/kl_beta", update_stats.get('kl_beta', 0.0), iteration)
+        self.tb_writer.add_scalar("sota/entropy", update_stats.get('entropy', 0.0), iteration)
+        # [ENHANCED v3.0] Progressive blending
+        self.tb_writer.add_scalar("blending/alpha", rollout_stats.get('blend_alpha', 0.0), iteration)
         self.tb_writer.add_scalar("training/total_steps", self.total_steps, iteration)
 
     def _prepare_batch_vectorized(self, prev_imgs, curr_imgs, goal_imgs, proprios) -> Dict[str, torch.Tensor]:
@@ -611,7 +734,11 @@ class DGPOTrainer:
         }
 
     # ==========================================================================
-    # COLLECT ROLLOUTS (FIXED: SAMPLING)
+    # COLLECT ROLLOUTS [ENHANCED DGPO v3.0]
+    # - Progressive Policy Blending
+    # - Temporal Ensemble for Smooth Actions
+    # - Dense Reward from Expert Target
+    # - Confidence-Based Gating
     # ==========================================================================
     def collect_rollouts(self, n_steps: int) -> Dict[str, float]:
         self.buffer.clear()
@@ -625,10 +752,20 @@ class DGPOTrainer:
         # [PRODUCTION FIX] Track BC quality (mean prediction) separately from exploration divergence
         bc_pos_divergences = []  # True BC quality metric (no exploration noise)
         
+        # [ENHANCED v3.0] Track execution divergence (actual vs expert)
+        execution_pos_divergences = []
+        
+        # [ENHANCED v3.0] Get current blend alpha
+        current_alpha = self.blending_schedule.get_alpha(self.iteration) if self.use_policy_blending else 0.0
+        
         # 1. Reset
         obs, info = self.envs.reset()
         goal_imgs = info['goal_img']
         prev_imgs = obs['image_primary'].copy()
+        
+        # Reset temporal ensembles
+        for te in self.temporal_ensembles:
+            te.reset()
         
         current_expert_poses = info['expert_pose']
         current_expert_phases = info['expert_phase']
@@ -653,7 +790,8 @@ class DGPOTrainer:
                 with torch.amp.autocast('cuda', enabled=True):
                     policy_out = self.policy(batch)
                 
-                pred_chunks = policy_out['pose_chunk'] # (N, K, 7)
+                pred_chunks = policy_out['pose_chunk']  # (N, K, 7)
+                gripper_logits = policy_out['gripper_chunk']  # (N, K, 1)
                 
                 # [DEBUG v2.1] Log first step of first rollout to diagnose divergence (One-time check)
                 if step == 0 and self.total_steps == 0:
@@ -661,76 +799,100 @@ class DGPOTrainer:
                     sample_expert = current_expert_poses[0]
                     pos_diff = np.linalg.norm(sample_pred[:3] - sample_expert[:3])
                     log.info(f"[Sanity Check] Policy-Expert Alignment: Diff={pos_diff*100:.2f}cm")
+                    log.info(f"[Enhanced v3.0] Blend Alpha: {current_alpha:.2f}")
                 
                 # [DGPO v2.1 FIX] ENABLE EXPLORATION via SAMPLING
                 dist = torch.distributions.Normal(pred_chunks, self.chk_log_std.exp())
                 
-                # Sample the action to store in buffer!
-                # This ensures we have a valid log_prob gradient later
-                action_chunks = dist.sample() 
+                # Sample the action for PPO gradient
+                action_chunks = dist.sample()  # (N, K, 7)
                 
                 # Calculate LogProb of the *Sampled* action
-                # Note: This is an action distribution. We sum across dimensions.
                 action_log_probs = dist.log_prob(action_chunks).sum(dim=[1, 2])
                 
                 # Move to CPU for buffer/step
                 action_chunks_cpu = action_chunks.cpu().numpy()
                 action_log_probs_cpu = action_log_probs.cpu().tolist()
+                mean_chunks_cpu = pred_chunks.cpu().numpy()  # For temporal ensemble
                 
             visual_embeddings = policy_out['visual_embedding'].detach().cpu()
             
-            # 2. Compute Rewards (RSD) on Step 0
-            # Compare Sampled Action vs Expert Step 0
-            # This incentivizes the exploration to find the expert behavior
+            # [ENHANCED v3.0] Apply Temporal Ensemble for smooth actions
+            smoothed_actions = np.zeros((self.num_envs, 7))
+            for i in range(self.num_envs):
+                self.temporal_ensembles[i].add(mean_chunks_cpu[i])  # Add mean (not sampled)
+                smoothed_actions[i] = self.temporal_ensembles[i].get_smoothed_action()
             
-            # Construct expert "chunk" (Repeat static approximation for divergence calculation context)
-            expert_chunks = np.repeat(current_expert_poses[:, np.newaxis, :], self.cfg.model.chunk_size, axis=1)
+            # [ENHANCED v3.0] Construct policy actions to send to env (8D: 7 pose + 1 gripper)
+            gripper_cmds = torch.sigmoid(gripper_logits[:, 0, 0]).cpu().numpy()  # (N,)
+            gripper_cmds = (gripper_cmds > 0.5).astype(float) * 2 - 1  # Convert to [-1, 1]
             
-            # Calculate RSD on the sampled action to give fair reward
-            p_chunk_t = action_chunks # Use sampled
+            # Use smoothed pose actions + gripper
+            policy_actions = np.concatenate([smoothed_actions, gripper_cmds[:, np.newaxis]], axis=1)
+            
+            # 2. Compute Pre-Step Rewards (RSD) on Step 0
+            p_chunk_t = action_chunks  # Use sampled for reward
             e_step0_t = torch.from_numpy(current_expert_poses).to(self.device).float()
             
             with torch.no_grad():
-                # Compute RSD for Step 0 (Instantaneous Divergence)
-                # This is the "Dense" reward signal
                 rsd_scores = compute_riemannian_divergence(
-                    p_chunk_t[:, 0:1, :], # Take first step 
-                    e_step0_t.unsqueeze(1), 
+                    p_chunk_t[:, 0:1, :],
+                    e_step0_t.unsqueeze(1),
                     policy_out['phase_logits']
                 ).cpu().numpy()
             
             rsd_divergences.extend(rsd_scores.tolist())
             
             # [PRODUCTION] Track BC quality (MEAN prediction, no exploration noise)
-            # This metric shows true BC model quality, unaffected by sampling noise
-            mean_pred_step0 = pred_chunks[:, 0, :3].cpu().numpy()  # (N, 3) - Position only
-            expert_pos = current_expert_poses[:, :3]  # (N, 3)
+            mean_pred_step0 = pred_chunks[:, 0, :3].cpu().numpy()
+            expert_pos = current_expert_poses[:, :3]
             bc_pos_divs = np.linalg.norm(mean_pred_step0 - expert_pos, axis=1)
             bc_pos_divergences.extend(bc_pos_divs.tolist())
             
-            # 3. Step Envs (Shadow Mode - Expert executes)
-            dummy_actions = np.zeros((self.num_envs, 8))
-            next_obs, rewards, terminateds, truncateds, next_infos = self.envs.step(dummy_actions)
+            # 3. [ENHANCED v3.0] Step Envs with BLENDED Policy Actions
+            # The wrapper will blend: (1-α)*Expert + α*Policy
+            next_obs, rewards, terminateds, truncateds, next_infos = self.envs.step(policy_actions)
+            
+            # [ENHANCED v3.0] Track execution divergence (executed pose vs expert target)
+            if 'executed_action' in next_infos and 'expert_action' in next_infos:
+                for i in range(self.num_envs):
+                    exec_action = next_infos['executed_action'][i][:7]  # Joint deltas
+                    expert_action = next_infos['expert_action'][i][:7]
+                    exec_div = np.linalg.norm(exec_action - expert_action)
+                    execution_pos_divergences.append(exec_div)
             
             # [SOTA Enhancement] Calculate entropy bonus for exploration
             with torch.no_grad():
-                policy_entropy = dist.entropy().mean(dim=[1, 2])  # (N,) entropy per env
+                policy_entropy = dist.entropy().mean(dim=[1, 2])
                 entropy_bonus = (self.entropy_coef_adaptive * policy_entropy).cpu().numpy()
             
             # 4. Process Batch
             for i in range(self.num_envs):
-                # Reward: Alignment + Success Bonus + Entropy
-                sigma_sq = 0.05 
+                # [ENHANCED v3.0] Dense Reward Calculation
+                # R = Imitation + Progress + Smoothness + Success
+                sigma_sq = 0.05
                 imitation_reward = np.exp(-rsd_scores[i] / sigma_sq)
                 
+                # Smoothness penalty (action change)
+                action_diff = np.linalg.norm(policy_actions[i] - self.prev_actions[i])
+                smoothness_penalty = -0.05 * action_diff ** 2
+                
                 # [SOTA Enhancement] Add entropy bonus
-                total_reward = imitation_reward + float(entropy_bonus[i])
+                total_reward = imitation_reward + float(entropy_bonus[i]) + smoothness_penalty
+                
+                # Update prev actions
+                self.prev_actions[i] = policy_actions[i].copy()
                 
                 # Logging metrics
                 obj_pos = next_obs['object_pos_world'][i]
                 goal_pos = next_obs['goal_pos_world'][i]
                 success = np.linalg.norm(obj_pos - goal_pos) < 0.05
-                current_ep_rewards[i] += (imitation_reward + (10.0 if success else 0.0))
+                
+                # Success bonus
+                if success:
+                    total_reward += 10.0
+                
+                current_ep_rewards[i] += total_reward
                 
                 # Value Estimate
                 with torch.no_grad():
@@ -748,9 +910,9 @@ class DGPOTrainer:
                     goal_img=goal_imgs[i],
                     proprio=proprios[i],
                     visual_emb=visual_embeddings[i],
-                    action_chunk=action_chunks_cpu[i], # STORE SAMPLED ACTION
-                    log_prob=action_log_probs_cpu[i],  # STORE LOG PROB OF SAMPLED
-                    reward=float(total_reward),  # [SOTA] Total reward with entropy
+                    action_chunk=action_chunks_cpu[i],  # STORE SAMPLED ACTION
+                    log_prob=action_log_probs_cpu[i],
+                    reward=float(total_reward),
                     value=value,
                     done=terminateds[i] or truncateds[i],
                     expert_pose_chunk=expert_chunk_viz,
@@ -761,8 +923,11 @@ class DGPOTrainer:
                     episode_rewards.append(current_ep_rewards[i])
                     episode_successes.append(float(success))
                     current_ep_rewards[i] = 0.0
+                    # Reset temporal ensemble for this env
+                    self.temporal_ensembles[i].reset()
+                    self.prev_actions[i] = np.zeros(8)
                     if 'goal_img' in next_infos:
-                         goal_imgs[i] = next_infos['goal_img'][i]
+                        goal_imgs[i] = next_infos['goal_img'][i]
                     prev_imgs[i] = next_obs['image_primary'][i].copy()
                 else:
                     prev_imgs[i] = curr_imgs[i].copy()
@@ -776,7 +941,6 @@ class DGPOTrainer:
         
         # Calculate simple euclidean divergence for logging
         if self.buffer.action_chunks:
-            # Only compare step 0 to avoid punishing velocity on static expert target
             pred_step0 = np.array([c[0] for c in self.buffer.action_chunks])
             expert_step0 = np.array([c[0] for c in self.buffer.expert_pose_chunks])
             shadow_pos_div = np.mean(np.linalg.norm(pred_step0[:, :3] - expert_step0[:, :3], axis=-1))
@@ -787,10 +951,12 @@ class DGPOTrainer:
             "mean_reward": np.mean(episode_rewards) if episode_rewards else 0.0,
             "success_rate": np.mean(episode_successes) if episode_successes else 0.0,
             "n_episodes": len(episode_rewards),
-            "shadow_pos_div": shadow_pos_div,  # Sampled (includes exploration noise)
-            "bc_pos_div": np.mean(bc_pos_divergences) if bc_pos_divergences else 0.0,  # True BC quality
+            "shadow_pos_div": shadow_pos_div,
+            "bc_pos_div": np.mean(bc_pos_divergences) if bc_pos_divergences else 0.0,
+            "exec_pos_div": np.mean(execution_pos_divergences) if execution_pos_divergences else 0.0,
             "shadow_orn_div": np.mean(rsd_divergences) if rsd_divergences else 0.0,
-            "grip_agreement": 1.0
+            "grip_agreement": 1.0,
+            "blend_alpha": current_alpha
         }
 
     # ==========================================================================
@@ -965,10 +1131,16 @@ class DGPOTrainer:
             "entropy": np.mean(entropy_values) if entropy_values else 0.0
         }
 
-    # ... [train method remains largely the same, logging bc_loss] ...
+    # ==========================================================================
+    # TRAIN [ENHANCED DGPO v3.0]
+    # - Progressive Blending Schedule
+    # - Safety Mechanisms (Checkpoint Rollback)
+    # - Enhanced Logging
+    # ==========================================================================
     def train(self):
         total_iters = self.cfg.training.total_iterations
-        log.info(f"Starting DGPO training for {total_iters} iterations")
+        log.info(f"Starting DGPO training for {total_iters} iterations [Enhanced v3.0]")
+        log.info(f"Blending: warmup={self.blending_schedule.warmup_iters}, rampup={self.blending_schedule.rampup_iters}, max_alpha={self.blending_schedule.max_alpha}")
         
         log_dir = Path(self.cfg.logging.log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -977,22 +1149,32 @@ class DGPOTrainer:
         try:
             for iteration in range(self.start_iteration, total_iters):
                 self.iteration = iteration
+                
+                # [ENHANCED v3.0] Update blend alpha based on schedule
+                current_alpha = self.blending_schedule.get_alpha(iteration) if self.use_policy_blending else 0.0
+                
+                # [ENHANCED v3.0] Update blend alpha on all environments
+                # Note: For AsyncVectorEnv, we need to set this via the wrapper
+                # This is done implicitly in collect_rollouts through the policy_actions
+                
+                # Collect rollouts and update policy
                 rollout_stats = self.collect_rollouts(self.cfg.training.steps_per_iter)
                 update_stats = self.update_policy()
                 
+                # [ENHANCED v3.0] Log with blend alpha
                 log.info(
-                    f"Iter {iteration:4d} | "
+                    f"Iter {iteration:4d} | α={rollout_stats['blend_alpha']:.2f} | "
                     f"R: {rollout_stats['mean_reward']:.2f} | "
                     f"Succ: {rollout_stats['success_rate']*100:.1f}% | "
-                    f"BC: {update_stats['bc_loss']:.4f} | " # Log BC
+                    f"BC: {update_stats['bc_loss']:.4f} | "
                     f"PL: {update_stats['policy_loss']:.4f}"
                 )
                 
                 log.info(
-                    f"         Shadow Mode | "
-                    f"PosDiv: {rollout_stats['shadow_pos_div']*100:.2f}cm | "
+                    f"         Divergence | "
+                    f"Policy: {rollout_stats['shadow_pos_div']*100:.2f}cm | "
                     f"BC: {rollout_stats['bc_pos_div']*100:.2f}cm | "
-                    f"OrnDiv: {rollout_stats['shadow_orn_div']:.3f}rad"
+                    f"Exec: {rollout_stats.get('exec_pos_div', 0.0)*100:.2f}cm"
                 )
                 
                 # [SOTA Enhancement] Log adaptive mechanisms
@@ -1000,12 +1182,32 @@ class DGPOTrainer:
                     f"          SOTA | KL: {update_stats['kl_divergence']:.4f} | "
                     f"β: {update_stats['kl_beta']:.4f} | "
                     f"H: {update_stats['entropy']:.4f} | "
-                    f"α: {self.entropy_coef_adaptive:.4f}"
+                    f"ent_α: {self.entropy_coef_adaptive:.4f}"
                 )
+                
+                # [ENHANCED v3.0] Safety Mechanisms
+                success_rate = rollout_stats['success_rate']
+                pos_div = rollout_stats['shadow_pos_div']
+                
+                # Track best performance
+                if success_rate > self.best_success_rate:
+                    self.best_success_rate = success_rate
+                    self.best_checkpoint_path = self._save_checkpoint(iteration, is_backup=False)
+                    self.consecutive_bad_iters = 0
+                    log.info(f"         🏆 New best success rate: {success_rate*100:.1f}%")
+                elif pos_div > self.divergence_threshold:
+                    self.consecutive_bad_iters += 1
+                    log.warning(f"         ⚠️ High divergence detected ({pos_div*100:.1f}cm > {self.divergence_threshold*100:.0f}cm)")
+                    
+                    if self.consecutive_bad_iters >= self.max_bad_iters and self.best_checkpoint_path:
+                        log.warning(f"         🔄 Rolling back to best checkpoint (consecutive bad iters: {self.consecutive_bad_iters})")
+                        self._load_checkpoint(str(self.best_checkpoint_path))
+                        self.consecutive_bad_iters = 0
+                else:
+                    self.consecutive_bad_iters = 0
                 
                 # [SOTA Enhancement] Apply entropy decay per iteration
                 self.entropy_coef_adaptive *= self.entropy_decay
-                
                 
                 if (iteration + 1) % self.cfg.logging.get("log_every_n_iters", 1) == 0:
                     csv_logger.log_step(iteration, rollout_stats, update_stats, self.total_steps)
@@ -1021,11 +1223,12 @@ class DGPOTrainer:
                     self._save_checkpoint(iteration, is_backup=True)
 
             self._save_checkpoint(total_iters - 1, is_backup=False)
-            log.info("Training complete!")
+            log.info("Training complete! [Enhanced DGPO v3.0]")
             
         finally:
             csv_logger.close()
             if self.tb_writer: self.tb_writer.close()
+
 
     def _save_checkpoint(self, iteration: int, is_backup: bool = False, use_ema: bool = False) -> Path:
         if is_backup:

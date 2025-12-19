@@ -92,10 +92,10 @@ def diagnose(cfg: DictConfig):
     hovering_counts = 0
     expert_movement = 0.0
     policy_movement = 0.0
-    ep_steps = 30 # Analyis duration
+    ep_steps = 100 # Analyis duration
     
-    print("\n    | Step | Phase | Current EE (World) | Expert Tgt (World) | Policy Pred (World) | Err(P-E) | Err(P-Curr) | Err(E-Curr) |")
-    print("    |------|-------|--------------------|--------------------|---------------------|----------|-------------|-------------|")
+    print("\n    | Step | Phase | Current EE (World) | Expert Tgt (World) | Policy Pred (World) | Err(P-E) | Err(P-C) | Err(E-C) |")
+    print("    |------|-------|--------------------|--------------------|---------------------|----------|----------|----------|")
 
     for step in range(ep_steps):
         # Prepare Batch
@@ -151,12 +151,11 @@ def diagnose(cfg: DictConfig):
         phase = info.get('expert_phase', 'UNK')
         
         # Formatting
-        row_str = f"    | {step:4d} | {phase:5s} | {np.array2string(current_ee[:3], precision=2)} | {np.array2string(expert_target[:3], precision=2)} | {np.array2string(pred_step0[:3], precision=2)} | {dist_pol_expert*100:5.1f}cm | {dist_pol_curr*100:5.1f}cm  | {dist_exp_curr*100:5.1f}cm  |"
+        row_str = f"    | {step:4d} | {phase:15s} | {np.array2string(current_ee[:3], precision=2)} | {np.array2string(expert_target[:3], precision=2)} | {np.array2string(pred_step0[:3], precision=2)} | {dist_pol_expert*100:5.1f}cm | {dist_pol_curr*100:5.1f}cm | {dist_exp_curr*100:5.1f}cm |"
         
         # Check Anomalies
         if dist_pol_curr < 0.01 and dist_exp_curr > 0.05:
-            row_str += " << HOVERING DETECTED"
-            hovering_counts += 1
+            row_str += " << HOVERING"
         
         print(row_str)
         

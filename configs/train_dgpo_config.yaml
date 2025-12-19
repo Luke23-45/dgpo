@@ -4,7 +4,7 @@
 seed: 42
 
 # --- BC Checkpoint (Pre-trained SemanticPlanner) ---
-bc_checkpoint: "checkpoints/bc_backup_epoch_088.ckpt"
+bc_checkpoint: "/content/drive/MyDrive/pda/bc/bc_backup_epoch_088.ckpt"
 
 freeze_vision: true  # Freeze vision backbone to save compute
 
@@ -64,6 +64,26 @@ optimizer:
 training:
   total_iterations: 200
   steps_per_iter: 2048  # Steps collected per iteration
+  
+  # === ENHANCED DGPO v3.0 Settings ===
+  # Progressive Policy Blending
+  use_policy_blending: true      # Enable progressive blending (vs pure Shadow Mode)
+  blend_warmup_iters: 20         # Iterations with α=0.1 (safe exploration)
+  blend_rampup_iters: 100        # Iterations to ramp α from 0.1 to max
+  blend_max_alpha: 0.9           # Maximum blend ratio (0.9 = 90% policy, 10% expert)
+  
+  # Temporal Ensemble
+  ensemble_cache_size: 5         # Number of chunks to cache for smoothing
+  
+  # Safety Mechanisms
+  max_bad_iters: 10              # Consecutive bad iters before rollback
+  divergence_threshold: 0.5      # Position divergence threshold (meters) for safety
+  
+  # Optional: EMA for policy smoothing
+  ema_decay: 0.999               # EMA decay for target policy
+  
+  # Mixed Precision (speeds up training)
+  use_amp: true
 
 # --- Logging Configuration ---
 logging:
