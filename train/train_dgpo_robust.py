@@ -830,6 +830,11 @@ class DGPOTrainer:
             # Use smoothed pose actions + gripper
             policy_actions = np.concatenate([smoothed_actions, gripper_cmds[:, np.newaxis]], axis=1)
             
+            # [ENHANCED v3.0 FIX] Append blend_alpha as 9th element for each env
+            # This allows the wrapper to use the correct alpha even in AsyncVectorEnv
+            alpha_column = np.full((self.num_envs, 1), current_alpha)
+            policy_actions = np.concatenate([policy_actions, alpha_column], axis=1)  # Now 9D
+            
             # 2. Compute Pre-Step Rewards (RSD) on Step 0
             p_chunk_t = action_chunks  # Use sampled for reward
             e_step0_t = torch.from_numpy(current_expert_poses).to(self.device).float()
@@ -849,8 +854,7 @@ class DGPOTrainer:
             bc_pos_divs = np.linalg.norm(mean_pred_step0 - expert_pos, axis=1)
             bc_pos_divergences.extend(bc_pos_divs.tolist())
             
-            # 3. [ENHANCED v3.0] Step Envs with BLENDED Policy Actions
-            # The wrapper will blend: (1-α)*Expert + α*Policy
+            # 3. [ENHANCED v3.0] Step Envs with BLENDED Policy Actions (9D: 8D action + alpha)
             next_obs, rewards, terminateds, truncateds, next_infos = self.envs.step(policy_actions)
             
             # [ENHANCED v3.0] Track execution divergence (executed pose vs expert target)

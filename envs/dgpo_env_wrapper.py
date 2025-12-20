@@ -89,8 +89,19 @@ class DGPOEnvWrapper(gym.Wrapper):
         self.latest_expert_grip = None
         
         # [ENHANCED DGPO v3.0] Blending mode configuration
-        self.blend_alpha = 0.0  # 0 = Pure Expert (Shadow Mode), 1 = Pure Policy
-        self.use_blending = cfg.training.get("use_policy_blending", False) if hasattr(cfg, 'training') else False
+        # FIX: Config is a plain dict when using AsyncVectorEnv, not DictConfig
+        # So we need to use dict-style access, not attribute access
+        self.blend_alpha = 0.1  # Start with small policy influence
+        
+        # Check if training config exists (handles both dict and DictConfig)
+        training_cfg = cfg.get('training', {}) if isinstance(cfg, dict) else getattr(cfg, 'training', {})
+        if isinstance(training_cfg, dict):
+            self.use_blending = training_cfg.get('use_policy_blending', True)
+            self.blend_alpha = 0.1  # Initial alpha (will be updated by trainer)
+        else:
+            self.use_blending = getattr(training_cfg, 'use_policy_blending', True)
+        
+        log.info(f"[DGPOEnvWrapper] Blending enabled: {self.use_blending}, initial_alpha: {self.blend_alpha}")
         
     def reset(self, **kwargs):
         """
@@ -134,19 +145,19 @@ class DGPOEnvWrapper(gym.Wrapper):
         - In between: Blended execution = (1-α)*Expert + α*Policy
         
         Args:
-            action: The POLICY'S predicted action (8D: 7 joints + 1 gripper).
-                   If blending disabled, this is IGNORED.
-                   If blending enabled, this is BLENDED with expert action.
+            action: Can be:
+                   - 8D: [7 joints + 1 gripper] - uses self.blend_alpha
+                   - 9D: [7 joints + 1 gripper + 1 alpha] - uses provided alpha
+                   If blending disabled, policy action is IGNORED.
             
         Returns:
             Standard Gym 5-tuple. 'info' contains the 'expert_pose' for the NEXT step.
         """
         
         # 1. Compute Expert Action (IK) based on the LATEST target state
-        #    (computed at the end of the previous step or reset)
         try:
             delta_joints = self.ik_solver.compute_delta_action(
-                target_ee_pose_chunk=np.array([self.latest_expert_pose]), # [FIX] Wrap as chunk for Adaptive IK
+                target_ee_pose_chunk=np.array([self.latest_expert_pose]),
                 model=self.env.model,
                 data=self.env.data,
                 ee_site_id=self.env.ee_site_id,
@@ -155,20 +166,25 @@ class DGPOEnvWrapper(gym.Wrapper):
                 max_dq=self.env.ACTION_SCALING_FACTOR / self.effective_dt
             )
         except Exception as e:
-            # Fallback for stability
             delta_joints = np.zeros(7)
         
         expert_action = np.concatenate([delta_joints, [self.latest_expert_grip]])
         
         # 2. [ENHANCED DGPO v3.0] Compute BLENDED action
         if self.use_blending and action is not None:
-            # Ensure action is the right shape (8D)
-            policy_action = np.asarray(action).flatten()[:8]
-            if len(policy_action) < 8:
-                policy_action = np.concatenate([policy_action, np.zeros(8 - len(policy_action))])
+            action_flat = np.asarray(action).flatten()
+            
+            # Check if alpha is provided in action (9D)
+            if len(action_flat) >= 9:
+                policy_action = action_flat[:8]
+                alpha = float(np.clip(action_flat[8], 0.0, 1.0))
+            else:
+                policy_action = action_flat[:8]
+                if len(policy_action) < 8:
+                    policy_action = np.concatenate([policy_action, np.zeros(8 - len(policy_action))])
+                alpha = self.blend_alpha
             
             # Blend: (1-α)*Expert + α*Policy
-            alpha = self.blend_alpha
             blended_action = (1 - alpha) * expert_action + alpha * policy_action
             
             # Safety clipping
@@ -176,20 +192,20 @@ class DGPOEnvWrapper(gym.Wrapper):
             blended_action[7] = np.clip(blended_action[7], -1.0, 1.0)
             
             executed_action = blended_action
+            used_alpha = alpha
         else:
             # Pure Shadow Mode
             executed_action = expert_action
+            used_alpha = 0.0
         
-        # 3. Step the Environment with the EXECUTED action (blended or expert)
+        # 3. Step the Environment with the EXECUTED action
         next_obs, reward, terminated, truncated, info = self.env.step(executed_action)
         
         # 4. Handle Expert Finish / Done
         if self.expert.is_done():
-            # If expert says done, we treat it as terminated (success or failure)
             terminated = True
             
-        # 5. Compute NEXT Expert Target (for the NEW observation)
-        #    This prepares 'latest_expert_pose' for the NEXT step() call.
+        # 5. Compute NEXT Expert Target
         expert_obs = self.env.get_expert_obs()
         target_pose, grip, exp_info = self.expert.get_target_pose(expert_obs)
         
@@ -201,8 +217,8 @@ class DGPOEnvWrapper(gym.Wrapper):
         info['expert_grip'] = grip
         info['expert_phase'] = exp_info.get('phase', 'UNKNOWN')
         info['executed_action'] = executed_action
-        info['expert_action'] = expert_action  # [NEW] For reward calculation
-        info['blend_alpha'] = self.blend_alpha  # [NEW] For logging
+        info['expert_action'] = expert_action
+        info['blend_alpha'] = used_alpha
         
         return next_obs, reward, terminated, truncated, info
 
