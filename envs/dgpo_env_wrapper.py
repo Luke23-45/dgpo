@@ -137,27 +137,62 @@ class DGPOEnvWrapper(gym.Wrapper):
         
     def step(self, action):
         """
-        Executes a step with PROGRESSIVE POLICY BLENDING.
+        Executes a step with PROGRESSIVE POLICY BLENDING in POSE SPACE.
         
-        [ENHANCED DGPO v3.0]
-        - When blend_alpha = 0: Pure Shadow Mode (Expert executes)
-        - When blend_alpha = 1: Pure Policy Mode (Policy executes)
-        - In between: Blended execution = (1-α)*Expert + α*Policy
+        [ENHANCED DGPO v3.0 - CRITICAL FIX]
+        Blending happens at the POSE level (not joint level):
+        - Blended_pose = (1-α)*Expert_pose + α*Policy_pose
+        - Joint_command = IK(Blended_pose)
         
         Args:
             action: Can be:
-                   - 8D: [7 joints + 1 gripper] - uses self.blend_alpha
-                   - 9D: [7 joints + 1 gripper + 1 alpha] - uses provided alpha
+                   - 8D: [7 pose (x,y,z,qw,qx,qy,qz) + 1 gripper]
+                   - 9D: [7 pose + 1 gripper + 1 alpha]
                    If blending disabled, policy action is IGNORED.
             
         Returns:
             Standard Gym 5-tuple. 'info' contains the 'expert_pose' for the NEXT step.
         """
         
-        # 1. Compute Expert Action (IK) based on the LATEST target state
+        # 1. Get Expert target pose (already computed)
+        expert_pose = self.latest_expert_pose  # (7,): x, y, z, qw, qx, qy, qz
+        expert_grip = self.latest_expert_grip
+        
+        # 2. [CRITICAL FIX] Blend at POSE level, not joint level
+        if self.use_blending and action is not None:
+            action_flat = np.asarray(action).flatten()
+            
+            # Extract policy pose and alpha
+            if len(action_flat) >= 9:
+                policy_pose = action_flat[:7]  # (7,): x, y, z, qw, qx, qy, qz
+                policy_grip = action_flat[7]
+                alpha = float(np.clip(action_flat[8], 0.0, 1.0))
+            else:
+                policy_pose = action_flat[:7]
+                policy_grip = action_flat[7] if len(action_flat) > 7 else expert_grip
+                alpha = self.blend_alpha
+            
+            # Blend POSES (physically meaningful!)
+            blended_pose = (1 - alpha) * expert_pose + alpha * policy_pose
+            blended_grip = (1 - alpha) * expert_grip + alpha * policy_grip
+            
+            # Normalize quaternion in blended pose
+            quat = blended_pose[3:7]
+            quat_norm = np.linalg.norm(quat)
+            if quat_norm > 1e-6:
+                blended_pose[3:7] = quat / quat_norm
+            
+            used_alpha = alpha
+        else:
+            # Pure Shadow Mode
+            blended_pose = expert_pose
+            blended_grip = expert_grip
+            used_alpha = 0.0
+        
+        # 3. Convert blended pose to joint commands via IK
         try:
             delta_joints = self.ik_solver.compute_delta_action(
-                target_ee_pose_chunk=np.array([self.latest_expert_pose]),
+                target_ee_pose_chunk=np.array([blended_pose]),
                 model=self.env.model,
                 data=self.env.data,
                 ee_site_id=self.env.ee_site_id,
@@ -168,57 +203,45 @@ class DGPOEnvWrapper(gym.Wrapper):
         except Exception as e:
             delta_joints = np.zeros(7)
         
-        expert_action = np.concatenate([delta_joints, [self.latest_expert_grip]])
+        executed_action = np.concatenate([delta_joints, [blended_grip]])
         
-        # 2. [ENHANCED DGPO v3.0] Compute BLENDED action
-        if self.use_blending and action is not None:
-            action_flat = np.asarray(action).flatten()
-            
-            # Check if alpha is provided in action (9D)
-            if len(action_flat) >= 9:
-                policy_action = action_flat[:8]
-                alpha = float(np.clip(action_flat[8], 0.0, 1.0))
-            else:
-                policy_action = action_flat[:8]
-                if len(policy_action) < 8:
-                    policy_action = np.concatenate([policy_action, np.zeros(8 - len(policy_action))])
-                alpha = self.blend_alpha
-            
-            # Blend: (1-α)*Expert + α*Policy
-            blended_action = (1 - alpha) * expert_action + alpha * policy_action
-            
-            # Safety clipping
-            blended_action[:7] = np.clip(blended_action[:7], -1.0, 1.0)
-            blended_action[7] = np.clip(blended_action[7], -1.0, 1.0)
-            
-            executed_action = blended_action
-            used_alpha = alpha
-        else:
-            # Pure Shadow Mode
-            executed_action = expert_action
-            used_alpha = 0.0
+        # Also compute what pure expert action would be (for metrics)
+        try:
+            expert_delta_joints = self.ik_solver.compute_delta_action(
+                target_ee_pose_chunk=np.array([expert_pose]),
+                model=self.env.model,
+                data=self.env.data,
+                ee_site_id=self.env.ee_site_id,
+                joint_qpos_indices=np.arange(7),
+                effective_dt=self.effective_dt,
+                max_dq=self.env.ACTION_SCALING_FACTOR / self.effective_dt
+            )
+        except:
+            expert_delta_joints = delta_joints
+        expert_action = np.concatenate([expert_delta_joints, [expert_grip]])
         
-        # 3. Step the Environment with the EXECUTED action
+        # 4. Step the Environment
         next_obs, reward, terminated, truncated, info = self.env.step(executed_action)
         
-        # 4. Handle Expert Finish / Done
+        # 5. Handle Expert Finish / Done
         if self.expert.is_done():
             terminated = True
             
-        # 5. Compute NEXT Expert Target
+        # 6. Compute NEXT Expert Target
         expert_obs = self.env.get_expert_obs()
         target_pose, grip, exp_info = self.expert.get_target_pose(expert_obs)
         
         self.latest_expert_pose = target_pose
         self.latest_expert_grip = grip
         
-        # 6. Populate Info for Trainer
+        # 7. Populate Info for Trainer
         info['expert_pose'] = target_pose
         info['expert_grip'] = grip
         info['expert_phase'] = exp_info.get('phase', 'UNKNOWN')
         info['executed_action'] = executed_action
         info['expert_action'] = expert_action
         info['blend_alpha'] = used_alpha
+        info['blended_pose'] = blended_pose  # For debugging
         
         return next_obs, reward, terminated, truncated, info
 

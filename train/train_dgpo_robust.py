@@ -877,15 +877,15 @@ class DGPOTrainer:
                 sigma_sq = 0.05
                 imitation_reward = np.exp(-rsd_scores[i] / sigma_sq)
                 
-                # Smoothness penalty (action change)
-                action_diff = np.linalg.norm(policy_actions[i] - self.prev_actions[i])
+                # Smoothness penalty (action change) - only compare 8D action, not alpha
+                action_diff = np.linalg.norm(policy_actions[i, :8] - self.prev_actions[i])
                 smoothness_penalty = -0.05 * action_diff ** 2
                 
                 # [SOTA Enhancement] Add entropy bonus
                 total_reward = imitation_reward + float(entropy_bonus[i]) + smoothness_penalty
                 
-                # Update prev actions
-                self.prev_actions[i] = policy_actions[i].copy()
+                # Update prev actions (store only first 8 elements)
+                self.prev_actions[i] = policy_actions[i, :8].copy()
                 
                 # Logging metrics
                 obj_pos = next_obs['object_pos_world'][i]
