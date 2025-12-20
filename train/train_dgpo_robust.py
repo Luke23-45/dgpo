@@ -273,7 +273,18 @@ class MetricsLogger:
         "mean_reward", "success_rate", "n_episodes",
         "policy_loss", "value_loss", "bc_loss", # Added BC Loss
         "shadow_pos_div_cm", "shadow_orn_div_rad", "grip_agreement",
-        "total_steps"
+        "total_steps",
+        # [ENHANCED v3.0] New Metrics
+        "blend_alpha",
+        "exec_pos_div",
+        
+        # [RESEARCH METRICS] Detailed Training Stats
+        "lr_policy", "lr_value", 
+        "entropy", "kl_div", "kl_beta",
+        "grad_norm_p", "grad_norm_v",
+        "explained_var", "clip_frac", "adv_mean",
+        "loss_ppo", "loss_value", "loss_bc",
+        "loss_entropy", "loss_phase", "loss_smooth"
     ]
     
     def __init__(self, csv_path: Path, resume: bool = False):
@@ -326,8 +337,31 @@ class MetricsLogger:
             "shadow_pos_div_cm": f"{rollout_stats['shadow_pos_div'] * 100:.4f}",
             "shadow_orn_div_rad": f"{rollout_stats['shadow_orn_div']:.6f}",
             "grip_agreement": f"{rollout_stats['grip_agreement']:.4f}",
-            "total_steps": total_steps
+            "total_steps": total_steps,
+            # [ENHANCED v3.0] New Metrics
+            "blend_alpha": f"{rollout_stats.get('blend_alpha', 0.0):.4f}",
+            "exec_pos_div": f"{rollout_stats.get('exec_pos_div', 0.0):.6f}",
+            
+            # [RESEARCH METRICS] Detailed Training Stats
+            "lr_policy": f"{update_stats.get('lr_policy', 0.0):.2e}",
+            "lr_value": f"{update_stats.get('lr_value', 0.0):.2e}",
+            "entropy": f"{update_stats.get('entropy', 0.0):.4f}",
+            "kl_div": f"{update_stats.get('kl_divergence', 0.0):.6f}",
+            "kl_beta": f"{update_stats.get('kl_beta', 0.0):.4f}",
+            "grad_norm_p": f"{update_stats.get('grad_norm_policy', 0.0):.4f}",
+            "grad_norm_v": f"{update_stats.get('grad_norm_value', 0.0):.4f}",
+            "explained_var": f"{update_stats.get('explained_variance', 0.0):.4f}",
+            "clip_frac": f"{update_stats.get('clip_fraction', 0.0):.4f}",
+            "adv_mean": f"{update_stats.get('adv_mean', 0.0):.4f}",
+            
+            "loss_ppo": f"{update_stats.get('loss_ppo', 0.0):.6f}",
+            "loss_value": f"{update_stats.get('loss_value', 0.0):.6f}",
+            "loss_bc": f"{update_stats.get('loss_bc', 0.0):.6f}",
+            "loss_entropy": f"{update_stats.get('loss_entropy', 0.0):.6f}",
+            "loss_phase": f"{update_stats.get('loss_phase', 0.0):.6f}",
+            "loss_smooth": f"{update_stats.get('loss_smoothness', 0.0):.6f}"
         }
+        
         self.writer.writerow(row)
         self.file.flush()
     
@@ -982,16 +1016,25 @@ class DGPOTrainer:
         )
         
         # Normalize stats
+        adv_mean = advantages.mean().item()
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
         adv_t = torch.from_numpy(advantages).float().to(self.device)
         ret_t = torch.from_numpy(returns).float().to(self.device)
         
-        policy_losses = []
-        value_losses = []
-        bc_losses = []
-        kl_divergences = []  # [SOTA] Track KL
-        entropy_values = []  # [SOTA] Track entropy
+        # Track Lists
+        m_ppo_loss = []
+        m_val_loss = []
+        m_bc_loss = []
+        m_ent_loss = []
+        m_phase_loss = []
+        m_smooth_loss = []
+        m_kl_div = []
+        m_entropy = []
+        m_clip_frac = []
+        m_explained_var = []
+        m_grad_norm_p = []
+        m_grad_norm_v = []
         
         for epoch in range(self.cfg.ppo.epochs):
             indices = np.arange(len(self.buffer))
@@ -1002,7 +1045,7 @@ class DGPOTrainer:
                 batch_idx = indices[start:end]
                 
                 # A. Prepare Batch - [PERF OPT] Vectorized batch preparation
-                batch_size_actual = len(batch_idx)
+                batch_size_actual = len(batch_idx) # Define this for logging if needed
                 
                 # Stack images efficiently (avoid PIL conversion)
                 prev_imgs_np = np.stack([self.buffer.prev_images[i] for i in batch_idx])
@@ -1036,20 +1079,18 @@ class DGPOTrainer:
                 surr1 = ratio * b_adv
                 surr2 = torch.clamp(ratio, 1.0 - 0.2, 1.0 + 0.2) * b_adv
                 ppo_loss = -torch.min(surr1, surr2).mean()
+                
+                # Metrics: Clip Fraction
+                with torch.no_grad():
+                    clip_frac = ((ratio - 1.0).abs() > 0.2).float().mean().item()
+                    m_clip_frac.append(clip_frac)
 
                 # [SOTA FIX] Entropy Regularization
-                entropy_loss = -dist_new.entropy().mean() * self.cfg.ppo.get("entropy_coef", 0.01)
+                entropy_mean = dist_new.entropy().mean()
+                entropy_loss = -entropy_mean * self.cfg.ppo.get("entropy_coef", 0.01)
                 
                 # D. Behavior Cloning (BC) Anchor Loss
-                # [DGPO v2.1 FIX] Force alignment with expert on STEP 0
-                # This prevents "drifting away" when PPO signal is noisy.
-                # We use Step 0 because expert_pose_chunk is just a repeat of the current target,
-                # and enforcing it on the whole chunk would kill velocity/prediction.
-                
                 b_expert_chunks = torch.stack([torch.from_numpy(self.buffer.expert_pose_chunks[i]) for i in batch_idx]).to(self.device)
-                
-                # MSE on the first step (Immediate action alignment)
-                # This acts as the "Dense Guidance"
                 bc_loss_val = F.mse_loss(pred_chunks[:, 0, :], b_expert_chunks[:, 0, :])
                 
                 # E. Value Loss (with SOTA Clipping)
@@ -1066,6 +1107,14 @@ class DGPOTrainer:
                 v_loss2 = F.mse_loss(v_pred_clipped, v_target)
                 value_loss = torch.max(v_loss1, v_loss2)
                 
+                # Metrics: Explained Variance
+                with torch.no_grad():
+                    y_pred = value_pred.flatten()
+                    y_true = v_target.flatten()
+                    var_y = torch.var(y_true)
+                    expl_var = 1 - torch.var(y_true - y_pred) / (var_y + 1e-8)
+                    m_explained_var.append(expl_var.item())
+                
                 # F. Phase Loss
                 b_phases = torch.tensor([self.buffer.expert_phases[i] for i in batch_idx], device=self.device)
                 phase_loss = F.cross_entropy(policy_out['phase_logits'], b_phases)
@@ -1073,7 +1122,7 @@ class DGPOTrainer:
                 # [SOTA Enhancement] G. KL Divergence Tracking
                 with torch.no_grad():
                     kl_div = (b_log_prob_old - log_prob_new).mean()
-                    kl_divergences.append(kl_div.item())
+                    m_kl_div.append(kl_div.item())
                 kl_penalty = self.kl_penalty.beta * kl_div
                 
                 # [SOTA Enhancement] H. Temporal Smoothness Loss
@@ -1082,10 +1131,9 @@ class DGPOTrainer:
                 lambda_smooth = 0.01
                 
                 # [SOTA Enhancement] I. Track Entropy
-                policy_entropy = dist_new.entropy().mean()
-                entropy_values.append(policy_entropy.item())
+                m_entropy.append(entropy_mean.item())
                 
-                # Total Loss: PPO + Entropy + BC + Value + Aux + KL + Smoothness
+                # Total Loss
                 loss = (ppo_loss + entropy_loss + 0.5 * value_loss + 0.1 * phase_loss + 
                         1.0 * bc_loss_val + kl_penalty + lambda_smooth * smoothness_loss)
                 
@@ -1093,18 +1141,32 @@ class DGPOTrainer:
                 self.policy_optimizer.zero_grad()
                 self.value_optimizer.zero_grad()
                 
+                grad_norm_p = 0.0
+                grad_norm_v = 0.0
+                
                 if self.use_amp:
                     self.scaler.scale(loss).backward()
                     self.scaler.unscale_(self.policy_optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
+                    self.scaler.unscale_(self.value_optimizer) # Unscale both
+                    
+                    # Clip & Capture Grads
+                    grad_norm_p = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0).item()
+                    grad_norm_v = torch.nn.utils.clip_grad_norm_(self.value_net.parameters(), 1.0).item()
+                    
                     self.scaler.step(self.policy_optimizer)
                     self.scaler.step(self.value_optimizer)
                     self.scaler.update()
                 else:
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
+                    # Clip & Capture Grads
+                    grad_norm_p = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0).item()
+                    grad_norm_v = torch.nn.utils.clip_grad_norm_(self.value_net.parameters(), 1.0).item()
+                    
                     self.policy_optimizer.step()
                     self.value_optimizer.step()
+                
+                m_grad_norm_p.append(grad_norm_p)
+                m_grad_norm_v.append(grad_norm_v)
                 
                 # [SOTA FIX] Step Scheduler
                 self.scheduler.step()
@@ -1114,12 +1176,15 @@ class DGPOTrainer:
                     for param, ema_param in zip(self.policy.parameters(), self.ema_policy.parameters()):
                         ema_param.data.mul_(self.ema_decay).add_(param.data, alpha=1 - self.ema_decay)
 
-                policy_losses.append(ppo_loss.item())
-                value_losses.append(value_loss.item())
-                bc_losses.append(bc_loss_val.item())
+                m_ppo_loss.append(ppo_loss.item())
+                m_val_loss.append(value_loss.item())
+                m_bc_loss.append(bc_loss_val.item())
+                m_ent_loss.append(entropy_loss.item())
+                m_phase_loss.append(phase_loss.item())
+                m_smooth_loss.append(smoothness_loss.item())
         
         # [SOTA Enhancement] Update adaptive components
-        mean_kl = np.mean(kl_divergences) if kl_divergences else 0.0
+        mean_kl = np.mean(m_kl_div) if m_kl_div else 0.0
         self.kl_penalty.update(mean_kl)
         
         # [SOTA Enhancement] Soft update target critic
@@ -1127,12 +1192,25 @@ class DGPOTrainer:
             target_param.data.copy_(self.soft_update_tau * param.data + (1 - self.soft_update_tau) * target_param.data)
         
         return {
-            "policy_loss": np.mean(policy_losses),
-            "value_loss": np.mean(value_losses),
-            "bc_loss": np.mean(bc_losses),
+            "policy_loss": np.mean(m_ppo_loss),
+            "value_loss": np.mean(m_val_loss),
+            "bc_loss": np.mean(m_bc_loss),
+            "loss_ppo": np.mean(m_ppo_loss),
+            "loss_value": np.mean(m_val_loss),
+            "loss_bc": np.mean(m_bc_loss),
+            "loss_entropy": np.mean(m_ent_loss),
+            "loss_phase": np.mean(m_phase_loss),
+            "loss_smoothness": np.mean(m_smooth_loss),
             "kl_divergence": mean_kl,
             "kl_beta": self.kl_penalty.beta,
-            "entropy": np.mean(entropy_values) if entropy_values else 0.0
+            "entropy": np.mean(m_entropy),
+            "grad_norm_policy": np.mean(m_grad_norm_p),
+            "grad_norm_value": np.mean(m_grad_norm_v),
+            "explained_variance": np.mean(m_explained_var),
+            "clip_fraction": np.mean(m_clip_frac),
+            "adv_mean": adv_mean,
+            "lr_policy": self.policy_optimizer.param_groups[0]['lr'],
+            "lr_value": self.value_optimizer.param_groups[0]['lr']
         }
 
     # ==========================================================================

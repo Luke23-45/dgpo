@@ -12,7 +12,7 @@ from scipy.spatial.transform import Rotation as R
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=46)
     parser.add_argument("--save_path", type=str, default="goal_verification.png")
     args = parser.parse_args()
 

@@ -1,0 +1,5 @@
+- training.total_iterations=2
+- training.steps_per_iter=4
+- ppo.batch_size=2
+- ppo.epochs=1
+- logging.csv_log_name=metrics_test.csv

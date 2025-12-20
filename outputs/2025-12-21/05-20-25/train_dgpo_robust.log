@@ -1,0 +1,5 @@
+[2025-12-21 05:20:25,886][DGPO][INFO] - ============================================================
+[2025-12-21 05:20:25,887][DGPO][INFO] - DGPO-Foundation Training (SOTA Production Fix)
+[2025-12-21 05:20:25,887][DGPO][INFO] - ============================================================
+[2025-12-21 05:20:25,887][DGPO][INFO] - Device: cpu
+[2025-12-21 05:20:25,888][DGPO][INFO] - Loading BC checkpoint: /content/drive/MyDrive/pda/bc/bc_backup_epoch_088.ckpt

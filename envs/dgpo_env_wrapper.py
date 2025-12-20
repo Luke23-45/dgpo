@@ -2,6 +2,7 @@
 import gymnasium as gym
 import numpy as np
 import torch
+import mujoco
 from typing import Dict, Any, Tuple
 import logging
 
@@ -103,6 +104,13 @@ class DGPOEnvWrapper(gym.Wrapper):
         
         log.info(f"[DGPOEnvWrapper] Blending enabled: {self.use_blending}, initial_alpha: {self.blend_alpha}")
         
+        # [CRITICAL FIX] Update Action Space to include Alpha (9D)
+        # This prevents AsyncVectorEnv from truncating the 9th element
+        low = np.full(9, -1.0, dtype=np.float32)
+        high = np.full(9, 1.0, dtype=np.float32)
+        # Alpha is [0, 1] but we keep bounds [-1, 1] for simplicity (clipped later)
+        self.action_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
+        
     def reset(self, **kwargs):
         """
         Resets environment and expert. 
@@ -125,15 +133,95 @@ class DGPOEnvWrapper(gym.Wrapper):
         info['expert_phase'] = self.expert.get_state()
         info['executed_action'] = np.zeros(8, dtype=np.float32) # [FIX] Prevent KeyError on reset/done common in VectorEnv
         
-        # Helper: Render goal image (since main process cannot access MuJoCo state)
-        # Use simple try/except in case the internal method name changes or fails
+        # [ENHANCED v3.0] Accurate Goal Image Generation
+        # Uses specific IK logic and robot positioning to match training distribution
         try:
-            info['goal_img'] = self.env._render_goal_image()
+            info['goal_img'] = self._render_accurate_goal_image(obs)
         except Exception as e:
-            # Fallback for stability
-            info['goal_img'] = np.zeros_like(obs['image_primary'])
+            log.warning(f"Goal Image Generation Failed: {e}")
+            # Fallback to simple render or zeros
+            try:
+                info['goal_img'] = self.env._render_goal_image()
+            except:
+                info['goal_img'] = np.zeros_like(obs['image_primary'])
         
         return obs, info
+
+    def _render_accurate_goal_image(self, obs: Dict[str, Any]) -> np.ndarray:
+        """
+        Renders the goal image using the EXACT logic from `evaluate/test_visualize_goal.py`.
+        This ensures the Semantic Planner receives goal images consistent with its training distribution.
+        """
+        # Save current state
+        saved_qpos = self.env.data.qpos.copy()
+        saved_qvel = self.env.data.qvel.copy()
+        saved_ctrl = self.env.data.ctrl.copy()
+        
+        goal_pos_world = obs['goal_pos_world']
+        goal_orn_world = obs['goal_orn_world']
+        HOVER_HEIGHT = 0.10
+        
+        try:
+            # 1. Move Object to Goal Pose (Lifted)
+            obj_addr = self.env.model.jnt_qposadr[self.env.object_joint_id]
+            # [MATCHING LOGIC] Lift object by 0.02 to prevent sinking
+            target_obj_pos = goal_pos_world + np.array([0.0, 0.0, 0.02])
+            self.env.data.qpos[obj_addr:obj_addr+3] = target_obj_pos
+            
+            # Set Orientation: Convert xyzw (SciPy) -> wxyz (MuJoCo)
+            goal_orn_wxyz = self.env._scipy_xyzw_to_mujoco_wxyz(goal_orn_world)
+            self.env.data.qpos[obj_addr+3:obj_addr+7] = goal_orn_wxyz
+            
+            # 2. Calculate Robot Target Pose (Goal Pos + Hover Z)
+            # [MATCHING LOGIC] Lift robot by HOVER_HEIGHT + 0.02
+            target_pos = goal_pos_world + np.array([0.0, 0.0, HOVER_HEIGHT + 0.02])
+            
+            # 3. Calculate DYNAMIC Target Orientation
+            # [MATCHING LOGIC] Use seed [1, 0, 0, 0] (Rot X 180) which matches test_visualize_goal.py
+            # The expert default is [0, 1, 0, 0], so we MUST override it here.
+            seed_downward_quat = np.array([1.0, 0.0, 0.0, 0.0])
+            
+            # Reuse expert's robust alignment logic
+            target_quat = self.expert._calculate_aligned_orientation(goal_orn_world, seed_downward_quat)
+            
+            target_pose_7d = np.concatenate([target_pos, target_quat])
+            
+            # 4. Solve IK for Hover Pose
+            # Seed with home position (standard neutral pose)
+            home_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
+            
+            goal_qpos = self.ik_solver.solve_ik_static(
+                target_pose=target_pose_7d, 
+                model=self.env.model, 
+                data=self.env.data, 
+                ee_site_id=self.env.ee_site_id,
+                q0=home_qpos 
+            )
+            
+            if goal_qpos is not None:
+                self.env.data.qpos[:7] = goal_qpos
+            else:
+                self.env.data.qpos[:7] = home_qpos # Fallback
+    
+            # 5. Open Gripper (Retract state has open gripper)
+            # 0.04 represents full open in this env
+            self.env.data.qpos[7:9] = 0.04 
+            
+            # 6. Forward Prop
+            mujoco.mj_forward(self.env.model, self.env.data)
+            
+            # 7. Render
+            # Use the environment's render method to get the correct camera/settings
+            goal_img = self.env.render()
+            
+            return goal_img
+            
+        finally:
+            # Restore State
+            self.env.data.qpos[:] = saved_qpos
+            self.env.data.qvel[:] = saved_qvel
+            self.env.data.ctrl[:] = saved_ctrl
+            mujoco.mj_forward(self.env.model, self.env.data)
         
     def step(self, action):
         """
@@ -155,22 +243,34 @@ class DGPOEnvWrapper(gym.Wrapper):
         """
         
         # 1. Get Expert target pose (already computed)
-        expert_pose = self.latest_expert_pose  # (7,): x, y, z, qw, qx, qy, qz
+        expert_pose = self.latest_expert_pose
         expert_grip = self.latest_expert_grip
+        
+        # [DEBUG] Print status (will show in console)
+        # print(f"DEBUG: use_blending={self.use_blending}, action type={type(action)}")
         
         # 2. [CRITICAL FIX] Blend at POSE level, not joint level
         if self.use_blending and action is not None:
             action_flat = np.asarray(action).flatten()
             
+            # [DEBUG] Check action shape
+            # if len(action_flat) < 9:
+            #    print(f"DEBUG: Action shape {action_flat.shape} < 9! Using internal alpha {self.blend_alpha}")
+            
             # Extract policy pose and alpha
             if len(action_flat) >= 9:
-                policy_pose = action_flat[:7]  # (7,): x, y, z, qw, qx, qy, qz
+                policy_pose = action_flat[:7]
                 policy_grip = action_flat[7]
                 alpha = float(np.clip(action_flat[8], 0.0, 1.0))
             else:
                 policy_pose = action_flat[:7]
                 policy_grip = action_flat[7] if len(action_flat) > 7 else expert_grip
                 alpha = self.blend_alpha
+            
+            # [DEBUG] Verify alpha
+            # if alpha == 0.0 and self.blend_alpha > 0:
+            #    print(f"DEBUG: Alpha is 0.0 but self.blend_alpha is {self.blend_alpha}")
+
             
             # Blend POSES (physically meaningful!)
             blended_pose = (1 - alpha) * expert_pose + alpha * policy_pose
@@ -190,9 +290,12 @@ class DGPOEnvWrapper(gym.Wrapper):
             used_alpha = 0.0
         
         # 3. Convert blended pose to joint commands via IK
+        # [AUDIT] Input `blended_pose` is already SciPy format [x,y,z,w] from DGPOExpert/PandaEnv.
+        # No permutation needed. Passing directly to IKSolver.
+        
         try:
             delta_joints = self.ik_solver.compute_delta_action(
-                target_ee_pose_chunk=np.array([blended_pose]),
+                target_ee_pose=blended_pose,  # [FIX] Singular arg name, 1D array, already xyzw
                 model=self.env.model,
                 data=self.env.data,
                 ee_site_id=self.env.ee_site_id,
@@ -201,14 +304,17 @@ class DGPOEnvWrapper(gym.Wrapper):
                 max_dq=self.env.ACTION_SCALING_FACTOR / self.effective_dt
             )
         except Exception as e:
+            # [DEBUG] Print exception to see why IK fails
+            log.warning(f"IK Failed in Step: {e}")
             delta_joints = np.zeros(7)
         
         executed_action = np.concatenate([delta_joints, [blended_grip]])
         
-        # Also compute what pure expert action would be (for metrics)
+        # [ENHANCED] Capture Expert Action for Divergence Tracking
+        
         try:
             expert_delta_joints = self.ik_solver.compute_delta_action(
-                target_ee_pose_chunk=np.array([expert_pose]),
+                target_ee_pose=expert_pose, # [FIX] Singular arg name, already xyzw
                 model=self.env.model,
                 data=self.env.data,
                 ee_site_id=self.env.ee_site_id,
@@ -216,8 +322,9 @@ class DGPOEnvWrapper(gym.Wrapper):
                 effective_dt=self.effective_dt,
                 max_dq=self.env.ACTION_SCALING_FACTOR / self.effective_dt
             )
-        except:
-            expert_delta_joints = delta_joints
+        except Exception as e:
+            log.warning(f"Expert IK Failed in Step: {e}")
+            expert_delta_joints = delta_joints # Fallback to executed action so diff is 0
         expert_action = np.concatenate([expert_delta_joints, [expert_grip]])
         
         # 4. Step the Environment
