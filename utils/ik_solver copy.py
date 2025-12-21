@@ -192,6 +192,28 @@ class IKSolver:
         return None
         # --- END OF PATCH ---
 
+    def compute_target_joint_positions(
+        self,
+        target_pose_7d: np.ndarray,
+        current_joint_angles: np.ndarray,
+        solution_position_tolerance: float = 0.01,
+    ) -> np.ndarray:
+        """
+        [ROBUST ANALYTICAL IK]
+        Returns the raw target joint angles (radians) needed to reach the pose.
+        Uses warm-starting from current_joint_angles.
+        Returns start angles if IK fails.
+        """
+        target_joint_angles = self._get_target_joint_angles(
+            target_pose_7d,
+            current_joint_angles,
+            solution_position_tolerance,
+        )
+        if target_joint_angles is None:
+            # Fallback to holding position
+            return current_joint_angles.copy()
+        return target_joint_angles
+
     def compute_action(
         self,
         target_pose_7d: np.ndarray,
@@ -213,18 +235,13 @@ class IKSolver:
         n_active = len(self._active_idx)
 
         # 1. Solve for the final target joint configuration.
-        target_joint_angles = self._get_target_joint_angles(
+        target_joint_angles = self.compute_target_joint_positions(
             target_pose_7d,
             current_joint_angles,
             solution_position_tolerance,
         )
 
-        # 2. Handle IK failure: command a "hold position" action.
-        if target_joint_angles is None:
-            logger.warning("IK solver failed. Commanding a hold action (current joint positions).")
-            target_joint_angles = current_joint_angles
-
-        # 3. Normalize the absolute target joint angles to the action space [-1, 1].
+        # 2. Normalize the absolute target joint angles to the action space [-1, 1].
         action = np.zeros(n_active, dtype=np.float32)
         for i in range(n_active):
             lo, hi = self._joint_limits[i]
@@ -454,28 +471,6 @@ class IKSolver:
             )
         
         return pos_boost, rot_boost
-
-    def compute_target_joint_positions(
-        self,
-        target_pose_7d: np.ndarray,
-        current_joint_angles: np.ndarray,
-        solution_position_tolerance: float = 0.01,
-    ) -> np.ndarray:
-        """
-        [ROBUST ANALYTICAL IK]
-        Returns the raw target joint angles (radians) needed to reach the pose.
-        Uses warm-starting from current_joint_angles.
-        Returns start angles if IK fails.
-        """
-        target_joint_angles = self._get_target_joint_angles(
-            target_pose_7d,
-            current_joint_angles,
-            solution_position_tolerance,
-        )
-        if target_joint_angles is None:
-            # Fallback to holding position
-            return current_joint_angles.copy()
-        return target_joint_angles
 
     def compute_delta_action(
         self,

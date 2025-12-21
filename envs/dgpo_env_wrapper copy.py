@@ -289,48 +289,64 @@ class DGPOEnvWrapper(gym.Wrapper):
             blended_grip = expert_grip
             used_alpha = 0.0
         
-        # 3. Convert blended pose to joint commands via IK (Analytical Smooth Strategy)
-        # Input 'blended_pose' is [x, y, z, qx, qy, qz, qw]
+        # 3. Convert blended pose to joint commands via IK
+        # [AUDIT] Input `blended_pose` is already SciPy format [x,y,z,w] from DGPOExpert/PandaEnv.
+        # No permutation needed. Passing directly to IKSolver.
         
         try:
-            # 1. Get current joint state (Ground Truth)
+            # [SOTA FIX] Switch to Robust Analytical IK (Inverse Kinematics)
+            # Old 'compute_delta_action' (Jacobian) was behaving as a dumb servo, failing on large jumps.
+            # New approach: Solve for exact target joints -> Compute required delta.
+            
+            # 1. Get current joint state from MuJoCo (Ground Truth)
             current_qpos = self.env.data.qpos[:7].copy()
             
-            # 2. Global Analytical Solution
+            # 2. Solve for Target Joint Configuration (Global Solution)
             target_joint_angles = self.ik_solver.compute_target_joint_positions(
                 target_pose_7d=blended_pose,
                 current_joint_angles=current_qpos,
                 solution_position_tolerance=0.01
             )
             
-            # 3. Compute Delta with Smoothing (Alpha=0.5)
-            # This minimizes physics divergence/lag by filtering large jumps.
+            # 3. Reverse-Compute the Delta Action required by the Env Controller
+            # Env Logic: target = current + action * scaling
+            # Therefore: action = (target - current) / scaling
             scaling_factor = self.env.ACTION_SCALING_FACTOR
-            delta_rads = (target_joint_angles - current_qpos) * 0.5
+            delta_rads = target_joint_angles - current_qpos
             
-            # 4. Normalize to Action Space [-1, 1]
-            delta_joints = np.clip(delta_rads / (scaling_factor + 1e-9), -1.0, 1.0)
+            # Normalize to action space [-1, 1]
+            # Safety: Add epsilon to avoid div by zero if scaling is weird
+            delta_joints = delta_rads / (scaling_factor + 1e-9)
+            
+            # Clip to valid action range (Physics limit)
+            delta_joints = np.clip(delta_joints, -1.0, 1.0)
 
         except Exception as e:
-            log.warning(f"IK Failed (Analytical): {e}")
+            # [DEBUG] Fallback to hold
+            log.warning(f"IK Failed in Step: {e}")
+            delta_joints = np.zeros(7)
+        except Exception as e:
+            # [DEBUG] Print exception to see why IK fails
+            log.warning(f"IK Failed in Step: {e}")
             delta_joints = np.zeros(7)
         
         executed_action = np.concatenate([delta_joints, [blended_grip]])
         
-        # [Expert Divergence Tracking]
-        # Calculate what the expert *would* have commanded using the same controller logic.
+        # [ENHANCED] Capture Expert Action for Divergence Tracking
+        
         try:
-            expert_target_joints = self.ik_solver.compute_target_joint_positions(
-                target_pose_7d=expert_pose,
-                current_joint_angles=current_qpos,
-                solution_position_tolerance=0.01
+            expert_delta_joints = self.ik_solver.compute_delta_action(
+                target_ee_pose=expert_pose, # [FIX] Singular arg name, already xyzw
+                model=self.env.model,
+                data=self.env.data,
+                ee_site_id=self.env.ee_site_id,
+                joint_qpos_indices=np.arange(7),
+                effective_dt=self.effective_dt,
+                max_dq=self.env.ACTION_SCALING_FACTOR / self.effective_dt
             )
-            expert_delta_rads = (expert_target_joints - current_qpos) * 0.5
-            expert_delta_joints = np.clip(expert_delta_rads / (scaling_factor + 1e-9), -1.0, 1.0)
-
         except Exception as e:
-            log.warning(f"Expert IK Failed: {e}")
-            expert_delta_joints = delta_joints # Fallback to executed action
+            log.warning(f"Expert IK Failed in Step: {e}")
+            expert_delta_joints = delta_joints # Fallback to executed action so diff is 0
         expert_action = np.concatenate([expert_delta_joints, [expert_grip]])
         
         # 4. Step the Environment

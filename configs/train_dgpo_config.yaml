@@ -43,6 +43,10 @@ reward:
   
   # Success bonus (sparse, terminal)
   success_bonus: 100.0
+  
+  # [SOTA FIX] Behavior Cloning Coefficient
+  # Tuning Verdict: 1000.0 (Balances KL Penalty of ~4.0)
+  bc_coef: 1000.0
 
 # --- PPO Hyperparameters ---
 ppo:
@@ -69,7 +73,7 @@ training:
   # Progressive Policy Blending
   use_policy_blending: true      # Enable progressive blending (vs pure Shadow Mode)
   blend_warmup_iters: 20         # Iterations with α=0.1 (safe exploration)
-  blend_rampup_iters: 100        # Iterations to ramp α from 0.1 to max
+  blend_rampup_iters: 300        # [TUNED] Slower rampup (was 100) to stabilize policy
   blend_max_alpha: 0.9           # Maximum blend ratio (0.9 = 90% policy, 10% expert)
   
   # Temporal Ensemble
@@ -91,7 +95,7 @@ logging:
   csv_log_name: "training_metrics.csv"   # CSV metrics filename
   use_tensorboard: true                  # Enable TensorBoard logging
   log_every_n_iters: 1                   # How often to log (every N iterations)
-
+#"/content/drive/MyDrive/pda/ui/dgpo_backup_iter_0057.pt"
 # --- Checkpoint & Resume Configuration ---
 checkpoint:
   save_dir: "outputs/dgpo_runs/checkpoints"   # Directory for regular checkpoints
@@ -99,4 +103,4 @@ checkpoint:
   backup_dir: "/content/drive/MyDrive/pda/dgpo/ui/"     # Directory for failsafe backups
   backup_freq: 3                              # Save backup every N iterations
   backups_to_keep: 3                          # Number of old backups to retain
-  resume_from: "/content/drive/MyDrive/pda/ui/dgpo_backup_iter_0045.pt"                           # Path to checkpoint to resume from (set to .pt path)
+  resume_from: "/content/drive/MyDrive/pda/ui/dgpo_backup_iter_0063.pt"                       # Path to checkpoint to resume from (set to .pt path)

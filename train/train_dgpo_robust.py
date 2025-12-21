@@ -1139,8 +1139,10 @@ class DGPOTrainer:
                 m_entropy.append(entropy_mean.item())
                 
                 # Total Loss
+                # [SOTA FIX] Use tuned BC coefficient
+                bc_coef = self.cfg.reward.get("bc_coef", 1000.0)
                 loss = (ppo_loss + entropy_loss + 0.5 * value_loss + 0.1 * phase_loss + 
-                        1.0 * bc_loss_val + kl_penalty + lambda_smooth * smoothness_loss)
+                        bc_coef * bc_loss_val + kl_penalty + lambda_smooth * smoothness_loss)
                 
                 # [PERF OPT] Mixed Precision Backward
                 self.policy_optimizer.zero_grad()

@@ -12,6 +12,7 @@ __pycache__/
 dist/
 build/
 data/
+outputs/
 # --- IDEs and Editors ---
 # VSCode
 .vscode/
