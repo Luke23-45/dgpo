@@ -1119,11 +1119,16 @@ class DGPOTrainer:
                 b_phases = torch.tensor([self.buffer.expert_phases[i] for i in batch_idx], device=self.device)
                 phase_loss = F.cross_entropy(policy_out['phase_logits'], b_phases)
                 
-                # [SOTA Enhancement] G. KL Divergence Tracking
+                # [SOTA Enhancement] G. KL Divergence Tracking & Penalty
+                # 1. Calculate for Logging (Detached)
                 with torch.no_grad():
-                    kl_div = (b_log_prob_old - log_prob_new).mean()
-                    m_kl_div.append(kl_div.item())
-                kl_penalty = self.kl_penalty.beta * kl_div
+                    kl_div_log = (b_log_prob_old - log_prob_new).mean()
+                    m_kl_div.append(kl_div_log.item())
+                
+                # 2. Calculate for Loss (Attached - Gradients MUST Flow)
+                # [CRITICAL FIX] Do NOT use no_grad here, or the penalty is ignored!
+                kl_div_grad = (b_log_prob_old - log_prob_new).mean()
+                kl_penalty = self.kl_penalty.beta * kl_div_grad
                 
                 # [SOTA Enhancement] H. Temporal Smoothness Loss
                 chunk_diffs = pred_chunks[:, 1:, :] - pred_chunks[:, :-1, :]

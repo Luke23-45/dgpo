@@ -99,4 +99,4 @@ checkpoint:
   backup_dir: "/content/drive/MyDrive/pda/dgpo/ui/"     # Directory for failsafe backups
   backup_freq: 3                              # Save backup every N iterations
   backups_to_keep: 3                          # Number of old backups to retain
-  resume_from: "/content/drive/MyDrive/pda/ui/dgpo_backup_iter_0039.pt"                           # Path to checkpoint to resume from (set to .pt path)
+  resume_from: "/content/drive/MyDrive/pda/ui/dgpo_backup_iter_0045.pt"                           # Path to checkpoint to resume from (set to .pt path)
