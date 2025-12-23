@@ -741,7 +741,10 @@ class DGPOTrainer:
         self.tb_writer.add_scalar("sota/entropy", update_stats.get('entropy', 0.0), iteration)
         # [ENHANCED v3.0] Progressive blending
         self.tb_writer.add_scalar("blending/alpha", rollout_stats.get('blend_alpha', 0.0), iteration)
+        # [FIX v4.0] Track BC coefficient annealing
+        self.tb_writer.add_scalar("sota/bc_coef", update_stats.get('bc_coef_effective', 1000.0), iteration)
         self.tb_writer.add_scalar("training/total_steps", self.total_steps, iteration)
+
 
     def _prepare_batch_vectorized(self, prev_imgs, curr_imgs, goal_imgs, proprios) -> Dict[str, torch.Tensor]:
         """Optimized batch preprocessing without PIL conversion."""
@@ -869,14 +872,19 @@ class DGPOTrainer:
             alpha_column = np.full((self.num_envs, 1), current_alpha)
             policy_actions = np.concatenate([policy_actions, alpha_column], axis=1)  # Now 9D
             
-            # 2. Compute Pre-Step Rewards (RSD) on Step 0
-            p_chunk_t = action_chunks  # Use sampled for reward
+            # 3. [ENHANCED v3.0] Step Envs with BLENDED Policy Actions (9D: 8D action + alpha)
+            next_obs, rewards, terminateds, truncateds, next_infos = self.envs.step(policy_actions)
+            
+            # [FIX v4.0] Compute RSD Reward from ACTUAL EXECUTED POSE, not policy output
+            # This ensures the reward reflects what actually happened in the environment
+            actual_ee_poses = next_obs['ee_pose_world'][:, :7]  # (N, 7) - actual pose after step
+            actual_ee_t = torch.from_numpy(actual_ee_poses).to(self.device).float()
             e_step0_t = torch.from_numpy(current_expert_poses).to(self.device).float()
             
             with torch.no_grad():
                 rsd_scores = compute_riemannian_divergence(
-                    p_chunk_t[:, 0:1, :],
-                    e_step0_t.unsqueeze(1),
+                    actual_ee_t.unsqueeze(1),  # What actually executed
+                    e_step0_t.unsqueeze(1),    # Expert target
                     policy_out['phase_logits']
                 ).cpu().numpy()
             
@@ -888,16 +896,10 @@ class DGPOTrainer:
             bc_pos_divs = np.linalg.norm(mean_pred_step0 - expert_pos, axis=1)
             bc_pos_divergences.extend(bc_pos_divs.tolist())
             
-            # 3. [ENHANCED v3.0] Step Envs with BLENDED Policy Actions (9D: 8D action + alpha)
-            next_obs, rewards, terminateds, truncateds, next_infos = self.envs.step(policy_actions)
-            
             # [ENHANCED v3.0] Track execution divergence (executed pose vs expert target)
-            if 'executed_action' in next_infos and 'expert_action' in next_infos:
-                for i in range(self.num_envs):
-                    exec_action = next_infos['executed_action'][i][:7]  # Joint deltas
-                    expert_action = next_infos['expert_action'][i][:7]
-                    exec_div = np.linalg.norm(exec_action - expert_action)
-                    execution_pos_divergences.append(exec_div)
+            # Use position divergence from actual EE pose
+            exec_pos_divs = np.linalg.norm(actual_ee_poses[:, :3] - expert_pos, axis=1)
+            execution_pos_divergences.extend(exec_pos_divs.tolist())
             
             # [SOTA Enhancement] Calculate entropy bonus for exploration
             with torch.no_grad():
@@ -906,8 +908,8 @@ class DGPOTrainer:
             
             # 4. Process Batch
             for i in range(self.num_envs):
-                # [ENHANCED v3.0] Dense Reward Calculation
-                # R = Imitation + Progress + Smoothness + Success
+                # [ENHANCED v4.0] Dense Reward from ACTUAL execution
+                # R = Imitation(actual) + Entropy + Smoothness + Success
                 sigma_sq = 0.05
                 imitation_reward = np.exp(-rsd_scores[i] / sigma_sq)
                 
@@ -1139,8 +1141,15 @@ class DGPOTrainer:
                 m_entropy.append(entropy_mean.item())
                 
                 # Total Loss
-                # [SOTA FIX] Use tuned BC coefficient
-                bc_coef = self.cfg.reward.get("bc_coef", 1000.0)
+                # [FIX v4.0] BC Coefficient Annealing
+                # Start high (1000) to ensure initial imitation, decay to low (10) 
+                # over 500 iterations to let PPO signal dominate as policy improves
+                bc_coef_base = self.cfg.reward.get("bc_coef", 1000.0)
+                bc_anneal_iters = self.cfg.training.get("bc_anneal_iters", 500)
+                bc_coef_min = self.cfg.training.get("bc_coef_min", 10.0)
+                bc_anneal = max(bc_coef_min / bc_coef_base, 1.0 - self.iteration / bc_anneal_iters)
+                bc_coef = bc_coef_base * bc_anneal
+                
                 loss = (ppo_loss + entropy_loss + 0.5 * value_loss + 0.1 * phase_loss + 
                         bc_coef * bc_loss_val + kl_penalty + lambda_smooth * smoothness_loss)
                 
@@ -1217,7 +1226,8 @@ class DGPOTrainer:
             "clip_fraction": np.mean(m_clip_frac),
             "adv_mean": adv_mean,
             "lr_policy": self.policy_optimizer.param_groups[0]['lr'],
-            "lr_value": self.value_optimizer.param_groups[0]['lr']
+            "lr_value": self.value_optimizer.param_groups[0]['lr'],
+            "bc_coef_effective": bc_coef  # Track annealed BC coefficient
         }
 
     # ==========================================================================
@@ -1271,7 +1281,7 @@ class DGPOTrainer:
                     f"          SOTA | KL: {update_stats['kl_divergence']:.4f} | "
                     f"β: {update_stats['kl_beta']:.4f} | "
                     f"H: {update_stats['entropy']:.4f} | "
-                    f"ent_α: {self.entropy_coef_adaptive:.4f}"
+                    f"BC_coef: {update_stats.get('bc_coef_effective', 1000.0):.1f}"
                 )
                 
                 # [ENHANCED v3.0] Safety Mechanisms

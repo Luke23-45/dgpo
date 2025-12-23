@@ -1,0 +1,121 @@
+# FILE: configs/train_moe_post_config.yaml
+# Configuration for APEX-MoE Post-Training
+
+seed: 42
+
+# =============================================================================
+# MODEL CONFIGURATION
+# =============================================================================
+# Must match the pre-trained SemanticPlanner configuration exactly.
+model:
+  proprio_dim: 22
+  num_task_phases: 5
+  
+  vision_backbone_model: "google/siglip-base-patch16-224"
+  vision_feature_dim: 768
+  
+  fusion_transformer_layers: 4
+  fusion_transformer_heads: 8
+  dim_feedforward_ratio: 4
+  
+  dropout: 0.1
+  chunk_size: 10
+
+# =============================================================================
+# MoE CONFIGURATION
+# =============================================================================
+moe:
+  num_experts: 5          # One per phase
+  context_dim: 0          # Set > 0 to enable FiLM conditioning
+  expert_dropout: 0.1
+
+# =============================================================================
+# CHECKPOINT
+# =============================================================================
+checkpoint:
+  # Path to the pre-trained SemanticPlanner checkpoint
+  # This will become the frozen Router
+  router_path: "/content/drive/MyDrive/pda/bc/bc_backup_epoch_088.ckpt"
+  backup_dir: "/content/drive/MyDrive/pda/models/moe_post/backups"
+
+# =============================================================================
+# DATASET
+# =============================================================================
+dataset:
+  train_path: "/content/fresh_data/final_training_set/training_set.lmdb"
+  val_path: "/content/drive/MyDrive/pda/data/validation/training_set.lmdb"
+  
+  num_workers: 2
+  use_aug: false
+  proprio_noise: 0.0  # No noise for post-training (experts specialize on clean data)
+
+# =============================================================================
+# TRAINING
+# =============================================================================
+training:
+  batch_size: 64
+  val_batch_size: 64
+  max_epochs: 50
+  
+  output_dir: "/content/drive/MyDrive/pda/models/moe_post"
+  
+  # Loss Configuration
+  pose_scale: 10.0
+  loss_weights:
+    lambda_gripper: 1.0
+  
+  # Regularization
+  gradient_clip_val: 1.0
+  precision: "16-mixed"
+  accumulate_grad_batches: 2
+  
+  # Validation
+  check_val_every_n_epoch: 1
+  
+  # Optional Early Stopping
+  early_stopping: true
+  early_stopping_patience: 10
+  
+  # =================================================================
+  # [SOTA ENHANCEMENTS]
+  # =================================================================
+  
+  # [SOTA #1] EMA Policy (stable evaluation)
+  ema_decay: 0.999
+  
+  # [REMOVED] Temporal Ensemble - could hurt Z-axis precision
+  # ensemble_cache_size: 5
+  
+  # [SOTA #4] Adaptive BC Coefficient
+  bc_coef_initial: 1.0
+  bc_coef_final: 0.1
+  bc_warmup_epochs: 5
+  
+  # [SOTA #6] Cross-Expert Regularization
+  lambda_cross_expert: 0.01
+
+  # [ENHANCEMENT B] Load Balancing Loss
+  # Disabled for Stage 2 (Frozen Router)
+  lambda_load_balance: 0.0
+
+  # [ENHANCEMENT C] Contrastive Specialization
+  # Disabled for Stage 2 to prevent training experts on OOD data
+  lambda_contrastive: 0.0
+
+# =============================================================================
+# OPTIMIZER
+# =============================================================================
+optimizer:
+  lr: 5.0e-5             # Lower LR for fine-tuning (1/2 of Stage 1)
+  weight_decay: 1.0e-4
+  warmup_percentage: 0.05
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+logging:
+  use_wandb: true
+  wandb_project: "APEX-MoE"
+  wandb_mode: "offline"
+  run_name: "moe_post_v1"
+  metric_log_dir: "/content/drive/MyDrive/pda/logs/moe_post"

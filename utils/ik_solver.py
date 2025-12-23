@@ -24,7 +24,7 @@ class IKSolver:
     """
 
     def __init__(self, urdf_path: str, expect_7_dof: bool = True, kp=40.0, ki=1.0, kd=4.0,
-                 lookahead_steps=2, ref_dist_pos=0.01, ref_dist_rot=0.1, max_boost=10.0):
+                 lookahead_steps=2, ref_dist_pos=0.02, ref_dist_rot=0.1, max_boost=4.0):
         logger.info(f"⏳ [IKSolver] Loading kinematic chain from: {urdf_path}")
         try:
             # Load full chain starting from "link0"
@@ -547,12 +547,15 @@ class IKSolver:
         # P-Term (Adaptive + FF)
         p_term = adaptive_kp * error_6d + ff_vel
 
-        # D-Term (Fixed base, Filtered)
+        # D-Term (Adaptive Damping)
+        # [SOTA FIX] Square Root Law: To maintain constant damping ratio, Kd must scale with sqrt(Kp_boost)
+        adaptive_kd = np.array([self.kd * np.sqrt(pos_boost)] * 3 + [self.kd * np.sqrt(rot_boost)] * 3)
+        
         error_deriv = (error_6d - self._prev_error) / effective_dt
         tau_d = 0.01  # Filter constant (tuned for stability)
         alpha = effective_dt / (tau_d + effective_dt)
         filtered_deriv = (1 - alpha) * self._d_filter_state + alpha * error_deriv
-        d_term = self.kd * filtered_deriv
+        d_term = adaptive_kd * filtered_deriv
 
         # I-Term (Clipped Anti-Windup)
         integrator = self._integral_error.copy()

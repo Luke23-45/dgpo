@@ -39,6 +39,9 @@ import argparse
 import csv
 import logging
 import os
+# FORCE EGL BACKEND FOR HEADLESS CO-LAB / LINUX RENDERING
+# os.environ["MUJOCO_GL"] = "egl"
+
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -370,6 +373,9 @@ class HybridEvaluator:
         log.info(f"  Handoff will occur at phase {self.handoff_phase} ({PHASE_NAMES[self.handoff_phase]})")
         
         for step in range(self.cfg.max_steps):
+            if step % 50 == 0:
+                print(f"DEBUG: Episode {episode_id} | Step {step}/{self.cfg.max_steps} | Phase {self._get_expert_phase()}")
+
             curr_img = obs['image_primary']
             proprio = obs['proprio']
             
@@ -387,84 +393,119 @@ class HybridEvaluator:
                 log.info(f"  [HANDOFF] Step {step}: Expert -> Model (Phase {current_phase}: {PHASE_NAMES[current_phase]})")
                 log.info(f"  [HANDOFF] Switched to Model PID: Kp={self.model_kp}, Ki={self.model_ki}, Kd={self.model_kd}")
             
-            # Initialize control variables
-            delta_pose = np.zeros(7)
-            gripper_cmd = 1.0
-            target_pose = None
-            control_error = np.zeros(3)
-            
-            if controller == "EXPERT":
-                # === EXPERT CONTROL ===
-                target_pose_7d, gripper_cmd, expert_info = self.expert.get_target_pose(obs)
-                target_pose = target_pose_7d
+            try:
+                # Initialize control variables
+                delta_pose = np.zeros(7)
+                gripper_cmd = 1.0
+                target_pose = None
+                control_error = np.zeros(3)
                 
-                # Convert target pose to delta action via IK
-                try:
-                    delta_joints = self.ik_solver.compute_delta_action(
-                        target_ee_pose=target_pose_7d,
-                        model=self.env.model,
-                        data=self.env.data,
-                        ee_site_id=self.env.ee_site_id,
-                        joint_qpos_indices=np.arange(7),
-                        effective_dt=self.effective_dt,
-                        max_dq=self.env.ACTION_SCALING_FACTOR / self.effective_dt
-                    )
-                except Exception as e:
-                    log.warning(f"Expert IK failed at step {step}: {e}")
-                    delta_joints = np.zeros(7)
+                if controller == "EXPERT":
+                    # === EXPERT CONTROL ===
+                    target_pose_7d, gripper_cmd, expert_info = self.expert.get_target_pose(obs)
+                    target_pose = target_pose_7d
+                    
+                    # Convert target pose to delta action via IK
+                    try:
+                        delta_joints = self.ik_solver.compute_delta_action(
+                            target_ee_pose=target_pose_7d,
+                            model=self.env.model,
+                            data=self.env.data,
+                            ee_site_id=self.env.ee_site_id,
+                            joint_qpos_indices=np.arange(7),
+                            effective_dt=self.effective_dt,
+                            max_dq=self.env.ACTION_SCALING_FACTOR / self.effective_dt
+                        )
+                    except Exception as e:
+                        log.warning(f"Expert IK failed at step {step}: {e}")
+                        delta_joints = np.zeros(7)
+                    
+                    # Compute control error
+                    current_ee_pose = obs['ee_pose_world']
+                    control_error = target_pose_7d[:3] - current_ee_pose[:3]
+                    delta_pose[:3] = target_pose_7d[:3] - current_ee_pose[:3]
+                    
+                else:
+                    # === MODEL CONTROL ===
+                    batch = self._prepare_batch(prev_img, curr_img, goal_img, proprio)
+                    
+                    with torch.no_grad():
+                        sampled_actions = self.model.sample(
+                            batch,
+                            num_steps=self.cfg.sampling.inference_steps,
+                            guidance_scale=self.cfg.sampling.guidance_scale
+                        )
+                    
+                    delta_action = sampled_actions[0, 0].cpu().numpy()
+                    delta_pose = delta_action[:7]
+                    
+                    # Apply action scaling
+                    action_scale = getattr(self.cfg, 'action_scale', 1.0)
+                    delta_pose[:3] = delta_pose[:3] * action_scale
+                    
+                    gripper_cmd = float(np.clip(delta_action[7], -1.0, 1.0))
+                    
+                    # MOD: Safety Clip - Limit model-predicted delta to 5cm per step to prevent instability
+                    max_model_delta = 0.05 
+                    model_delta_clipped = np.clip(delta_pose[:3], -max_model_delta, max_model_delta)
+                    
+                    # Convert delta pose to absolute target
+                    current_ee_pose = obs['ee_pose_world']
+                    # Apply clipped translation
+                    target_pose = current_ee_pose.copy()
+                    target_pose[:3] += model_delta_clipped
+                    # Use unclipped rotation (or apply safety logic if needed, but translation is the primary source of 'explosions')
+                    target_pose[3:] = apply_delta_pose(current_ee_pose, delta_pose)[3:]
+                    
+                    # Convert to joint deltas via IK
+                    if getattr(self.cfg, "teleport", False):
+                         # --- TELEPORT MODE (DIAGNOSTIC) ---
+                         # Bypasses velocity control dynamics. Directly solves static IK and sets state.
+                         q_sol = self.ik_solver.solve_ik_static(
+                             target_pose=target_pose,
+                             model=self.env.model,
+                             data=self.env.data,
+                             ee_site_id=self.env.ee_site_id,
+                             q0=self.env.data.qpos[:7]
+                         )
+                         if q_sol is not None:
+                             # DIRECT STATE SET
+                             self.env.data.qpos[:7] = q_sol
+                             self.env.data.qvel[:7] = 0.0 # Stop momentum
+                             delta_joints = np.zeros(7) # No action needed for step, we moved already
+                         else:
+                             log.warning(f"Teleport IK failed at step {step}")
+                             delta_joints = np.zeros(7)
+                    else:
+                        # --- DYNAMIC CONTROL MODE (STANDARD) ---
+                        try:
+                            delta_joints = self.ik_solver.compute_delta_action(
+                                target_ee_pose=target_pose,
+                                model=self.env.model,
+                                data=self.env.data,
+                                ee_site_id=self.env.ee_site_id,
+                                joint_qpos_indices=np.arange(7),
+                                effective_dt=self.effective_dt,
+                                max_dq=self.env.ACTION_SCALING_FACTOR / self.effective_dt
+                            )
+                        except Exception as e:
+                            log.warning(f"Model IK failed at step {step}: {e}")
+                            delta_joints = np.zeros(7)
+                    
+                    # Compute control error
+                    control_error = target_pose[:3] - current_ee_pose[:3]
                 
-                # Compute control error
-                current_ee_pose = obs['ee_pose_world']
-                control_error = target_pose_7d[:3] - current_ee_pose[:3]
-                delta_pose[:3] = target_pose_7d[:3] - current_ee_pose[:3]
-                
-            else:
-                # === MODEL CONTROL ===
-                batch = self._prepare_batch(prev_img, curr_img, goal_img, proprio)
-                
-                with torch.no_grad():
-                    sampled_actions = self.model.sample(
-                        batch,
-                        num_steps=self.cfg.sampling.inference_steps,
-                        guidance_scale=self.cfg.sampling.guidance_scale
-                    )
-                
-                delta_action = sampled_actions[0, 0].cpu().numpy()
-                delta_pose = delta_action[:7]
-                
-                # Apply action scaling
-                action_scale = getattr(self.cfg, 'action_scale', 1.0)
-                delta_pose[:3] = delta_pose[:3] * action_scale
-                
-                gripper_cmd = float(np.clip(delta_action[7], -1.0, 1.0))
-                
-                # Convert delta pose to absolute target
-                current_ee_pose = obs['ee_pose_world']
-                target_pose = apply_delta_pose(current_ee_pose, delta_pose)
-                
-                # Convert to joint deltas via IK
-                try:
-                    delta_joints = self.ik_solver.compute_delta_action(
-                        target_ee_pose=target_pose,
-                        model=self.env.model,
-                        data=self.env.data,
-                        ee_site_id=self.env.ee_site_id,
-                        joint_qpos_indices=np.arange(7),
-                        effective_dt=self.effective_dt,
-                        max_dq=self.env.ACTION_SCALING_FACTOR / self.effective_dt
-                    )
-                except Exception as e:
-                    log.warning(f"Model IK failed at step {step}: {e}")
-                    delta_joints = np.zeros(7)
-                
-                # Compute control error
-                control_error = target_pose[:3] - current_ee_pose[:3]
-            
-            # Step environment
-            action = np.concatenate([delta_joints, [gripper_cmd]])
-            obs, reward, terminated, truncated, info = self.env.step(action)
-            obs = self.env.get_expert_obs()
-            total_reward += reward
+                # Step environment
+                action = np.concatenate([delta_joints, [gripper_cmd]])
+                obs, reward, terminated, truncated, info = self.env.step(action)
+                obs = self.env.get_expert_obs()
+                total_reward += reward
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                log.error(f"CRITICAL ERROR at Step {step}: {e}")
+                break
             
             # Compute metrics
             ee_pos = obs['ee_pose_world'][:3]
@@ -687,10 +728,12 @@ def main():
     parser.add_argument("--max_steps", type=int, default=800)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=str, default="outputs/hybrid_eval")
-    parser.add_argument("--ik_kp", type=float, default=500.0)
+    parser.add_argument("--ik_kp", type=float, default=100.0)
     parser.add_argument("--ik_ki", type=float, default=0.5)
-    parser.add_argument("--ik_kd", type=float, default=15.0)
-    parser.add_argument("--action_scale", type=float, default=50.0)
+    parser.add_argument("--ik_kd", type=float, default=15.0, help="IK D Gain")
+    parser.add_argument("--action_scale", type=float, default=0.05, help="Policy action scale (Default: 5cm)")
+    parser.add_argument("--teleport", action="store_true", help="DIAGNOSTIC: Teleport robot to model target (bypassing dynamics)")
+    
     args = parser.parse_args()
     
     # Load or create config
@@ -722,6 +765,7 @@ def main():
     cfg.ik_ki = args.ik_ki
     cfg.ik_kd = args.ik_kd
     cfg.action_scale = args.action_scale
+    cfg.teleport = args.teleport  # NEW: Pass teleport flag
     
     # Run evaluation
     evaluator = HybridEvaluator(cfg, handoff_phase=args.handoff_phase)

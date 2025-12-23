@@ -64,3 +64,5 @@ octo/
 # --- Colab Specific ---
 # The default sample data folder in Google Colab
 sample_data/
+
+icu_research/

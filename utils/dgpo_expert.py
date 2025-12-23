@@ -38,25 +38,27 @@ class ObjectProfile:
 class DGPOExpertConfig:
     """Configuration for the scripted expert policy. [DELTA-COMPATIBLE VERSION]"""
     # --- Time-based durations for delta control stability ---
-    move_to_pre_grasp_duration: int = 200
-    prepare_gripper_duration: int = 30
-    descend_to_grasp_duration: int = 50
-    lift_duration_steps: int = 40
-    move_to_goal_duration: int = 180
-    prepare_place_duration: int = 60
-    descend_to_place_duration: int = 50
+    # [TUNED] Increased durations to accommodate "Analytical Smooth" IK lag
+    move_to_pre_grasp_duration: int = 250  # Was 200
+    prepare_gripper_duration: int = 40     # Was 30
+    descend_to_grasp_duration: int = 60    # Was 50
+    lift_duration_steps: int = 60          # Was 40
+    move_to_goal_duration: int = 250       # Was 180
+    prepare_place_duration: int = 80       # Was 60 (Settling time)
+    descend_to_place_duration: int = 60    # Was 50
     retract_duration_steps: int = 60
-    cruise_velocity: float = 0.4  # meters per second
-    accel_decel_buffer_steps: int = 30 # Steps reserved for smooth start/end
+    cruise_velocity: float = 0.3           # Reduced from 0.4 for stability
+    accel_decel_buffer_steps: int = 40     # Increased buffer
+    
     # --- Original physical parameters ---
     hover_height: float = 0.10
     grasp_offset_z: float = 0.025
-    failure_timeout_steps: int = 250 # Increased global timeout per state
-    pos_tolerance: float = 0.025 # Still used for final checks
+    failure_timeout_steps: int = 400       # Increased per-state timeout
+    pos_tolerance: float = 0.05            # [RELAXED] from 0.025 (2.5cm) to 0.05 (5cm) match IK benchmark lag
     
     workspace: dict = None
     descent_xy_offset: np.ndarray = field(default_factory=lambda: np.array([0.00, 0.0, 0.0]))  
-    max_grasp_retries: int = 2
+    max_grasp_retries: int = 3             # Increased from 2
     verify_lift_height: float = 0.03 
     gripper_open_threshold: float = 0.038
     gripper_closed_threshold: float = 0.002
@@ -777,8 +779,8 @@ class DGPOExpert:
             if self._wait_counter == 1:
                 # 1. Define the static PATH for the descent.
                 self._path_start_pos = ee_pos.copy()
-                tcp_placement_z = self.table_surface_z + self.object.size[2]
-                self._path_end_pos = np.array([goal_pos_world[0], goal_pos_world[1], tcp_placement_z])
+                self._tcp_placement_z = self.table_surface_z + self.object.size[2]
+                self._path_end_pos = np.array([goal_pos_world[0], goal_pos_world[1], self._tcp_placement_z])
                 self._path_vector = self._path_end_pos - self._path_start_pos
                 self._path_length = np.linalg.norm(self._path_vector)
 
@@ -812,15 +814,14 @@ class DGPOExpert:
             object_vertical_velocity = expert_obs.get("object_vel", [0]*6)[2]
 
             # Condition 1 (Primary): Has the object made contact and is it supported?
-            contact_made_and_stable = self._wait_counter > 5 and abs(object_vertical_velocity) < 0.025
-            # print(f"object_vertical_velocity in decent to place- {object_vertical_velocity}")
-
+            # [FIX] Added geometric check: Don't trigger contact if we are still > 1cm above target.
+            # This prevents false positives due to "Smooth IK" moving slowly.
+            is_near_table = ee_pos[2] < (self._tcp_placement_z + 0.01)
+            contact_made_and_stable = self._wait_counter > 5 and abs(object_vertical_velocity) < 0.025 and is_near_table
+            
             # Condition 2 (Safety Net): Has a generous timeout elapsed?
             is_timed_out = self._wait_counter > (self.cfg.descend_to_place_duration + 40) # Use a generous fixed timeout
 
-            # if contact_made_and_stable:
-            #     print("contact_made_and_stable in decend")
-            
             # Transition if contact is confirmed OR if we time out.
             if contact_made_and_stable or is_timed_out:
                 if is_timed_out and not contact_made_and_stable:
@@ -869,8 +870,8 @@ class DGPOExpert:
                 self._object_stable_counter = 0
 
             is_confirmed_stable = self._object_stable_counter > 2
-            is_timed_out = self._wait_counter > 25
-
+            is_timed_out = self._wait_counter > 100  # [TUNED] Increased from 25 to allow settling
+            
             # THE SECOND KEY CHANGE: Timeout is now a FAILURE condition.
             if is_confirmed_stable:
                 # SUCCESS: The object is verifiably stable. Proceed to release.

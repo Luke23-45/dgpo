@@ -42,12 +42,41 @@ from torchvision import transforms
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
+from train.train_dgpo_robust import TemporalEnsemble
 from envs.panda_env import PandaEnv
 from models.semantic_planner import SemanticPlanner, SemanticPlannerConfig
 from train.train_semantic_planner import SemanticPlannerLightningModule
 from utils.ik_solver import IKSolver
 from utils.scripted_expert import ScriptedExpert, ObjectProfile
+
+# ==============================================================================
+# 0. DYNAMIC STIFFNESS CONFIGURATION
+# ==============================================================================
+
+# Map predicted phase to base stiffness (P-gain proxy)
+# Phases: 
+# 0: APPROACH -> High Stiffness (Precision Transport)
+# 1: GRASP    -> Low Stiffness  (Compliance for Contact)
+# 2: LIFT     -> ULTRA Stiffness (Overdrive for Max Kp/Speed)
+# 3: PLACE    -> Low Stiffness  (Gentle Release)
+# 4: RETRACT  -> High Stiffness (Safe Retreat)
+PHASE_STIFFNESS_MAP = {
+    0: 1.0,   # Direct Tracking
+    1: 0.3,   # Compliance
+    2: 2.5,   # OVERDRIVE (250% Gain - effectively Kp~=something huge)
+    3: 0.2,   # Soft Release
+    4: 1.2    # Aggressive Retract
+}
+
+# Base IK Tolerances per phase (meters)
+# We want TIGHT tolerance for Transport, but LOOSE for Grasp to avoid fighting physics
+PHASE_TOLERANCE_MAP = {
+    0: 0.001, # 1mm
+    1: 0.005, # 5mm (Allow some slop for grasping)
+    2: 0.001, # 1mm
+    3: 0.005, # 5mm
+    4: 0.002
+}
 
 # Logging
 logging.basicConfig(
@@ -239,7 +268,14 @@ class DGPOEvaluator:
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
         
-        # 6. Output directory
+        # 6. Initialize Temporal Ensemble (Matching Training)
+        self.temporal_ensemble = TemporalEnsemble(
+            cache_size=5,
+            chunk_size=10,
+            action_dim=7
+        )
+        
+        # 7. Output directory
         self.output_dir = Path(args.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -319,31 +355,76 @@ class DGPOEvaluator:
         
         log.info(f"=== Episode {episode_id} (seed={seed}) ===")
         
+        # Reset Temporal Ensemble at start of episode
+        self.temporal_ensemble.reset()
+        
         for step in range(self.args.max_steps):
             curr_img = obs['image_primary']
             proprio = obs['proprio']
             
-            # 1. Policy inference
+            # 1. Run Policy Inference
             batch = self._prepare_batch(prev_img, curr_img, goal_img, proprio)
             with torch.no_grad():
                 policy_out = self.policy(batch)
             
-            # Extract first step of chunk
-            policy_pose = policy_out['pose_chunk'][0, 0].cpu().numpy()
+            # Extract chunk and update Temporal Ensemble
+            pose_chunk_np = policy_out['pose_chunk'][0].cpu().numpy() # (K, 7)
+            self.temporal_ensemble.add(pose_chunk_np)
+            
+            # --- PHASE-AWARE DYNAMIC STIFFNESS CONTROLLER ---
+            
+            # 1. Get Predicted Phase
+            phase_logits = policy_out['phase_logits'][0].cpu().numpy()
+            predicted_phase = np.argmax(phase_logits)
+            
+            # 2. Get Base Stiffness/Tolerance from Phase Map
+            base_alpha = PHASE_STIFFNESS_MAP.get(predicted_phase, 0.5)
+            ik_tolerance = PHASE_TOLERANCE_MAP.get(predicted_phase, 0.005)
+            
+            # 3. Calculate Velocity Boost (Feedforward)
+            # Check how fast the policy wants to move in the next 0.5s (chunk average)
+            # Velocity = Distance / Time. We just use Distance as proxy.
+            chunk_motion = np.linalg.norm(pose_chunk_np[-1, :3] - pose_chunk_np[0, :3])
+            # If motion > 5cm in 10 steps, boost alpha
+            if chunk_motion > 0.05:
+                # Linearly boost alpha UNBOUNDED (User Requirement: No Limits)
+                boost_factor = (chunk_motion - 0.05) * 20.0 
+                dynamic_alpha = base_alpha + boost_factor
+            else:
+                dynamic_alpha = base_alpha
+            
+            # 4. Get Smoothed Target Pose
+            policy_pose = self.temporal_ensemble.get_smoothed_action()
+            
+            # Gripper control
             policy_grip_logit = policy_out['gripper_chunk'][0, 0].cpu().numpy()[0]
             gripper_cmd = -1.0 if policy_grip_logit > 0 else 1.0
             
-            # 2. Compute action via IK
+            # 5. Compute Action via IK with DYNAMIC parameters
             try:
-                delta_joints = self.ik_solver.compute_delta_action(
-                    target_ee_pose=policy_pose,
-                    model=self.env.model,
-                    data=self.env.data,
-                    ee_site_id=self.env.ee_site_id,
-                    joint_qpos_indices=np.arange(7),
-                    effective_dt=self.effective_dt,
-                    max_dq=self.max_dq
+                # 1. Get current joint state
+                current_qpos = self.env.data.qpos[:7].copy()
+
+                # 2. Global Analytical Solution (Dynamic Tolerance)
+                target_joint_angles = self.ik_solver.compute_target_joint_positions(
+                    target_pose_7d=policy_pose,
+                    current_joint_angles=current_qpos,
+                    solution_position_tolerance=ik_tolerance
                 )
+
+                # 3. Compute Delta with Dynamic Stiffness (Alpha)
+                scaling_factor = self.env.ACTION_SCALING_FACTOR
+                delta_rads = (target_joint_angles - current_qpos) * dynamic_alpha
+
+                # 4. Normalize to Action Space [-1, 1]
+                delta_joints = np.clip(delta_rads / (scaling_factor + 1e-9), -1.0, 1.0)
+                
+                # Debug Logging (Once per second approx)
+                if step % 25 == 0:
+                    ee_pos = obs['ee_pose_world'][:3]
+                    dist_to_target = np.linalg.norm(ee_pos - policy_pose[:3])
+                    log.info(f"Phase: {predicted_phase} | Alpha: {dynamic_alpha:.2f} | Lag: {dist_to_target*100:.1f}cm")
+
             except Exception as e:
                 log.warning(f"IK failed at step {step}: {e}")
                 delta_joints = np.zeros(7)
@@ -487,10 +568,10 @@ class DGPOEvaluator:
         # Try H.264 codec first (best compatibility), fallback to XVID if not available
         # H.264 works better with most players (VLC, web browsers, etc.)
         codecs_to_try = [
-            ('avc1', '.mp4'),      # H.264 (best for web/Colab)
+            ('mp4v', '.mp4'),      # MPEG-4 (Most compatible on Windows/Linux default OpenCV)
+            ('avc1', '.mp4'),      # H.264 (Better compression if available)
             ('H264', '.mp4'),      # H.264 alternative
             ('XVID', '.avi'),      # XVID (widely supported)
-            ('mp4v', '.mp4'),      # MPEG-4 (fallback)
         ]
         
         video_writer = None
