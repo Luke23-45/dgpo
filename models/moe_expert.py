@@ -382,6 +382,12 @@ class PhaseExpert(nn.Module):
         expert.traj_head = copy.deepcopy(traj_head)
         expert.gripper_head = copy.deepcopy(gripper_head)
         
+        # [FIX vFinal] Force-Unfreeze Bootstrapped Weights
+        # Since the Router is already frozen by this point, we MUST explicitly
+        # enable gradients for the new experts.
+        expert.traj_head.requires_grad_(True)
+        expert.gripper_head.requires_grad_(True)
+        
         # [FIX v2.1] Auto-detect chunk_size from output dimensions
         # Last layer of traj_head is Linear(dim, chunk_size * 7)
         last_traj_layer = list(expert.traj_head.modules())[-1]
@@ -473,9 +479,12 @@ class ExpertArray(nn.Module):
         K = self.experts[0].chunk_size
         device = z_traj.device
         
-        # Initialize output tensors
-        pose_chunks = torch.zeros(B, K, 7, device=device, dtype=z_traj.dtype)
-        grip_chunks = torch.zeros(B, K, 1, device=device, dtype=z_traj.dtype)
+        # [FIX vFinal] Dynamic Dtype Matching for Mixed Precision (AMP)
+        # Instead of z_traj.dtype (which might be float32 from the Router),
+        # we initialize buffers with None and let them inherit the dtype 
+        # produced by the Experts (which might be float16 in AMP).
+        pose_chunks = None
+        grip_chunks = None
         
         # Route to each expert
         for phase_id in range(self.num_phases):
@@ -492,10 +501,20 @@ class ExpertArray(nn.Module):
             # Forward through expert
             pose, grip = self.experts[phase_id](z_t, z_g, ctx)
             
+            # [FIX vFinal] Initialize buffers on first successful expert call
+            if pose_chunks is None:
+                pose_chunks = torch.zeros(B, K, 7, device=pose.device, dtype=pose.dtype)
+                grip_chunks = torch.zeros(B, K, 1, device=grip.device, dtype=grip.dtype)
+            
             # Scatter results back to output tensors
             pose_chunks[mask] = pose
             grip_chunks[mask] = grip
         
+        # Fallback if no experts were active for this batch
+        if pose_chunks is None:
+            pose_chunks = torch.zeros(B, K, 7, device=device, dtype=z_traj.dtype)
+            grip_chunks = torch.zeros(B, K, 1, device=device, dtype=z_traj.dtype)
+
         return pose_chunks, grip_chunks
     
     def forward_single_expert(
@@ -557,14 +576,17 @@ class ExpertArray(nn.Module):
         device = z_traj.device
         dtype = z_traj.dtype
         
-        # Initialize accumulators
-        pose_chunks = torch.zeros(B, K, 7, device=device, dtype=dtype)
-        grip_chunks = torch.zeros(B, K, 1, device=device, dtype=dtype)
-        
+        # [FIX vFinal] Dynamic Dtype Matching for AMP
+        pose_chunks = None
+        grip_chunks = None
         # Weighted sum over all experts
         for phase_id in range(self.num_phases):
             # Get expert output for ALL samples
             pose, grip = self.experts[phase_id](z_traj, z_grip, context)  # (B, K, 7), (B, K, 1)
+            
+            if pose_chunks is None:
+                pose_chunks = torch.zeros(B, K, 7, device=pose.device, dtype=pose.dtype)
+                grip_chunks = torch.zeros(B, K, 1, device=grip.device, dtype=grip.dtype)
             
             # Get probability weight for this expert: (B,) -> (B, 1, 1) for broadcasting
             prob_weight = router_probs[:, phase_id].view(B, 1, 1)

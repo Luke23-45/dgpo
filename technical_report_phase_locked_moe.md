@@ -1,3 +1,12 @@
+
+System RAM
+11.3 / 12.7 GB
+ 
+GPU RAM
+5.3 / 15.0 GB
+ 
+Disk
+46.5 / 112.6 GB
 # Technical Proposal: Bootstrapped Phase-Locked Mixture-of-Experts (APEX-MoE)
 
 **To:** Research Supervisor

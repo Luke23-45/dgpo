@@ -28,12 +28,15 @@ Reference: technical_report_phase_locked_moe.md
 from __future__ import annotations
 
 import copy
+import gc
+import random
 import logging
 import math
 import os
 import sys
 from collections import deque
 from datetime import datetime
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -66,6 +69,12 @@ from utils.semantic_planner_dataset import (
     SemanticPlannerDataset,
     semantic_planner_collate_fn,
 )
+from utils.samplers import EpisodeAwareSampler
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 # --- Logging Setup ---
 logger = logging.getLogger("train_moe_post")
@@ -179,12 +188,16 @@ class MoEDataModule(pl.LightningDataModule):
         # [FIX v4.0] Reduce sample size to avoid 15min startup hang
         # 10k is overkill; 1000 is sufficient for a rough distribution estimate
         # [FIX v5.0] Efficient Sampling (Directly sample 200)
-        sample_size = min(200, len(self.train_dataset))
+        # [FIX v5.1] Robust Sampling for Rare Phases (e.g., Grasp ~3%)
+        # 200 samples is too small; we might miss the rare phase entirely or get noisy weights.
+        # Increased to 2000 to ensure statistical significance for <5% classes.
+        sample_size = min(2000, len(self.train_dataset))
         indices = np.random.choice(len(self.train_dataset), sample_size, replace=False)
         
         if sample_size > 0:
             logger.info(f"Sampling {sample_size} items to estimate phase distribution...")
             
+            dim_check_counter = 0
             for idx in indices:
                 # Warning: Accessing self.train_dataset[idx] triggers image loading!
                 # We only need the phase label. Ideally, we'd read metadata directly from LMDB/HDF5.
@@ -193,6 +206,12 @@ class MoEDataModule(pl.LightningDataModule):
                 if sample is not None:
                     phase = sample['gt_phase_label'].item()
                     phase_counts[phase] += 1
+                
+                # [FIX v5.2] Periodic Cache Clearing (Every 100 samples)
+                # Prevents RAM explosion if lru_cache is unbounded or large
+                if dim_check_counter % 100 == 0 and hasattr(self.train_dataset, 'expert_reader'):
+                     self.train_dataset.expert_reader._get_full_modality_array.cache_clear()
+                dim_check_counter += 1
         
         total_samples = sum(phase_counts.values())
         
@@ -202,15 +221,27 @@ class MoEDataModule(pl.LightningDataModule):
             phase_name = ExpertArray.PHASE_NAMES.get(phase_id, f"Phase_{phase_id}")
             logger.info(f"  {phase_name}: {count} samples ({100*count/sample_size:.1f}%)")
 
+        if self.train_dataset and hasattr(self.train_dataset, 'expert_reader'):
+            self.train_dataset.expert_reader.close_env()
+            self.train_dataset.expert_reader._get_full_modality_array.cache_clear()
+            logger.info("[MoEDataModule] Main process resources released (RAM + LMDB) for worker spawning.")
+
     def train_dataloader(self) -> DataLoader:
+        sampler = EpisodeAwareSampler(
+            self.train_dataset, 
+            shuffle=True, 
+            seed=self.cfg.training.get("seed", 42)
+        )
         return DataLoader(
             self.train_dataset,
             batch_size=self.cfg.training.batch_size,
-            shuffle=True,
+            shuffle=False,  # MUST be False with sampler
+            sampler=sampler,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
             collate_fn=semantic_planner_collate_fn,
+            worker_init_fn=seed_worker,
             drop_last=True
         )
 
@@ -224,7 +255,8 @@ class MoEDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
-            collate_fn=semantic_planner_collate_fn
+            collate_fn=semantic_planner_collate_fn,
+            worker_init_fn=seed_worker
         )
 
 
@@ -476,7 +508,7 @@ class APEXMoELightningModule(pl.LightningModule):
         This uses the outputs of ALL experts on a small subset of the batch.
         """
         if getattr(self.cfg.training, "lambda_contrastive", 0) <= 0:
-            return torch.tensor(0.0, device=z_traj.device)
+            return torch.tensor(0.0, device=z_traj.device, dtype=z_traj.dtype)
             
         # Sample for efficiency
         B_full = z_traj.shape[0]
@@ -540,8 +572,8 @@ class APEXMoELightningModule(pl.LightningModule):
         
         # Sample a subset for efficiency
         B = z_traj.shape[0]
-        if B > 16:
-            idx = torch.randperm(B)[:16]
+        if B > 64:
+            idx = torch.randperm(B)[:64]
             z_sample = z_traj[idx]
         else:
             z_sample = z_traj
@@ -640,9 +672,9 @@ class APEXMoELightningModule(pl.LightningModule):
         
         # --- 10. Logging ---
         self.log("train/loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/loss_pose_weighted", weighted_pose_loss, on_step=True, on_epoch=True)
-        self.log("train/loss_grip", grip_loss, on_step=True, on_epoch=True)
-        self.log("train/loss_cross_expert", cross_expert_loss, on_step=True, on_epoch=True)
+        self.log("train/pose", weighted_pose_loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/grip", grip_loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/reg", cross_expert_loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log("train/loss_contrastive", contrastive_loss, on_step=True, on_epoch=True)
         self.log("train/bc_coef", bc_coef, on_step=False, on_epoch=True)
         
@@ -652,6 +684,10 @@ class APEXMoELightningModule(pl.LightningModule):
             self.log("train/router_phase_acc", phase_acc, on_step=False, on_epoch=True, prog_bar=True)
         
         return total_loss
+
+    def on_train_batch_end(self, outputs: Any, batch: Any, batch_idx: int):
+        """[SOTA #1] Update EMA experts after each optimization step."""
+        self._update_ema()
 
     def on_train_epoch_end(self):
         """Log per-expert statistics at end of epoch."""
@@ -669,43 +705,62 @@ class APEXMoELightningModule(pl.LightningModule):
             self.expert_losses[phase_id] = []
         
         # Log stats for this epoch
+        # [BACKUP LOGIC] Save Backup Checkpoint (Robustness)
+        # This saves independent of PyTorch Lightning's checkpointer
+        # Process every epoch including Epoch 0
+        # [Patch 5] Universal Memory-Optimized Checkpointing
+        # 1. Compact State Dict (remove router/ema strings)
+        state_dict = self.state_dict()
+        compact_state_dict = {k: v for k, v in state_dict.items() if not k.startswith("router.") and not k.startswith("ema_experts.")}
+        
+        # 2. Aggressive GC before serialization (Critical for RAM)
+        del state_dict
+        gc.collect()
+        
+        checkpoint = {
+            'epoch': self.current_epoch,
+            'state_dict': compact_state_dict,
+            'optimizer_state': self.optimizers().state_dict(),
+            'config': self.cfg
+        }
+        
+        # 3. Single Serialization (The only heavy RAM operation)
+        # [ROBUSTNESS] Use run_name to prevent overwrites across experiments
+        latest_path = os.path.join(self.checkpoint_dir, f"{self.run_name}_latest.pt")
+        torch.save(checkpoint, latest_path)
+        
+        # 4. Disk-Level Copying (Instant & Low RAM)
+        # [STORAGE OPTIMIZATION] We only keep 'latest' and 'periodic'.
+        
+        # 5. Periodic Backup (Reduced Frequency: Every 5 epochs)
+        if (self.current_epoch + 1) % 5 == 0:
+            # Timestamp is already in run_name, so we just use epoch
+            backup_path = os.path.join(self.checkpoint_dir, f"{self.run_name}_epoch_{self.current_epoch}.pt")
+            shutil.copyfile(latest_path, backup_path)
+            logger.info(f"[Backup] Copied periodic checkpoint: {backup_path}")
+        
+        # 6. Save Best (Tracked manually)
+        current_val_loss = self.trainer.callback_metrics.get("val/loss")
+        if current_val_loss is not None:
+            if current_val_loss < self.best_val_loss:
+                self.best_val_loss = current_val_loss.item() if isinstance(current_val_loss, torch.Tensor) else current_val_loss
+                
+                # Robust Naming
+                best_path = os.path.join(self.checkpoint_dir, f"{self.run_name}_best.pt")
+                best_ep_path = os.path.join(self.checkpoint_dir, f"{self.run_name}_best_ep{self.current_epoch}_val{self.best_val_loss:.4f}.pt")
+                
+                # Copy from latest (since this IS the latest model)
+                shutil.copyfile(latest_path, best_path)
+                shutil.copyfile(latest_path, best_ep_path)
+                logger.info(f"[Backup] New Best Model Copied (Val Loss: {self.best_val_loss:.4f})")
+
         logger.info(f"  Best Val Loss so far: {self.best_val_loss:.4f}")
         logger.info("=" * 40)
         
-        # [BACKUP LOGIC] Save Backup Checkpoint (Robustness)
-        # This saves independent of PyTorch Lightning's checkpointer
-        if self.current_epoch > 0:
-            # [FIX v3.0] Filter out frozen Router to save disk space
-            # Only save trainable parameters (experts) + optimizer + config
-            state_dict = self.state_dict()
-            compact_state_dict = {k: v for k, v in state_dict.items() if not k.startswith("router.") and not k.startswith("ema_experts.")}
-            
-            checkpoint = {
-                'epoch': self.current_epoch,
-                'state_dict': compact_state_dict,
-                'optimizer_state': self.optimizers().state_dict(),
-                'config': self.cfg
-            }
-            
-            # 1. Save Latest
-            latest_path = os.path.join(self.checkpoint_dir, "moe_latest.pt")
-            torch.save(checkpoint, latest_path)
-            
-            # 2. Save Timestamped (every 5 epochs)
-            if (self.current_epoch + 1) % 5 == 0:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_path = os.path.join(self.checkpoint_dir, f"moe_epoch_{self.current_epoch}_{timestamp}.pt")
-                torch.save(checkpoint, backup_path)
-                logger.info(f"[Backup] Saved timestamped checkpoint (compact): {backup_path}")
-            
-            # 3. Save Best (tracked manually for robustness)
-            current_val_loss = self.trainer.callback_metrics.get("val/loss")
-            if current_val_loss is not None:
-                if current_val_loss < self.best_val_loss:
-                    self.best_val_loss = current_val_loss
-                    best_path = os.path.join(self.checkpoint_dir, "moe_best.pt")
-                    torch.save(checkpoint, best_path)
-                    logger.info(f"[Backup] New Best Model Saved (Val Loss: {self.best_val_loss:.4f})")
+        # 7. Final Cleanup
+        del checkpoint
+        del compact_state_dict
+        gc.collect()
         
         # [BACKUP LOGIC] Save Metrics to CSV
         metrics = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in self.trainer.callback_metrics.items()}
@@ -715,6 +770,11 @@ class APEXMoELightningModule(pl.LightningModule):
         df = pd.DataFrame(self.training_metrics_history)
         df.to_csv(self.metric_csv_path, index=False)
         logger.info(f"[Metrics] Saved training logs to {self.metric_csv_path}")
+
+        # [Patch 1] Periodic Memory Cleanup
+        # Free up RAM/VRAM after epoch processing/saving
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         if not batch:
@@ -766,6 +826,11 @@ class APEXMoELightningModule(pl.LightningModule):
             self.log("val/router_phase_acc", phase_acc, on_epoch=True, sync_dist=True)
             self.log("val/gripper_acc", grip_acc, on_epoch=True, sync_dist=True)
 
+    def on_validation_epoch_end(self):
+        """[Patch 1] Periodic Memory Cleanup after Validation Loop."""
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def configure_optimizers(self):
         """SOTA Optimizer Configuration."""
         optimizer_params = []
@@ -786,14 +851,30 @@ class APEXMoELightningModule(pl.LightningModule):
         # Catch any shared parameters inside ExpertArray that are not handled by expert loops
         all_moe_params = set(self.experts.parameters())
         shared_params = list(all_moe_params - expert_params_set)
+        
+        # [FIX vFinal] Strict Parameter Filtering
+        # Only include parameters that actually require gradients.
+        # This prevents AdamW from allocating state for frozen/EMA weights.
+        optimizer_params = [
+            {
+                "params": [p for p in group["params"] if p.requires_grad],
+                "lr": group["lr"],
+                "weight_decay": group["weight_decay"],
+                "name": group["name"]
+            }
+            for group in optimizer_params
+        ]
+        
         if shared_params:
-            logger.info(f"[Optimizer] Adding {len(shared_params)} shared parameters to optimization.")
-            optimizer_params.append({
-                "params": shared_params,
-                "lr": self.cfg.optimizer.lr,
-                "weight_decay": self.cfg.optimizer.weight_decay,
-                "name": "moe_shared"
-            })
+            shared_trainable = [p for p in shared_params if p.requires_grad]
+            if shared_trainable:
+                logger.info(f"[Optimizer] Adding {len(shared_trainable)} shared parameters to optimization.")
+                optimizer_params.append({
+                    "params": shared_trainable,
+                    "lr": self.cfg.optimizer.lr,
+                    "weight_decay": self.cfg.optimizer.weight_decay,
+                    "name": "moe_shared"
+                })
         
         total_params = sum(p.numel() for group in optimizer_params for p in group["params"])
         logger.info(f"[Optimizer] Total trainable parameters: {total_params:,}")
@@ -828,9 +909,28 @@ class APEXMoELightningModule(pl.LightningModule):
 # MAIN ENTRY POINT
 # =============================================================================
 
+# --- Custom Callback for Epoch Restoration ---
+class EpochRestorationCallback(pl.Callback):
+    """Manually restores the current epoch from a custom checkpoint."""
+    def __init__(self, start_epoch: int):
+        self.start_epoch = start_epoch
+
+    def on_fit_start(self, trainer, pl_module):
+        # Force the trainer's loop to start at the correct epoch
+        trainer.fit_loop.epoch_progress.current.completed = self.start_epoch
+        logger.info(f"🔄 [Callback] Manually restored Trainer Epoch to {self.start_epoch}")
+
+
 @hydra.main(version_base=None, config_path="../configs", config_name="train_moe_post_config")
 def main(cfg: DictConfig) -> None:
     """Main Entry Point for APEX-MoE Post-Training (SOTA v2.0)."""
+    # [COLAB FIX] Switch to 'spawn' to prevent deadlock warnings and OOM hangs
+    import torch.multiprocessing as mp
+    try:
+        mp.set_start_method('spawn', force=True)
+        logger.info("[Main] Multiprocessing start method set to 'spawn'")
+    except RuntimeError:
+        logger.warning("[Main] Could not set start method to 'spawn', likely already set.")
     
     pl.seed_everything(cfg.seed, workers=True)
     
@@ -843,8 +943,25 @@ def main(cfg: DictConfig) -> None:
     output_dir = Path(cfg.training.get("output_dir", "./outputs"))
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    loggers = [TensorBoardLogger(save_dir=str(output_dir), name="tb_logs")]
+    # --- 1. Load Data ---
+    datamodule = MoEDataModule(cfg)
     
+    # [FIX] Manually setup datamodule to calculate phase counts BEFORE model init
+    # This prevents the "Silent Failure" where model uses uniform weights
+    datamodule.setup("fit")
+    
+    # --- 2. Build or Load Model ---
+    logger.info("Initializing APEX-MoE Transformer Policy...")
+    
+    # Determine input dimension from dataset (requires a quick peek if not hardcoded)
+    # Ideally, get this from config or dataset metadata. 
+    # For now, we use the known schema dim = 7 (proprio) + 7 (goal_proprio) = 14? 
+    # Actually, SemanticPlannerDataset handles the projection.
+    # We will let the model infer or use config defaults.
+    
+    model = APEXMoELightningModule(cfg, phase_counts=datamodule.phase_counts)
+    
+    loggers = [TensorBoardLogger(save_dir=str(output_dir), name="tb_logs")]
     if cfg.logging.get("use_wandb", False):
         os.environ["WANDB_MODE"] = cfg.logging.get("wandb_mode", "offline")
         wandb_logger = WandbLogger(
@@ -855,21 +972,40 @@ def main(cfg: DictConfig) -> None:
         )
         loggers.append(wandb_logger)
     
-    # --- Data Module ---
-    datamodule = MoEDataModule(cfg)
-    datamodule.setup("fit")
-    
-    # --- Model (pass phase counts for weighted loss) ---
-    model = APEXMoELightningModule(cfg, phase_counts=datamodule.phase_counts)
-    
-    # --- Callbacks ---
+    # Callbacks
     callbacks = [
         # [FIX vFinal] Removed ModelCheckpoint to prevent saving frozen router (disk bloat).
         # We rely on the robust manual checkpointing in on_train_epoch_end.
         LearningRateMonitor(logging_interval='step'),
         TQDMProgressBar(refresh_rate=10),
     ]
+
+    # [RESUME LOGIC] Handle custom dict checkpoint loading
+    resume_epoch = 0
+    resume_optimizer_state = None
     
+    if cfg.training.get("resume_checkpoint"):
+        resume_path = cfg.training.resume_checkpoint
+        if os.path.isfile(resume_path):
+            logger.info(f"🔄 Resuming from custom checkpoint: {resume_path}")
+            checkpoint = torch.load(resume_path, map_location=model.device)
+            
+            # 1. Load Weights
+            # (strict=False because our checklist excludes router/ema, which are not in the checkpoint)
+            missing, unexpected = model.load_state_dict(checkpoint['state_dict'], strict=False)
+            logger.info(f"   Weights loaded. Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+            
+            # 2. Extract State
+            resume_epoch = checkpoint.get('epoch', 0)
+            resume_optimizer_state = checkpoint.get('optimizer_state', None)
+            
+            logger.info(f"   Resuming from Epoch: {resume_epoch}")
+            
+            # 3. Add Callback to Jumpstart Trainer
+            callbacks.append(EpochRestorationCallback(resume_epoch))
+        else:
+            logger.warning(f"⚠️ Resume checkpoint not found at: {resume_path}. Starting from scratch.")
+
     if cfg.training.get("early_stopping", False):
         callbacks.append(
             EarlyStopping(
@@ -895,13 +1031,34 @@ def main(cfg: DictConfig) -> None:
     
     # --- Training ---
     logger.info("Starting Training (SOTA v2.0)...")
+    
+    # --- 6. [FIX vFinal] Final Trainability Check ---
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if trainable_params == 0:
+        logger.error("🛑 CRITICAL FAILURE: Zero trainable parameters detected!")
+        logger.error("The experts are likely frozen. Backing out to prevent crash.")
+        return
+    
+    logger.info(f"🚀 Launching Training with {trainable_params:,} trainable parameters.")
+    
     try:
+        # If we have optimizer state to load, we have to do it carefully.
+        # PL requires the model to be wrapped in strategy before loading optimizers.
+        # However, trainer.fit() handles wrapping.
+        # The only "hack-free" way is to let fit() start, and use a callback to load the state 
+        # OR just accept that optimizer state is reset (Warm Start).
+        
+        # NOTE: Loading optimizer state manually in PL is tricky without ckpt_path.
+        # We will settle for Epoch + Weights (Warm Start with Correct Calendar).
+        # This is safe because Adam re-estimates moments quickly.
+        
         trainer.fit(model, datamodule=datamodule)
         best_path = os.path.join(cfg.training.output_dir, "checkpoints", "moe_best.pt")
         logger.info(f"Training Complete. Best model saved to: {best_path}")
+
     except Exception as e:
-        logger.exception(f"Training failed: {e}")
-        raise
+        logger.error(f"Training failed with error: {e}")
+        raise e
     finally:
         for lg in loggers:
             if isinstance(lg, WandbLogger):

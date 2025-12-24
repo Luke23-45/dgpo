@@ -415,7 +415,7 @@ class ExpertTrajectoryDataset(Dataset):
 
         # Worker-local state (initialized lazily)
         self._lmdb_env = None 
-        
+        self._pid = os.getpid() # Store the PID of the process that created the dataset        
         logger.info(
             f"Loaded {len(self.episode_metadata)} episodes, "
             f"{self.total_chunks} total valid chunks (Virtually Indexed)."
@@ -527,17 +527,50 @@ class ExpertTrajectoryDataset(Dataset):
     def __len__(self):
         return self.total_chunks 
 
+    def close_env(self):
+        """Explicitly closes the LMDB environment (useful for pickling)."""
+        if getattr(self, "_lmdb_env", None) is not None:
+            close_lmdb_env(self._lmdb_env)
+            self._lmdb_env = None
+            logger.debug(f"Process {os.getpid()} explicitly closed LMDB handle.")
+
+    def __getstate__(self):
+        """Prepare for pickling by removing unpicklable handles."""
+        state = self.__dict__.copy()
+        # Environments and bound methods (lru_cache wrappers) are not picklable.
+        state['_lmdb_env'] = None
+        # We don't pickle the cache itself to avoid pickling the method wrapper
+        return state
+
+    def __setstate__(self, state):
+        """Restore state after unpickling."""
+        self.__dict__.update(state)
+        self._lmdb_env = None # Force re-init in worker process
+
     def _init_lmdb(self):
         """Initializes the LMDB environment for the current worker."""
+        # [SOTA FIX] Detect if we have been forked and have an inherited handle
+        current_pid = os.getpid()
+        if self._pid != current_pid:
+            # We are in a child process (worker) and the handle was opened in the parent.
+            # We MUST reset the handle to None so this worker opens its own.
+            # Trying to use the parent's handle would cause a segmentation fault.
+            self._lmdb_env = None
+            self._pid = current_pid
+            # Clear the LRU cache as well, as decoding handles might be stale
+            self._get_full_modality_array.cache_clear()
+            logger.debug(f"Worker {current_pid} detected fork; resetting LMDB handle.")
+
         if self._lmdb_env is None:
             self._lmdb_env = open_lmdb_env(
                 str(self.demo_path),
                 readonly=True,
                 lock=False,      # No locks, we are read-only 
+                map_size_gb=200.0, # [SOTA FIX] Massive virtual address space (doesn't consume RAM)
                 readahead=False, # False = better for random access [cite: 246]
                 subdir=False     # Our DB is a single file
             ) 
-            logger.debug(f"Worker {os.getpid()} opened LMDB env.")
+            logger.debug(f"Process {current_pid} opened LMDB env.")
 
     def __del__(self):
         """Ensures the LMDB environment is closed when a worker is destroyed."""

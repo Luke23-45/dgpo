@@ -42,19 +42,21 @@ checkpoint:
 # DATASET
 # =============================================================================
 dataset:
-  train_path: "/content/fresh_data/final_training_set/training_set.lmdb"
-  val_path: "/content/drive/MyDrive/pda/data/validation/training_set.lmdb"
-  
+  train_path: "/content/pda_data/train/training_set.lmdb"
+  val_path: "/content/pda_data/val/validation_set.lmdb"
+  seed: 42
   num_workers: 2
+  resume_checkpoint: null # "/content/drive/MyDrive/pda/models/moe_post/moe_latest.pt"
   use_aug: false
   proprio_noise: 0.0  # No noise for post-training (experts specialize on clean data)
+  use_gpu_cache: false # [SOTA] Set True to cache entire dataset in VRAM (saves ~5GB RAM)
 
 # =============================================================================
 # TRAINING
 # =============================================================================
 training:
-  batch_size: 64
-  val_batch_size: 64
+  batch_size: 128
+  val_batch_size: 128
   max_epochs: 50
   
   output_dir: "/content/drive/MyDrive/pda/models/moe_post"
