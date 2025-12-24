@@ -146,7 +146,8 @@ def worker_loop_fn_SOTA(worker_id: int, cfg: dict, shard_dir_path_str: str,
             out_dir=str(shard_dir_path),
             run_name=run_name,
             image_compression=cfg.get("image_compression", "jpeg"),
-            jpeg_quality=cfg.get("jpeg_quality", 90)
+            jpeg_quality=cfg.get("jpeg_quality", 90),
+            expected_episodes=episodes_per_worker if episodes_per_worker is not None else (samples_per_worker // 100 + 1)
         )
 
         expert_config_dict = cfg.get("expert_config", {})

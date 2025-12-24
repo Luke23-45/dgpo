@@ -174,14 +174,30 @@ class ExpertDatasetWriter:
                     self._write_raw_numpy(txn, ep_meta, prefix, "proprio", np.stack([o["proprio"] for o in ep_dict["obs_list"]]).astype(np.float32))
                     self._write_compressed_images(txn, ep_meta, prefix, "image_primary", [o["image_primary"] for o in ep_dict["obs_list"]])
                     self._write_compressed_images(txn, ep_meta, prefix, "image_wrist", [o["image_wrist"] for o in ep_dict["obs_list"]])
+                    
+                    if "goal_image_primary" in ep_dict and ep_dict["goal_image_primary"] is not None:
+                        goal_img_list = [ep_dict["goal_image_primary"]]
+                        self._write_compressed_images(txn, ep_meta, prefix, "goal_image_primary", goal_img_list)
 
-                    ee_poses_arr = np.stack([o["ee_pose_world"] for o in ep_dict["obs_list"]]).astype(np.float32)
-                    self._write_raw_numpy(txn, ep_meta, prefix, "ee_pose_world", ee_poses_arr)
-                    # if "goal_image_primary" in ep_dict and ep_dict["goal_image_primary"] is not None:
-                    #     goal_img_list = [ep_dict["goal_image_primary"]]
-                    #     self._write_compressed_images(txn, ep_meta, prefix, "goal_image_primary", goal_img_list)
-                    # else:
-                    #     logger.warning(f"Episode {prefix} is missing 'goal_image_primary'.")
+                    # --- PHYSICAL STATE MODALITIES ---
+                    def stack_mod(name, dtype=np.float32):
+                        if name in ep_dict["obs_list"][0]:
+                            arr = np.stack([o[name] for o in ep_dict["obs_list"]]).astype(dtype)
+                            self._write_raw_numpy(txn, ep_meta, prefix, name, arr)
+
+                    stack_mod("ee_pose_world")
+                    stack_mod("object_pos_world")
+                    stack_mod("object_orn_world")
+                    stack_mod("goal_pos_world")
+                    stack_mod("goal_orn_world")
+                    stack_mod("is_grasped")
+                    stack_mod("object_vel")
+                    stack_mod("ee_vel")
+                    stack_mod("gripper_qpos")
+                    stack_mod("gripper_vel")
+                    stack_mod("robot_base_pos_world")
+                    stack_mod("goal_size_world")
+
                     expert_states_list = [o["expert_state"] for o in ep_dict["obs_list"]]
                     self._write_pickled_modality(txn, ep_meta, prefix, "expert_states", expert_states_list)
                     camera_params_list = [o["camera_params"] for o in ep_dict["obs_list"]]
@@ -193,7 +209,6 @@ class ExpertDatasetWriter:
                     self._write_raw_numpy(txn, ep_meta, prefix, "gt_gripper", gt_gripper_arr)
 
                     # [CRITICAL FIX] Write the EXPERT TARGET POSE - the commanded targets, NOT achieved poses
-                    # This is the correct supervision signal for goal-directed behavior
                     if "expert_target_pose" in ep_dict["obs_list"][0]:
                         target_poses_arr = np.stack([o["expert_target_pose"] for o in ep_dict["obs_list"]]).astype(np.float32)
                         self._write_raw_numpy(txn, ep_meta, prefix, "expert_target_pose", target_poses_arr)
@@ -263,8 +278,25 @@ class ExpertDatasetWriter:
                     if "goal_image_primary" in ep_dict:
                         goal_img_list = [ep_dict["goal_image_primary"]]
                         self._write_compressed_images(txn, ep_meta, episode_key_prefix, "goal_image_primary", goal_img_list)
-                    else:
-                        logger.warning(f"Episode {episode_key_prefix} is missing 'goal_image_primary'. This key will not be saved for this episode.")
+
+                    # --- PHYSICAL STATE MODALITIES ---
+                    def stack_mod(name, dtype=np.float32):
+                        if name in ep_dict["obs_list"][0]:
+                            arr = np.stack([o[name] for o in ep_dict["obs_list"]]).astype(dtype)
+                            self._write_raw_numpy(txn, ep_meta, episode_key_prefix, name, arr)
+
+                    stack_mod("ee_pose_world")
+                    stack_mod("object_pos_world")
+                    stack_mod("object_orn_world")
+                    stack_mod("goal_pos_world")
+                    stack_mod("goal_orn_world")
+                    stack_mod("is_grasped")
+                    stack_mod("object_vel")
+                    stack_mod("ee_vel")
+                    stack_mod("gripper_qpos")
+                    stack_mod("gripper_vel")
+                    stack_mod("robot_base_pos_world")
+                    stack_mod("goal_size_world")
                         
                     expert_states_list = [o["expert_state"] for o in ep_dict["obs_list"]]
                     self._write_pickled_modality(txn, ep_meta, episode_key_prefix, "expert_states", expert_states_list)
@@ -587,7 +619,7 @@ class ExpertTrajectoryDataset(Dataset):
                 raise KeyError(f"Missing LMDB key {key!r} in {self.demo_path}") 
             return blob
 
-    @functools.lru_cache(maxsize=128)
+    @functools.lru_cache(maxsize=8)
     def _get_full_modality_array(self, key: str, compression: str, dtype_str: str, shape_list: tuple) -> Any:
         """
         [DEFINITIVE, FULLY PATCHED, SOTA VERSION]
@@ -600,7 +632,9 @@ class ExpertTrajectoryDataset(Dataset):
 
         if compression == "raw":
             dtype = np.dtype(dtype_str)
-            data = np.frombuffer(blob, dtype=dtype).reshape(shape)
+            # [SOTA FIX] Always return a copy for raw modalities to ensure compatibility 
+            # with downstream functions that may perform in-place normalization or math.
+            data = np.frombuffer(blob, dtype=dtype).reshape(shape).copy()
             return data
 
         elif compression in ("jpeg", "png"):

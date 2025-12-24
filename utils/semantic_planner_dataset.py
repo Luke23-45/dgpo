@@ -151,6 +151,37 @@ class SemanticPlannerDataset(EgoPlannerDataset):
             
         return pose_chunk, grip_chunk
 
+    def get_phase_label(self, idx: int) -> int:
+        """
+        [SOTA OPTIMIZATION] Fast access to phase label without loading images.
+        Used for efficient distribution estimation during startup.
+        """
+        if not (0 <= idx < len(self)):
+            raise IndexError(f"Index {idx} out of range.")
+            
+        # 1. Resolve Index to (Episode, Timestep)
+        ep_idx, timestep_t = self.samples[idx]
+        ep_meta = self.expert_reader.episode_metadata[ep_idx]
+
+        # 2. Get Metadata for 'gt_phase'
+        # Note: Keys might vary slightly depending on dataset version, but 'gt_phase' is standard.
+        if "gt_phase" in ep_meta["modalities"]:
+            phase_meta = ep_meta["modalities"]["gt_phase"]
+        else:
+             raise KeyError(f"Modality 'gt_phase' not found for episode {ep_idx}")
+        
+        # 3. Load Phase Array (Cached in Reader)
+        # This call bypasses image loading entirely.
+        phase_array = self.expert_reader._get_full_modality_array(
+            key=phase_meta["key"],
+            compression=phase_meta["compression"],
+            dtype_str=phase_meta["dtype"],
+            shape_list=tuple(phase_meta["shape"])
+        )
+        
+        # 4. Return scalar
+        return int(phase_array[timestep_t])
+
     def __getitem__(self, idx: int) -> Optional[Dict[str, Any]]:
         """
         Retrieves a v9.0 training sample with Noise Injection and History.

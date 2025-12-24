@@ -1,0 +1,22 @@
+action_scaling_factor: 0.5
+batch_size: 32
+do_replay_validate: true
+expert_config: {}
+grasp_width: 0.6
+num_episodes: 20
+num_shards: 1
+num_workers: 2
+object_size:
+- 0.04
+- 0.04
+- 0.04
+output_dir: C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\sota_test\raw_shards\boot_1766551437_stage0
+replay_tol: 0.03
+run_name: boot_1766551437_stage0
+seed: 105132456731
+shard_idx: 0
+shard_seed_offset: 1000102
+urdf_path: urdf/panda_mujoco_kinematics.urdf
+warmup: true
+worker_seed_offset: 10007
+xml_path: envs/panda_pick_place.xml

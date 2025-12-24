@@ -198,14 +198,22 @@ class MoEDataModule(pl.LightningDataModule):
             logger.info(f"Sampling {sample_size} items to estimate phase distribution...")
             
             dim_check_counter = 0
+            # [OPTIMIZED] Lightweight Sampling via Encapsulated Method
             for idx in indices:
-                # Warning: Accessing self.train_dataset[idx] triggers image loading!
-                # We only need the phase label. Ideally, we'd read metadata directly from LMDB/HDF5.
-                # Reducing sample_size mitigates this cost.
-                sample = self.train_dataset[idx]
-                if sample is not None:
-                    phase = sample['gt_phase_label'].item()
+                try:
+                    # 1. Fast Access (No images loaded)
+                    phase = self.train_dataset.get_phase_label(idx)
                     phase_counts[phase] += 1
+                except Exception as e:
+                    # Fallback to slow loading if method fails
+                    logger.warning(f"Fast sampling failed for index {idx}: {e}. Retrying slow way...")
+                    try:
+                        sample = self.train_dataset[idx]
+                        if sample is not None:
+                            phase = sample['gt_phase_label'].item()
+                            phase_counts[phase] += 1
+                    except:
+                        pass
                 
                 # [FIX v5.2] Periodic Cache Clearing (Every 100 samples)
                 # Prevents RAM explosion if lru_cache is unbounded or large

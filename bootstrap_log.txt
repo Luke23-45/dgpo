@@ -1,0 +1,23 @@
+2025-12-24 12:23:40,093 | INFO | [BOOTSTRAP v3.0] >>> STAGE 1/1 (Anneal: 1.00)
+2025-12-24 12:23:40,104 | INFO | [BOOTSTRAP v3.0] EXEC: C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\Scripts\python.exe -m scripts.generate_dataset --config C:\Users\Hellx\Documents\Programming\python\Project\redhot\configs\temp_boot_1766558320_stage0.yaml (CWD: C:\Users\Hellx\Documents\Programming\python\Project\redhot)
+2025-12-24 12:27:19,850 | INFO | [BOOTSTRAP v3.0] >>> Computing Advantages...
+2025-12-24 12:27:19,850 | INFO | [BOOTSTRAP v3.0] EXEC: C:\Users\Hellx\Documents\Programming\python\Project\dgpo_project\venv\Scripts\python.exe -m utils.advantage_calculator --source-db C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\sota_test\raw_shards\boot_1766558320_stage0\expert_boot_1766558320_stage0_4_episodes\expert_boot_1766558320_stage0_4_episodes.lmdb --dest-db C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\sota_test\final_training_set\training_set.lmdb --gamma 0.99 --lambda_ 0.95 --beta_cost 0.5 --huber_delta 1.0 --pessimistic_clip 0.0 --time_weight 0.5 --overwrite (CWD: C:\Users\Hellx\Documents\Programming\python\Project\redhot)
+2025-12-24 12:27:39,188 | INFO | [BOOTSTRAP v3.0] >>> Verifying...
+2025-12-24 12:27:39,189 | INFO | [BOOTSTRAP v3.0] Loading index from C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\sota_test\final_training_set\training_set_index.json...
+2025-12-24 12:27:39,190 | INFO | [BOOTSTRAP v3.0] Loaded 4 episodes, 808 total valid chunks (Virtually Indexed).
+2025-12-24 12:27:39,191 | INFO | [BOOTSTRAP v3.0]  Opened LMDB at C:\Users\Hellx\Documents\Programming\python\Project\redhot\data\sota_test\final_training_set\training_set.lmdb | mode=RO | file-mode
+2025-12-24 12:27:39,372 | ERROR | [BOOTSTRAP v3.0] [ERROR] Failed: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+2025-12-24 12:27:39,374 | ERROR | [BOOTSTRAP v3.0] Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\bootstrap_training_data.py", line 188, in validate_dataset_integrity
+    if 'proprio' in item:  # Proxy for state
+ValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+
+2025-12-24 12:27:39,376 | INFO | [BOOTSTRAP v3.0]  LMDB environment closed successfully.
+2025-12-24 12:27:39,376 | ERROR | [BOOTSTRAP v3.0] [ERROR] Fatal: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+2025-12-24 12:27:39,377 | ERROR | [BOOTSTRAP v3.0] Traceback (most recent call last):
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\bootstrap_training_data.py", line 417, in main
+    validate_dataset_integrity(final_lmdb_path, args.episodes)
+  File "C:\Users\Hellx\Documents\Programming\python\Project\redhot\scripts\bootstrap_training_data.py", line 188, in validate_dataset_integrity
+    if 'proprio' in item:  # Proxy for state
+ValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+
