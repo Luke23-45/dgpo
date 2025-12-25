@@ -136,8 +136,18 @@ class PhaseExpert(nn.Module):
     """
     A single phase-specialized expert policy head.
     
-    Takes the visual embedding from the frozen Router and predicts action chunks.
-    Optionally modulated by a context vector (FiLM) for parametric adaptation.
+    This module serves as the 'Specialist' in the Mixture-of-Experts architecture.
+    It inherits generalist capabilities from a pre-trained Router via bootstrapping
+    and refines them for a specific task phase (e.g., Approach, Grasp).
+    
+    Architecture:
+        Input (z) -> [LayerNorm] -> [FiLM Modulation] -> [MLP + Residuals] -> Action Chunk
+    
+    Robustness Features:
+    - Decoupled FiLM: Independent modulation for Trajectory and Gripper heads.
+    - Memory Safety: Uses reshape() instead of view() to handle non-contiguous tensors.
+    - Post-Norm Injection: Applies conditioning after normalization to prevent signal washout.
+    - Uncertainty: Built-in Monte Carlo Dropout support.
     
     Args:
         cfg: ExpertConfig with architecture hyperparameters.
@@ -150,17 +160,24 @@ class PhaseExpert(nn.Module):
         self.phase_id = phase_id
         self.chunk_size = cfg.chunk_size
         
-        logger.info(f"[PhaseExpert {phase_id}] Initializing with dim={cfg.input_dim}, "
-                    f"chunk={cfg.chunk_size}, context_dim={cfg.context_dim}")
+        logger.info(f"[PhaseExpert {phase_id}] Initializing | Dim: {cfg.input_dim} | Chunk: {cfg.chunk_size}")
         
-        # --- A. Optional FiLM Conditioning ---
+        # --- A. Contextual Modulation (FiLM) ---
+        # CRITICAL: We use separate layers for Trajectory and Gripper.
+        # This allows the context to scale/shift the arm and hand INDEPENDENTLY.
+        # (e.g., "Heavy Object" -> Slow Arm, Strong Grip)
         self.use_film = cfg.context_dim > 0
         if self.use_film:
-            self.film_layer = FiLMLayer(cfg.context_dim, cfg.input_dim)
-            logger.info(f"[PhaseExpert {phase_id}] FiLM conditioning ENABLED")
+            self.traj_film_layer = FiLMLayer(cfg.context_dim, cfg.input_dim)
+            self.grip_film_layer = FiLMLayer(cfg.context_dim, cfg.input_dim)
+            logger.info(f"[PhaseExpert {phase_id}] FiLM Conditioning: ENABLED (Decoupled)")
+        else:
+            self.traj_film_layer = None
+            self.grip_film_layer = None
         
         # --- B. Trajectory Head (Pose Prediction) ---
-        # Matches the architecture of SemanticPlanner.traj_head
+        # Standard SOTA Residual MLP architecture
+        # Note: When bootstrapping, this is overwritten by the cloned Router weights
         traj_layers = [
             nn.LayerNorm(cfg.input_dim),
             nn.Linear(cfg.input_dim, cfg.input_dim),
@@ -168,14 +185,16 @@ class PhaseExpert(nn.Module):
         ]
         for _ in range(cfg.num_residual_blocks):
             traj_layers.append(ResidualMLPBlock(cfg.input_dim, cfg.dropout))
+            
+        # Output: 3 Position + 4 Quaternion (per timestep in chunk)
         traj_layers.extend([
             nn.LayerNorm(cfg.input_dim),
-            nn.Linear(cfg.input_dim, cfg.chunk_size * 7)  # 3 Pos + 4 Quat
+            nn.Linear(cfg.input_dim, cfg.chunk_size * 7)
         ])
         self.traj_head = nn.Sequential(*traj_layers)
         
-        # --- C. Gripper Head ---
-        # Matches the architecture of SemanticPlanner.gripper_head
+        # --- C. Gripper Head (State Prediction) ---
+        # Smaller capacity is usually sufficient for binary/scalar gripper state
         self.gripper_head = nn.Sequential(
             nn.LayerNorm(cfg.input_dim),
             nn.Linear(cfg.input_dim, cfg.input_dim // 2),
@@ -190,6 +209,53 @@ class PhaseExpert(nn.Module):
         
         logger.info(f"[PhaseExpert {phase_id}] Initialization Complete.")
     
+    def _forward_head_with_film(
+        self, 
+        head: nn.Sequential, 
+        x: Tensor, 
+        film_layer: Optional[nn.Module], 
+        context: Optional[Tensor]
+    ) -> Tensor:
+        """
+        Helper method to inject FiLM modulation safely into a Sequential block.
+        
+        Strategy:
+        1. Identify the first LayerNorm in the sequence.
+        2. Run input through layers up to and including LayerNorm.
+        3. Apply FiLM modulation (Gamma * x + Beta).
+           * This must happen AFTER Norm, otherwise Norm cancels the shift/scale.
+        4. Run the result through the rest of the layers.
+        """
+        # 1. Find the injection point (Post-Norm)
+        ln_idx = -1
+        for i, layer in enumerate(head):
+            if isinstance(layer, nn.LayerNorm):
+                ln_idx = i
+                break
+        
+        # 2. Pre-processing (Up to Norm)
+        if ln_idx == -1:
+            # Fallback: No Norm found (Unlikely in SOTA). Apply FiLM directly.
+            # This handles cases where architectures might differ.
+            norm_x = x
+            start_idx = 0
+        else:
+            norm_x = x
+            for i in range(ln_idx + 1):
+                norm_x = head[i](norm_x)
+            start_idx = ln_idx + 1
+            
+        # 3. Apply Modulation
+        if self.use_film and film_layer is not None and context is not None:
+            norm_x = film_layer(norm_x, context)
+            
+        # 4. Post-processing (Rest of Network)
+        out = norm_x
+        for i in range(start_idx, len(head)):
+            out = head[i](out)
+            
+        return out
+
     def forward(
         self,
         z_traj: Tensor,
@@ -199,95 +265,48 @@ class PhaseExpert(nn.Module):
         """
         Forward pass predicting action chunks.
         
-        [FIX v2.0] FiLM modulation is now applied AFTER the first LayerNorm
-        to prevent cancellation. LayerNorm normalizes (subtracts mean, divides
-        by std), which would erase any scaling/shifting applied before it.
-        
         Args:
             z_traj: (B, D) visual embedding for trajectory prediction.
             z_grip: (B, D) visual embedding for gripper prediction.
-                    If None, uses z_traj.
+                    If None, defaults to using z_traj (Robustness check).
             context: (B, C) optional context vector for FiLM modulation.
         
         Returns:
-            pose_chunk: (B, K, 7) predicted trajectory.
-            grip_chunk: (B, K, 1) predicted gripper states.
+            pose_chunk: (B, K, 7) [x, y, z, qx, qy, qz, qw] normalized quaternion.
+            grip_chunk: (B, K, 1) logits (unscaled).
         """
         B = z_traj.shape[0]
         
-        # Use same embedding for both heads if z_grip not provided
-        # Use same embedding for both heads if z_grip not provided
+        # Robust Fallback: If no separate gripper embedding, share the trajectory one
         if z_grip is None:
             z_grip = z_traj
         
-        # --- Trajectory Prediction ---
-        # [FIX v3.0] Robust LayerNorm finding to prevent FiLM cancellation
-        # We need to apply LN(x) -> FiLM(x) -> MLP(x)
-        # But traj_head is a Sequential. We must find the first LN layer index.
+        # --- 1. Trajectory Prediction ---
+        # Execute Trajectory Head with specific Trajectory Modulation
+        raw_traj = self._forward_head_with_film(
+            self.traj_head, z_traj, self.traj_film_layer, context
+        )
         
-        # Dynamic Search for First LayerNorm
-        ln_idx = -1
-        for i, layer in enumerate(self.traj_head):
-            if isinstance(layer, nn.LayerNorm):
-                ln_idx = i
-                break
+        # [ROBUSTNESS] Use reshape instead of view.
+        # View crashes on non-contiguous tensors; reshape handles memory copy automatically.
+        pred_traj = raw_traj.reshape(B, self.chunk_size, 7)
         
-        if ln_idx == -1:
-            # Fallback: No LN found (unlikely for SOTA), just apply FiLM first
-            z_traj_norm = z_traj
-            start_layer = 0
-            logger.warning(f"[PhaseExpert {self.phase_id}] No LayerNorm found in traj_head! FiLM applied directly.")
-        else:
-            # Apply up to and including the first LayerNorm
-            x = z_traj
-            for i in range(ln_idx + 1):
-                x = self.traj_head[i](x)
-            z_traj_norm = x
-            start_layer = ln_idx + 1
-        
-        # Apply FiLM modulation to normalized features
-        if self.use_film and context is not None:
-            z_traj_norm = self.film_layer(z_traj_norm, context)
-        
-        # Pass through rest of trajectory head
-        raw_traj = z_traj_norm
-        for i in range(start_layer, len(self.traj_head)):
-            raw_traj = self.traj_head[i](raw_traj)
-        
-        pred_traj = raw_traj.view(B, self.chunk_size, 7)
-        
-        # Normalize Quaternions
+        # Geometric Safety: Normalize Quaternions
+        # Invalid quaternions (norm != 1) cause physics explosions in simulation.
         pos_xyz = pred_traj[..., :3]
         quat_raw = pred_traj[..., 3:]
-        quat_norm = F.normalize(quat_raw, p=2, dim=-1, eps=1e-6)
+        # Epsilon ensures no division by zero
+        quat_norm = F.normalize(quat_raw, p=2, dim=-1, eps=1e-6) 
         pose_chunk = torch.cat([pos_xyz, quat_norm], dim=-1)
         
-        # --- Gripper Prediction ---
-        # Same robust logic for gripper head
-        ln_idx_g = -1
-        for i, layer in enumerate(self.gripper_head):
-            if isinstance(layer, nn.LayerNorm):
-                ln_idx_g = i
-                break
-                
-        if ln_idx_g == -1:
-            z_grip_norm = z_grip
-            start_layer_g = 0
-        else:
-            x = z_grip
-            for i in range(ln_idx_g + 1):
-                x = self.gripper_head[i](x)
-            z_grip_norm = x
-            start_layer_g = ln_idx_g + 1
-
-        if self.use_film and context is not None:
-            z_grip_norm = self.film_layer(z_grip_norm, context)
+        # --- 2. Gripper Prediction ---
+        # Execute Gripper Head with specific Gripper Modulation
+        raw_grip = self._forward_head_with_film(
+            self.gripper_head, z_grip, self.grip_film_layer, context
+        )
         
-        raw_grip = z_grip_norm
-        for i in range(start_layer_g, len(self.gripper_head)):
-            raw_grip = self.gripper_head[i](raw_grip)
-        
-        grip_chunk = raw_grip.view(B, self.chunk_size, 1)
+        # Reshape safely
+        grip_chunk = raw_grip.reshape(B, self.chunk_size, 1)
         
         return pose_chunk, grip_chunk
     
@@ -300,32 +319,15 @@ class PhaseExpert(nn.Module):
         n_samples: int = 5
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """
-        [ENHANCEMENT A] Monte Carlo Dropout for Uncertainty Estimation.
+        Monte Carlo Dropout for Uncertainty Estimation.
         
-        Runs forward pass multiple times with dropout enabled to estimate
-        predictive uncertainty. High uncertainty indicates out-of-distribution
-        inputs where the model is not confident.
-        
-        Use cases:
-        - Safety: if pose_std > threshold, ask human for help
-        - Debugging: find phases where model struggles
-        
-        Args:
-            z_traj: (B, D) visual embedding for trajectory prediction.
-            z_grip: (B, D) visual embedding for gripper prediction.
-            context: (B, C) optional context vector.
-            n_samples: Number of forward passes for MC estimate.
-        
-        Returns:
-            pose_mean: (B, K, 7) mean prediction.
-            pose_std: (B, K, 7) standard deviation (uncertainty).
-            grip_mean: (B, K, 1) mean gripper prediction.
-            grip_std: (B, K, 1) gripper uncertainty.
+        Used to detect Out-of-Distribution (OOD) states during inference.
+        If uncertainty > threshold, the system can trigger a safety stop.
         """
-        # Store original training state
+        # Preserve original training state
         was_training = self.training
         
-        # Enable dropout by setting to train mode
+        # Force training mode to activate Dropout layers (even during inference)
         self.train()
         
         pose_samples = []
@@ -336,12 +338,12 @@ class PhaseExpert(nn.Module):
             pose_samples.append(pose)
             grip_samples.append(grip)
         
-        # Restore original training state
+        # Restore original state
         self.train(was_training)
         
         # Stack and compute statistics
-        pose_stack = torch.stack(pose_samples, dim=0)  # (N, B, K, 7)
-        grip_stack = torch.stack(grip_samples, dim=0)  # (N, B, K, 1)
+        pose_stack = torch.stack(pose_samples, dim=0)
+        grip_stack = torch.stack(grip_samples, dim=0)
         
         pose_mean = pose_stack.mean(dim=0)
         pose_std = pose_stack.std(dim=0)
@@ -359,57 +361,59 @@ class PhaseExpert(nn.Module):
         phase_id: int = -1
     ) -> "PhaseExpert":
         """
-        Factory method to create an Expert by cloning heads from a pre-trained planner.
+        Bootstrapping Factory: Creates an Expert by cloning pre-trained heads.
         
-        This is the core of the "Bootstrapping" strategy: instead of random init,
-        each expert starts with the full generalist capability.
-        
-        [FIX v2.0] Now updates cfg to reflect actual cloned architecture.
-        
-        Args:
-            traj_head: nn.Sequential from SemanticPlanner.traj_head
-            gripper_head: nn.Sequential from SemanticPlanner.gripper_head
-            cfg: ExpertConfig (will be updated to reflect cloned structure)
-            phase_id: Phase ID for this expert
-        
-        Returns:
-            PhaseExpert with cloned weights.
+        Includes aggressive validation to ensure the requested config matches
+        the actual architecture of the source weights.
         """
-        # Create expert with config (builds default heads)
+        # 1. Initialize empty expert with configuration
         expert = cls(cfg, phase_id)
         
-        # Deep copy the pre-trained heads (overwrites default)
+        # 2. Clone Weights (Deep Copy to ensure independence from Router)
         expert.traj_head = copy.deepcopy(traj_head)
         expert.gripper_head = copy.deepcopy(gripper_head)
         
-        # [FIX vFinal] Force-Unfreeze Bootstrapped Weights
-        # Since the Router is already frozen by this point, we MUST explicitly
-        # enable gradients for the new experts.
+        # 3. [CRITICAL] Force Unfreeze
+        # The Router is frozen during this phase, so cloned weights might inherit 
+        # 'requires_grad=False'. We explicitly enable gradients for the experts.
         expert.traj_head.requires_grad_(True)
         expert.gripper_head.requires_grad_(True)
         
-        # [FIX v2.1] Auto-detect chunk_size from output dimensions
-        # Last layer of traj_head is Linear(dim, chunk_size * 7)
-        last_traj_layer = list(expert.traj_head.modules())[-1]
-        if isinstance(last_traj_layer, nn.Linear):
-            detected_chunk = last_traj_layer.out_features // 7
-            if detected_chunk != cfg.chunk_size:
-                logger.warning(f"[Expert {phase_id}] Config mismatch! Config chunk={cfg.chunk_size}, "
-                               f"Model chunk={detected_chunk}. Auto-correcting.")
-                expert.chunk_size = detected_chunk
-                expert.cfg.chunk_size = detected_chunk
+        # 4. Architecture Auto-Correction (Sanity Checks)
         
-        # [FIX v3.0] Auto-detect num_residual_blocks
-        # Count ResidualMLPBlock instances
-        res_blocks = sum(1 for m in expert.traj_head if isinstance(m, ResidualMLPBlock))
-        if res_blocks != cfg.num_residual_blocks:
-             logger.warning(f"[Expert {phase_id}] Config mismatch (Residual)! Config={cfg.num_residual_blocks}, "
-                            f"Model={res_blocks}. Auto-correcting.")
-             expert.cfg.num_residual_blocks = res_blocks
+        # Check A: Chunk Size via Output Layer Dimensions
+        try:
+            # Check if it's a Sequential or similar iterable container
+            if isinstance(expert.traj_head, nn.Sequential):
+                last_traj_layer = expert.traj_head[-1]
+            else:
+                # Fallback for raw Module (rare but safe)
+                last_traj_layer = list(expert.traj_head.children())[-1]
 
-        expert.phase_id = phase_id
+            if isinstance(last_traj_layer, nn.Linear):
+                # 7 is dim of (x,y,z,qx,qy,qz,qw)
+                detected_chunk = last_traj_layer.out_features // 7
+                if detected_chunk != cfg.chunk_size:
+                    logger.warning(f"[Expert {phase_id}] ⚠️ Config mismatch! Config Chunk={cfg.chunk_size}, "
+                                   f"Detected Model Chunk={detected_chunk}. Auto-correcting expert.")
+                    expert.chunk_size = detected_chunk
+                    expert.cfg.chunk_size = detected_chunk
+        except Exception as e:
+            logger.warning(f"[Expert {phase_id}] Failed to validate chunk size: {e}")
         
-        logger.info(f"[PhaseExpert {phase_id}] Cloned weights from pre-trained planner.")
+        # Check B: Depth via Residual Blocks Count
+        # (Checks how many ResidualMLPBlocks are in the sequential)
+        try:
+            # We still search recursively for blocks as they are nested
+            res_blocks = sum(1 for m in expert.traj_head.modules() if isinstance(m, ResidualMLPBlock))
+            if res_blocks != cfg.num_residual_blocks:
+                 logger.warning(f"[Expert {phase_id}] ⚠️ Config mismatch! Config Blocks={cfg.num_residual_blocks}, "
+                                f"Detected Model Blocks={res_blocks}. Auto-correcting expert.")
+                 expert.cfg.num_residual_blocks = res_blocks
+        except NameError:
+            pass
+        
+        logger.info(f"[PhaseExpert {phase_id}] Bootstrapped successfully from SemanticPlanner.")
         
         return expert
 
@@ -418,17 +422,21 @@ class PhaseExpert(nn.Module):
 # 4. EXPERT ARRAY (MoE Container)
 # =============================================================================
 
+
+
 class ExpertArray(nn.Module):
     """
-    Container for multiple PhaseExperts.
+    Container for multiple PhaseExperts in a Phase-Locked Mixture-of-Experts architecture.
     
-    Handles routing during training (using ground truth phase labels) and
-    inference (using predicted phase from Router).
+    This module manages the routing of inputs to specific experts. It supports two modes:
+    1. **Hard Routing (forward)**: Sparse execution. Routes samples to exactly one expert 
+       based on an integer phase ID. Used for standard training and inference.
+    2. **Soft Routing (forward_soft)**: Dense execution. Computes a weighted sum of ALL 
+       experts based on router probabilities. Used for End-to-End differentiable training.
     
-    Key Features:
-    - **Training Mode**: Routes to specific expert based on GT phase label.
-    - **Inference Mode**: Routes based on argmax of phase logits from Router.
-    - **Efficient Batching**: Groups samples by phase for parallel processing.
+    Attributes:
+        experts (nn.ModuleList): The collection of specialized PhaseExpert modules.
+        num_phases (int): Total number of distinct task phases.
     """
     
     PHASE_NAMES = {
@@ -443,14 +451,17 @@ class ExpertArray(nn.Module):
         super().__init__()
         self.num_phases = num_phases
         
-        # Register experts as ModuleList for proper parameter tracking
+        # Validation: Ensure strict alignment between phase counts and expert modules
+        if len(experts) != num_phases:
+            raise ValueError(f"[ExpertArray] Critical Config Error: Expected {num_phases} experts, "
+                             f"but received {len(experts)}.")
+        
+        # Register as ModuleList to ensure parameters are registered with the optimizer
         self.experts = nn.ModuleList(experts)
         
-        if len(self.experts) != num_phases:
-            raise ValueError(f"Expected {num_phases} experts, got {len(self.experts)}")
-        
-        logger.info(f"[ExpertArray] Initialized with {num_phases} experts: "
-                    f"{[self.PHASE_NAMES.get(i, f'Phase_{i}') for i in range(num_phases)]}")
+        # Log initialization for audit trail
+        expert_names = [self.PHASE_NAMES.get(i, f'Phase_{i}') for i in range(num_phases)]
+        logger.info(f"[ExpertArray] Initialized with {num_phases} experts: {expert_names}")
     
     def forward(
         self,
@@ -460,10 +471,9 @@ class ExpertArray(nn.Module):
         context: Optional[Tensor] = None
     ) -> Tuple[Tensor, Tensor]:
         """
-        Routes inputs to appropriate experts based on phase IDs.
+        Hard Routing (Sparse): Routes inputs to appropriate experts based on phase IDs.
         
-        This implementation uses a loop over phases for clarity.
-        For production, consider scatter/gather operations for efficiency.
+        Optimized for memory efficiency: Only runs the expert required for each sample.
         
         Args:
             z_traj: (B, D) trajectory embeddings from Router.
@@ -472,72 +482,56 @@ class ExpertArray(nn.Module):
             context: (B, C) optional context vector.
         
         Returns:
-            pose_chunks: (B, K, 7) aggregated predictions.
-            grip_chunks: (B, K, 1) aggregated predictions.
+            pose_chunks: (B, K, 7) aggregated pose predictions.
+            grip_chunks: (B, K, 1) aggregated gripper predictions.
         """
         B = z_traj.shape[0]
+        # Retrieve output chunk size from the first expert (assumed uniform)
         K = self.experts[0].chunk_size
         device = z_traj.device
         
-        # [FIX vFinal] Dynamic Dtype Matching for Mixed Precision (AMP)
-        # Instead of z_traj.dtype (which might be float32 from the Router),
-        # we initialize buffers with None and let them inherit the dtype 
-        # produced by the Experts (which might be float16 in AMP).
+        # [ROBUSTNESS] Lazy Buffer Initialization
+        # We start with None and initialize buffers upon the first successful expert execution.
+        # Why? In Mixed Precision (AMP), experts might output float16 while z_traj is float32.
+        # Initializing zeros(..., dtype=z_traj.dtype) would cause a dtype mismatch crash.
         pose_chunks = None
         grip_chunks = None
         
-        # Route to each expert
+        # Iterate through each phase index
         for phase_id in range(self.num_phases):
-            # Find samples belonging to this phase
+            # Efficient Masking: Find samples belonging to this phase
             mask = (phase_ids == phase_id)
+            
+            # Optimization: Skip expert entirely if no samples match
             if not mask.any():
                 continue
             
-            # Extract relevant inputs
+            # Gather inputs for this specific expert
             z_t = z_traj[mask]
             z_g = z_grip[mask]
             ctx = context[mask] if context is not None else None
             
-            # Forward through expert
+            # Execute Expert
+            # pose: (Batch_Subset, K, 7), grip: (Batch_Subset, K, 1)
             pose, grip = self.experts[phase_id](z_t, z_g, ctx)
             
-            # [FIX vFinal] Initialize buffers on first successful expert call
+            # [CRITICAL] Initialize buffers using the EXPERT'S output dtype/device
             if pose_chunks is None:
                 pose_chunks = torch.zeros(B, K, 7, device=pose.device, dtype=pose.dtype)
                 grip_chunks = torch.zeros(B, K, 1, device=grip.device, dtype=grip.dtype)
             
-            # Scatter results back to output tensors
+            # Scatter results back into the global batch buffer
             pose_chunks[mask] = pose
             grip_chunks[mask] = grip
         
-        # Fallback if no experts were active for this batch
+        # [ROBUSTNESS] Fallback for Empty/Invalid Batch
+        # If pose_chunks is still None, it means NO experts were executed (e.g., all phase_ids were -1).
+        # We must return a valid zero tensor to prevent downstream crashes.
         if pose_chunks is None:
             pose_chunks = torch.zeros(B, K, 7, device=device, dtype=z_traj.dtype)
             grip_chunks = torch.zeros(B, K, 1, device=device, dtype=z_traj.dtype)
 
         return pose_chunks, grip_chunks
-    
-    def forward_single_expert(
-        self,
-        z_traj: Tensor,
-        z_grip: Tensor,
-        phase_id: int,
-        context: Optional[Tensor] = None
-    ) -> Tuple[Tensor, Tensor]:
-        """
-        Convenience method for inference with a single expert.
-        
-        Args:
-            z_traj: (B, D) trajectory embeddings.
-            z_grip: (B, D) gripper embeddings.
-            phase_id: Integer phase ID (same for entire batch).
-            context: (B, C) optional context vector.
-        
-        Returns:
-            pose_chunks: (B, K, 7)
-            grip_chunks: (B, K, 1)
-        """
-        return self.experts[phase_id](z_traj, z_grip, context)
     
     def forward_soft(
         self,
@@ -547,55 +541,69 @@ class ExpertArray(nn.Module):
         context: Optional[Tensor] = None
     ) -> Tuple[Tensor, Tensor]:
         """
-        [STAGE 3: END-TO-END RL] Differentiable soft routing.
+        Soft Routing (Dense): Differentiable weighted sum of all experts.
         
-        Unlike forward() which uses hard indexing (non-differentiable), this method
-        computes a weighted sum over ALL expert outputs. This allows gradients to
-        flow back through the router's decision, enabling end-to-end optimization.
-        
-        Output = Sum_i( router_probs[i] * Expert_i(input) )
+        Used for End-to-End training (Stage 3) to allow gradients to flow from
+        expert performance back to the Router.
         
         Args:
-            z_traj: (B, D) trajectory embeddings from Router.
-            z_grip: (B, D) gripper embeddings from Router.
-            router_probs: (B, num_phases) probability distribution from Router.
-                          Should be softmax(phase_logits), not argmax.
+            z_traj: (B, D) trajectory embeddings.
+            z_grip: (B, D) gripper embeddings.
+            router_probs: (B, num_phases) normalized probabilities.
             context: (B, C) optional context vector.
         
         Returns:
-            pose_chunks: (B, K, 7) weighted sum of expert predictions.
-            grip_chunks: (B, K, 1) weighted sum of expert predictions.
-        
-        Note:
-            This is computationally more expensive than hard routing (runs ALL experts).
-            Use only during Stage 3 training when you need gradient flow to Router.
-            For inference, use forward() with argmax(phase_logits).
+            pose_chunks: (B, K, 7) weighted output.
+            grip_chunks: (B, K, 1) weighted output.
         """
         B = z_traj.shape[0]
         K = self.experts[0].chunk_size
         device = z_traj.device
-        dtype = z_traj.dtype
         
-        # [FIX vFinal] Dynamic Dtype Matching for AMP
+        # [SAFETY] Gradient Explosion Guard
+        # If logits are passed instead of probabilities, the weighted sum will explode.
+        # We check if sums are close to 1.0. If not, we force Softmax.
+        prob_sums = router_probs.sum(dim=-1)
+        if not torch.allclose(prob_sums, torch.ones_like(prob_sums), atol=1e-3):
+            # Log warning only once per run usually, but here we prioritize safety
+            # logger.warning("[ExpertArray] Raw logits detected in forward_soft. Applying Softmax.")
+            router_probs = F.softmax(router_probs, dim=-1)
+        
         pose_chunks = None
         grip_chunks = None
-        # Weighted sum over all experts
+        
+        # Iterate over all experts (Dense Execution)
         for phase_id in range(self.num_phases):
-            # Get expert output for ALL samples
-            pose, grip = self.experts[phase_id](z_traj, z_grip, context)  # (B, K, 7), (B, K, 1)
+            # Run expert on the FULL batch
+            pose, grip = self.experts[phase_id](z_traj, z_grip, context)
             
+            # Lazy Init for Dtype Safety (AMP)
             if pose_chunks is None:
                 pose_chunks = torch.zeros(B, K, 7, device=pose.device, dtype=pose.dtype)
                 grip_chunks = torch.zeros(B, K, 1, device=grip.device, dtype=grip.dtype)
             
-            # Get probability weight for this expert: (B,) -> (B, 1, 1) for broadcasting
-            prob_weight = router_probs[:, phase_id].view(B, 1, 1)
+            # Get gating weight for this expert: (B,) -> (B, 1, 1) for broadcasting
+            # [SAFETY] Use reshape instead of view to handle non-contiguous probability tensors
+            prob_weight = router_probs[:, phase_id].reshape(B, 1, 1)
             
-            # Accumulate weighted output
-            pose_chunks = pose_chunks + prob_weight * pose
-            grip_chunks = grip_chunks + prob_weight * grip
-        
+            # Accumulate: Output += Weight * Expert_Output
+            pose_chunks = pose_chunks + (pose * prob_weight)
+            grip_chunks = grip_chunks + (grip * prob_weight)
+            
         return pose_chunks, grip_chunks
+
+    def forward_single_expert(
+        self,
+        z_traj: Tensor,
+        z_grip: Tensor,
+        phase_id: int,
+        context: Optional[Tensor] = None
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Inference Utility: Force execution of a specific expert for the entire batch.
+        Useful for debugging or analyzing specific expert behaviors.
+        """
+        return self.experts[phase_id](z_traj, z_grip, context)
 
     @classmethod
     def from_planner(
@@ -605,24 +613,26 @@ class ExpertArray(nn.Module):
         context_dim: int = 0
     ) -> "ExpertArray":
         """
-        Factory method to create an ExpertArray by cloning from a SemanticPlanner.
+        Factory Method: Bootstraps an ExpertArray from a pre-trained SemanticPlanner.
         
-        This is the main entry point for bootstrapping MoE from a monolithic policy.
+        This initializes 'num_phases' experts, each starting as a clone of the 
+        planner's generalist heads. This avoids the "cold start" problem.
         
         Args:
-            planner: Pre-trained SemanticPlanner model.
+            planner: Pre-trained SemanticPlanner model (source of weights).
             num_phases: Number of experts to create.
             context_dim: Dimension of context vector for FiLM (0 = disabled).
         
         Returns:
-            ExpertArray with all experts initialized from planner weights.
+            ExpertArray instance.
         """
-        # Extract configuration from planner
+        # 1. Extract Architecture Configuration from Planner
+        # This ensures experts match the router's embedding space exactly
         cfg = ExpertConfig(
             input_dim=planner.cfg.vision_feature_dim,
             chunk_size=planner.cfg.chunk_size,
             dropout=planner.cfg.dropout,
-            num_residual_blocks=4,  # Match planner architecture
+            num_residual_blocks=4,  # Standard default, will be auto-corrected if needed
             context_dim=context_dim
         )
         
@@ -630,6 +640,7 @@ class ExpertArray(nn.Module):
         
         experts = []
         for phase_id in range(num_phases):
+            # 2. Clone weights using the robust PhaseExpert factory
             expert = PhaseExpert.from_planner_heads(
                 traj_head=planner.traj_head,
                 gripper_head=planner.gripper_head,
@@ -644,9 +655,8 @@ class ExpertArray(nn.Module):
     
     def get_expert_parameters(self) -> List[Dict]:
         """
-        Returns parameter groups for optimizer setup.
-        
-        Useful for differential learning rates per expert.
+        Returns parameter groups for optimizers.
+        Useful for applying different learning rates to different experts if needed.
         """
         param_groups = []
         for i, expert in enumerate(self.experts):
@@ -657,18 +667,16 @@ class ExpertArray(nn.Module):
         return param_groups
     
     def freeze_expert(self, phase_id: int):
-        """Freezes a specific expert's parameters."""
+        """Freezes parameters for a specific expert."""
         for param in self.experts[phase_id].parameters():
             param.requires_grad = False
         logger.info(f"[ExpertArray] Expert {phase_id} ({self.PHASE_NAMES.get(phase_id)}) FROZEN")
     
     def unfreeze_expert(self, phase_id: int):
-        """Unfreezes a specific expert's parameters."""
+        """Unfreezes parameters for a specific expert."""
         for param in self.experts[phase_id].parameters():
             param.requires_grad = True
         logger.info(f"[ExpertArray] Expert {phase_id} ({self.PHASE_NAMES.get(phase_id)}) UNFROZEN")
-
-
 # =============================================================================
 # 5. UTILITY FUNCTIONS
 # =============================================================================

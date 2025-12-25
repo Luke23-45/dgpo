@@ -46,7 +46,6 @@ dataset:
   val_path: "/content/pda_data/val/validation_set.lmdb"
   seed: 42
   num_workers: 2
-  resume_checkpoint: "/content/drive/MyDrive/pda/models/moe_post/backups/moe_post_v1_20251224_032823_best_ep7_val0.2592.pt"  # "/content/drive/MyDrive/pda/models/moe_post/moe_latest.pt"
   use_aug: false
   proprio_noise: 0.0  # No noise for post-training (experts specialize on clean data)
   use_gpu_cache: false # [SOTA] Set True to cache entire dataset in VRAM (saves ~5GB RAM)
@@ -103,6 +102,11 @@ training:
   # [ENHANCEMENT C] Contrastive Specialization
   # Disabled for Stage 2 to prevent training experts on OOD data
   lambda_contrastive: 0.0
+
+  resume_checkpoint: null
+
+
+  prefetch_factor: 2
 
 # =============================================================================
 # OPTIMIZER
